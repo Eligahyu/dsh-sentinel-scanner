@@ -1,5 +1,5 @@
-﻿
-> deepseek-harness-sentinel@0.4.3 benchmark
+
+> deepseek-harness-sentinel@0.4.4 benchmark
 > node scripts/benchmark.mjs
 
 === dsh-sentinel benchmark(rule / finding / flow) ===

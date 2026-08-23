@@ -24,21 +24,22 @@
 - [x] **供应链**:自包含安全 tar 解析(traversal/symlink/hardlink/tar bomb);integrity 不匹配 → SEN-SUPPLY-004 + 至少 REVIEW;解包阻止 → SEN-SUPPLY-005 + BLOCK;lockfile 识别统计;secret 形态扩展(github_pat_/npm_/AIza/Anthropic/PEM);persistence 最低限度规则
 - [x] **CI**:GitHub Action(自包含 composite + vendored acorn)+ 示例 workflow + 文档;--fail-on-incomplete(exit 3)/--strict-exit-codes
 - [x] **DSH 集成**:确认无官方 pre-install hook(不伪造),提供 auditPackageBeforeInstall API + 集成设计文档
-- [x] **基准**:三级 benchmark(rule/finding±2 行/flow source→sink);151 项测试
+- [x] **基准**:三级 benchmark(rule/finding±2 行/flow source→sink);199 项测试
 
-### v0.4 ✅(2026-08,Final Release Hardening + Release Engineering,0.4.0→0.4.2)
+### v0.4 ✅(2026-08,Final Release Hardening + Professional Upgrade,0.4.0→0.4.4)
 - [x] 完整度:read/hash/binary-sample/analysis/traversal 失败显式化(coverageSkips + scanComplete=false);filesAnalyzed 真实计数
 - [x] 资源安全:metadata 5MB / tarball 512MB 上限;tarball/quarantine 全生命周期 cleanup(幂等);下载层严格 DNS(默认关)
 - [x] 语义:凭据专属受信端点、multiple taints、bare sink import 绑定、IPv6/mapped SSRF、TypeScript 标注、解构污点
 - [x] 报告:semantic evidence 保留、fingerprint 报告层闭环、SARIF dshFingerprint
 - [x] 发布工程:Action 依赖安装隔离(--prefix/--ignore-scripts)、engines ^22.18.0 || >=24.11.0、CI 3 OS × 2 Node、verify:release
-- [x] 证据:151 项测试全绿;benchmark 32 项(edge 16 项全 1.000);npm 0.4.2 发布
-- [ ] (v0.5 移入)跨文件污点流(require/import 图)
-- [ ] (v0.5 移入)lockfile 依赖图深化(install 脚本依赖链标注)
-- [ ] (v0.5 移入)reachability 图(入口 → 调用链 → 函数级)
-- [ ] (v0.5 移入)攻击链聚合(避免同一链重复计分)
+- [x] 专业分析层:模块图、有界跨文件污点、攻击链、依赖图、能力图、SBOM、provenance
+- [x] TypeScript 模块图降级与 `.js → .ts` 回退;辅助层失败不再误判核心扫描不完整
+- [x] 证据:199 项测试全绿;benchmark 32 项(edge 16 项全 1.000);npm 0.4.4 发布
 
 ### v0.5
+- [ ] pnpm/yarn/bun lockfile 标准化与 install-script 依赖链标注
+- [ ] 动态 import/require、复杂回调/闭包的跨文件 reachability
+- [ ] 原生 TypeScript parser,减少静态 import/export 降级
 - [ ] GitHub Action 拆独立仓库 + 徽章服务
 - [ ] DSH 官方 pre-install hook 对接(若官方提供)
 - [ ] 公开威胁情报(默认关闭,仅上传包名/版本/hash)
@@ -65,7 +66,7 @@
 - [x] 包名 `deepseek-harness-sentinel`;v0.1.0 已发布
 - [x] 全局安装 + CLI 冒烟测试通过
 - [x] 发布 v0.3.1(第二轮修复)
-- [x] 发布 v0.4.0/0.4.1/0.4.2(发布加固 + 发布工程,Node ^22.18.0 || >=24.11.0)
+- [x] 发布 v0.4.0–v0.4.4(发布加固 + 专业分析升级,Node ^22.18.0 || >=24.11.0)
 - [ ] 配置 Trusted Publishing(OIDC)
 
 ### 4. 中文社区传播

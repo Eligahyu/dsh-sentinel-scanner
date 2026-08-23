@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## 0.4.4 (2026-08-23) — Professional Scanner Release
+
+### Added
+
+- 有界 JS/TS 模块图、跨文件污点分析与攻击链聚合。
+- 标准化 npm 依赖图、CycloneDX 1.6 / SPDX 2.3 SBOM、能力图与 provenance 报告层。
+- 真实 DSH corpus 固定 commit 浅克隆验证,不安装依赖、不执行第三方代码。
+
+### Changed
+
+- SBOM 默认工具版本改为统一 `VERSION` 来源,不再错误输出未来版本 `0.5.0`。
+- README 改为完整英文优先、完整中文随后;同步 SECURITY、architecture、roadmap 与示例报告。
+- 测试扩展至 199 项;保留 32 项 rule/finding/flow benchmark。
 
 ### Fixed
 

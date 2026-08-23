@@ -12,6 +12,9 @@ import { scan } from '../engine/index.js'
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 const evil = await scan(join(root, 'test', 'fixtures', 'evil-plugin'))
+// Checked-in examples must be shareable and must not expose the release
+// maintainer's absolute workspace path.
+evil.target.path = '<workspace>/test/fixtures/evil-plugin'
 
 const parts = {
   generatedBy: 'scripts/demo.mjs',

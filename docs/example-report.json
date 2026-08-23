@@ -3,11 +3,11 @@
   "evilFixtureReport": {
     "schemaVersion": 2,
     "tool": "dsh-sentinel",
-    "version": "0.4.2",
-    "scannedAt": "2026-08-20T04:07:30.403Z",
+    "version": "0.4.4",
+    "scannedAt": "2026-08-23T15:49:40.019Z",
     "target": {
       "kind": "path",
-      "path": "C:\\Users\\Administrator\\Desktop\\code\\dsh-sentinel\\test\\fixtures\\evil-plugin",
+      "path": "<workspace>/test/fixtures/evil-plugin",
       "name": ""
     },
     "summary": {
@@ -15,6 +15,7 @@
       "score": 100,
       "scanComplete": true,
       "incompleteScan": false,
+      "incompleteReasons": [],
       "filesDiscovered": 3,
       "filesAnalyzed": 3,
       "findingsTotal": 23,
@@ -49,9 +50,10 @@
       },
       "byContext": {
         "source": 23,
-        "test": 0
+        "test": 0,
+        "development": 0
       },
-      "scanMs": 22
+      "scanMs": 23
     },
     "scanCoverage": {
       "sourceFiles": 3,
@@ -94,7 +96,7 @@
         "recommendation": "拒绝安装。安装即执行远程代码的插件不可信。",
         "package": "",
         "testFile": false,
-        "fingerprint": "41763a3bc3120c9c2a450fe1e18e601e2f654d92d034436766b06fce3f08c90c"
+        "fingerprint": "ad6a56965bcd949ab4a15977c434d222d51be807518fab44242a15c2d165cbae"
       },
       {
         "id": "SEN-CRED-001",
@@ -108,7 +110,7 @@
         "recommendation": "拒绝安装。DSH 插件没有读取用户私钥的任何正当理由。",
         "package": "",
         "testFile": false,
-        "fingerprint": "83d554b92601b7e0defca9d9b85e9ac90c6e9ea5bc6e14df0c6600906b34baf7"
+        "fingerprint": "e1a14ca427617ed2a5b34f5acfd3ea35d10ac23e3ab7b8953a3b2e1b21718ca1"
       },
       {
         "id": "SEN-TAINT-003",
@@ -143,7 +145,7 @@
         "startColumn": 3,
         "endLine": 20,
         "endColumn": 22,
-        "fingerprint": "c7f43fb500ffda316b0b81f94d043ad53e8b536f75901cadf17408d134660f55"
+        "fingerprint": "f9ee09cee8339cd8de54477e9b36662c1085a6b80c78f35228a2bac975828b63"
       },
       {
         "id": "SEN-EXFIL-001",
@@ -157,7 +159,7 @@
         "recommendation": "拒绝安装。正常插件不会把数据发往这些端点。",
         "package": "",
         "testFile": false,
-        "fingerprint": "e3697fb37ef0b0afb5ebb7d3bd54f9a9685ad859e19728a138658e4fcd21f67c"
+        "fingerprint": "a9578ff2b78da070c0b430a52fc1c4890c094001fe280ba9db2afa94bc0392d3"
       },
       {
         "id": "SEN-TAINT-001",
@@ -192,7 +194,7 @@
         "startColumn": 3,
         "endLine": 23,
         "endColumn": 78,
-        "fingerprint": "d2e005643848da75fe2d9a82377f3137e545608d96945b168a9350e467b5be00"
+        "fingerprint": "9ec01b8d445f007a1c8123f840900a4c699d041cbfef257b3052dde707a70a9a"
       },
       {
         "id": "SEN-EXEC-001",
@@ -206,7 +208,7 @@
         "recommendation": "拒绝安装,除非你能逐行审查网络载荷并信任其来源。任何\"下载即执行\"的插件都不应进入你的 profile。",
         "package": "",
         "testFile": false,
-        "fingerprint": "1d1ba692e122cb55e74f673aa72d428167ab6ac509041883282b1e99872e8d1e"
+        "fingerprint": "64a08e04d50f33272a2846336643e9a898a3032fcc3735f90c7cf149ee6998eb"
       },
       {
         "id": "SEN-FS-001",
@@ -220,7 +222,7 @@
         "recommendation": "拒绝安装。任何指向用户主目录或系统目录的递归删除都是恶意特征。",
         "package": "",
         "testFile": false,
-        "fingerprint": "a7a43209771fc19c5f29d6e0fcd584ed5d3258b5ad4edb2a3207e5e0dfe7bb03"
+        "fingerprint": "f37a9fe4bfe05f49e6d20bff978d88c393b2bdcef39052092687e46a833590f5"
       },
       {
         "id": "SEN-CRED-002",
@@ -234,7 +236,7 @@
         "recommendation": "确认凭据读取是否功能必需(如官方 API 客户端),以及凭据是否仅用于本机调用、绝不出网。",
         "package": "",
         "testFile": false,
-        "fingerprint": "a98d2bebe629011dc91651fb2ca4e982d23f6de00ece86c3d9ee8aca5cd20def"
+        "fingerprint": "a61772b27840f9a44d877abda1407358a54d9233b9b69ffb99c9830ea6849a5c"
       },
       {
         "id": "SEN-EXEC-003",
@@ -248,7 +250,7 @@
         "recommendation": "审查动态执行的内容来源;任何来自网络、环境变量或解码字符串的动态执行都应视为危险。",
         "package": "",
         "testFile": false,
-        "fingerprint": "70043975573287994b25574c31df9c1420764a9038813734a3009c82aa8bf2df"
+        "fingerprint": "9d20f04eafd6de9431c23ff55e2362d1c29a32cae87a09a573a2b125f3ef684f"
       },
       {
         "id": "SEN-EXEC-003",
@@ -263,7 +265,7 @@
         "package": "",
         "testFile": false,
         "suppressedForScore": true,
-        "fingerprint": "70043975573287994b25574c31df9c1420764a9038813734a3009c82aa8bf2df"
+        "fingerprint": "06c28ea7e11147212070a0d2a0874e2511bf0760f757ba3758e82276d4737f0f"
       },
       {
         "id": "SEN-EXEC-004",
@@ -277,7 +279,7 @@
         "recommendation": "视为恶意特征:正常插件不需要对解码后的字符串执行代码。",
         "package": "",
         "testFile": false,
-        "fingerprint": "433183ce3a4e138a0ff0818ee758c3540108a4d07be0934f3e185289b2ca117e"
+        "fingerprint": "07fd7ce27a0f02a1c6d4b6a4d4b143e67468a40874ed8337e665b671255abdcb"
       },
       {
         "id": "SEN-CRED-002",
@@ -291,7 +293,7 @@
         "recommendation": "确认凭据读取是否功能必需(如官方 API 客户端),以及凭据是否仅用于本机调用、绝不出网。",
         "package": "",
         "testFile": false,
-        "fingerprint": "a98d2bebe629011dc91651fb2ca4e982d23f6de00ece86c3d9ee8aca5cd20def"
+        "fingerprint": "0681ee12f5cc28eef8a0182022d2ff0e31fbbd52be4eaf0d8c6bb14b803801a3"
       },
       {
         "id": "SEN-EXFIL-002",
@@ -305,7 +307,7 @@
         "recommendation": "确认请求目标完全可信,且凭据绝不出本机。任何将 env 拼进 URL 查询参数的行为都应视为危险。",
         "package": "",
         "testFile": false,
-        "fingerprint": "a943ddda8abebe6917a358c418c9e40728c34ba15d32d55a4ec28366184f4f73"
+        "fingerprint": "1dca9e024b0ca5da3ef185bff7636febbb2c39948ab68fd4ac2c661a273f2b55"
       },
       {
         "id": "SEN-OBF-001",
@@ -319,7 +321,7 @@
         "recommendation": "先解码再判断:若解码结果是可读代码或数据且无文档说明,按恶意处理。",
         "package": "",
         "testFile": false,
-        "fingerprint": "deb97ce1f00e8f8c62bdc4fc41b1d42716f8f2d2fca2b7269bcaf4c7617b724e"
+        "fingerprint": "0f5a416f1568ad7aa962e2bffd56a54bd6fd220c9a5b7b20b80a37b6701f5714"
       },
       {
         "id": "SEN-OBF-001",
@@ -333,7 +335,7 @@
         "recommendation": "先解码再判断:若解码结果是可读代码或数据且无文档说明,按恶意处理。",
         "package": "",
         "testFile": false,
-        "fingerprint": "deb97ce1f00e8f8c62bdc4fc41b1d42716f8f2d2fca2b7269bcaf4c7617b724e"
+        "fingerprint": "12a1f38694fd1f92d9c5b3c9fe7433f41c34daaa7fd59d30ad40d62f032efc8c"
       },
       {
         "id": "SEN-INST-001",
@@ -347,7 +349,7 @@
         "recommendation": "逐行审阅脚本内容。纯构建类(prepare: npm run build / tsc / tsdown)可接受;含网络下载、base64、chmod 等请按 SEN-INST-002 处理。",
         "package": "",
         "testFile": false,
-        "fingerprint": "40c8946aa4767b110e0db7fb1f0e8774b2192c255ea89184d747ed7db9183d90"
+        "fingerprint": "051e0b2e1302bdad53fec028af3689fd262d38f28210a79b1bd3f2ae48b18df0"
       },
       {
         "id": "SEN-EXFIL-003",
@@ -361,7 +363,7 @@
         "recommendation": "确认编码目的;若为\"让凭据不那么显眼\"而编码,按外传处理。",
         "package": "",
         "testFile": false,
-        "fingerprint": "03ffa936f36bfe0df4542808829ec06418333dfa94e45b2aa6723ae8b4f6d454"
+        "fingerprint": "2a5e4a008cc956aed2256c882aaae0a93ee41daba552c39ce47453e7b9373f7d"
       },
       {
         "id": "SEN-AGENT-005",
@@ -376,7 +378,7 @@
         "package": "",
         "testFile": false,
         "detail": "文档/测试/注释中出现投毒短语(需结合上下文判断)",
-        "fingerprint": "fd5c1151cc4221fb39ec19a30cec9632fedb6cb4eb821f36d4aade9aa60bb1a3"
+        "fingerprint": "b1cc85dba7e07e3d226305b119aab4cde4285cf1fa3ee6f089d41bfa6f4ab6e9"
       },
       {
         "id": "SEN-NET-001",
@@ -390,7 +392,7 @@
         "recommendation": "列出所有请求端点;确认无凭据、无工作区内容外传。",
         "package": "",
         "testFile": false,
-        "fingerprint": "aeb6d1c06024b2269938ce4b7a47606215869830118f5d36c4357e420f225067"
+        "fingerprint": "5168bde10a6f1628108b362912023f5d7523c8f90cd000124deb4eb287bfc088"
       },
       {
         "id": "SEN-EXEC-002",
@@ -404,7 +406,7 @@
         "recommendation": "确认每个执行点都是功能必需、命令与参数均为静态常量(不含拼接的用户输入/环境变量),且沙箱外执行需用户知情。",
         "package": "",
         "testFile": false,
-        "fingerprint": "1158c2ad7dec90a8f50bf542b3666d578447d420f0a09ce8122c20941b208934"
+        "fingerprint": "c537ce6e9dbb30c8cea8275a6f0271c05a821558d9b1ffa1b8655e36c523bcb8"
       },
       {
         "id": "SEN-EXEC-002",
@@ -418,7 +420,7 @@
         "recommendation": "确认每个执行点都是功能必需、命令与参数均为静态常量(不含拼接的用户输入/环境变量),且沙箱外执行需用户知情。",
         "package": "",
         "testFile": false,
-        "fingerprint": "1158c2ad7dec90a8f50bf542b3666d578447d420f0a09ce8122c20941b208934"
+        "fingerprint": "6f420e7a07648759cc955969fec39b0af6e2411a731efeb663b4c252dda6c516"
       },
       {
         "id": "SEN-MAN-007",
@@ -432,7 +434,7 @@
         "recommendation": "",
         "package": "",
         "testFile": false,
-        "fingerprint": "72f8e5347807a5e8e191eb1b674a5eb0c419b63ff709ab1b8a068b09b0223466"
+        "fingerprint": "558c1cd4289ce24ff697593fe24bcbeaedff5125020118ddcf26f438e7f10f7d"
       },
       {
         "id": "SEN-MAN-008",
@@ -446,10 +448,89 @@
         "recommendation": "",
         "package": "",
         "testFile": false,
-        "fingerprint": "3163c96a59acd0ba4f1a665e25bc867d7e5d7f60dfbd67cbaeab9fa31fb3cbc1"
+        "fingerprint": "017c5dd7daf202c4fa5fc5ee20e973a242f6f616497bb99a3a0316a3611d26fb"
       }
     ],
     "attackChains": [],
+    "analysisLayers": {
+      "moduleGraph": {
+        "complete": true,
+        "nodes": [
+          {
+            "path": "plugin/index.js",
+            "bytes": 1902,
+            "sha256": "e0674b72d43bce2162b677b9532d163f69599774a9b7eef409528312c4a7353b",
+            "parser": "acorn",
+            "imports": [
+              "node:fs",
+              "node:child_process"
+            ]
+          }
+        ],
+        "edges": [],
+        "unresolved": [
+          {
+            "from": "plugin/index.js",
+            "specifier": "node:fs",
+            "external": true,
+            "start": 247
+          },
+          {
+            "from": "plugin/index.js",
+            "specifier": "node:child_process",
+            "external": true,
+            "start": 273
+          }
+        ],
+        "failures": [],
+        "warnings": [],
+        "crossFile": {
+          "findings": [],
+          "attackChains": [],
+          "reachability": [],
+          "failures": [],
+          "complete": true
+        }
+      },
+      "dependencyGraph": {
+        "complete": true,
+        "nodes": 0,
+        "edges": 0,
+        "unresolved": 0,
+        "failures": []
+      },
+      "capabilityGraph": {
+        "complete": true,
+        "tools": [
+          {
+            "name": "(unbound)",
+            "capabilities": [
+              "credential-access",
+              "decode"
+            ],
+            "findingCount": 2
+          }
+        ],
+        "capabilities": [
+          "credential-access",
+          "decode"
+        ],
+        "attackPaths": [],
+        "failures": []
+      },
+      "sbom": {
+        "status": "not-requested",
+        "format": null,
+        "components": 0,
+        "digest": null,
+        "failures": []
+      },
+      "provenance": {
+        "status": "not-requested",
+        "verified": false,
+        "reasons": []
+      }
+    },
     "ignored": [],
     "hardSkipped": [],
     "policySkips": [],
@@ -464,15 +545,15 @@
       "largestFiles": [
         {
           "file": "plugin/index.js",
-          "bytes": 1869
+          "bytes": 1902
         },
         {
           "file": "package.json",
-          "bytes": 260
+          "bytes": 274
         },
         {
           "file": "cordis.patch.yml",
-          "bytes": 65
+          "bytes": 68
         }
       ]
     }

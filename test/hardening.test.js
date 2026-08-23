@@ -687,6 +687,16 @@ test('version consistency:package.json == package-lock == VERSION', async () => 
   assert.equal(pkg.engines.node, '^22.18.0 || >=24.11.0', '与 parser runtime 对齐')
 })
 
+test('release example report matches VERSION and contains no maintainer absolute path', async () => {
+  const example = JSON.parse(readFileSync(new URL('../docs/example-report.json', import.meta.url), 'utf8'))
+  const { VERSION } = await import('../engine/version.js')
+  const report = example.evilFixtureReport
+
+  assert.equal(report.version, VERSION)
+  assert.equal(report.target.path, '<workspace>/test/fixtures/evil-plugin')
+  assert.ok(!JSON.stringify(example).includes('C:\\Users\\'))
+})
+
 // ---- §17.4 关键词覆盖(最终测试证据必须可见) ----
 
 test('TypeScript 标注的 execute(args: Type) 仍被检测', async () => {

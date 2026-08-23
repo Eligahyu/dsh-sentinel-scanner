@@ -35,6 +35,9 @@ engine/
     ast.js                 acorn 解析(含 vendored 回退)+ callee/别名/常量拼接
     taint.js               AST 污点流:source → propagation → sink,跨函数 MVP
     harness.js             defineTool 识别、SSRF 细化、prompt 投毒分级、能力不匹配证据
+    module-graph.js        有界 JS/TS 模块图、扩展名回退、containment 与 warning/failure
+    cross-file-taint.js    基于模块图的有界跨文件 source → sink 分析与攻击链
+    capability-graph.js    从 finding 归一化工具能力与策略不匹配
     index.js               语义入口 + 正则兜底
   package/
     audit.js               安装前审计 API(auditPackageBeforeInstall)
@@ -48,6 +51,9 @@ engine/
     entropy.js             Shannon entropy
   supplychain/
     lockfile.js            lockfile 识别与依赖统计
+    dependency-graph.js    package-lock 标准化依赖节点/边;其他格式显式降级
+    sbom.js                CycloneDX 1.6 / SPDX 2.3 确定性序列化
+    provenance.js          metadata-only provenance 证据校验
     osv.js                 OSV 查询(默认关闭)
   output/
     sarif.js               SARIF 2.1.0(相对路径、稳定指纹)
@@ -135,10 +141,12 @@ profile package.json direct dependencies
 - env 凭据 → 网络(SEN-TAINT-001,受信端点豁免)
 - 文件读取/记忆 → 网络(SEN-TAINT-002)、解码 → 执行(SEN-TAINT-003)
 - SSRF 目标细化:云元数据端点 → critical
+- 有界跨文件污点流:静态 import/require 图上的参数传递与攻击链聚合
+- TypeScript `.js` specifier → `.ts/.tsx/.mts/.cts` 源文件回退;声明文件与开发入口降级为 warning
 
 不支持(已知限制):
-- 跨文件污点流(单文件内传播)
-- 复杂控制流(回调/闭包捕获/原型链)
+- 动态 import/require、复杂回调/闭包捕获/原型链的完整跨文件传播
+- 完整 TypeScript 类型语法 AST;超出 Acorn 能力时使用静态 import/export 降级
 - 非 JS 语言的语义(走正则)
 
 ## 7. 供应链审计
@@ -148,7 +156,8 @@ profile package.json direct dependencies
 - integrity:sha512 base64 与实际 tarball 比对;不匹配 → SEN-SUPPLY-004 + 至少 REVIEW
 - 解包被阻止 → SEN-SUPPLY-005 + BLOCK-RECOMMENDED + scanComplete=false
 - quarantine 目录在任何 success/failure/exception 路径都 finally cleanup
-- lockfile 识别(package-lock/shrinkwrap/pnpm/yarn/bun)+ 依赖统计
+- lockfile 识别(package-lock/shrinkwrap/pnpm/yarn/bun)+ 依赖统计;
+  package-lock 标准化为依赖图,其他复杂格式显式 unsupported/degraded
 
 ## 8. 报告 schema v2
 

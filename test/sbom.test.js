@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { toCycloneDx, toSpdx, sbomDigest } from '../engine/supplychain/sbom.js'
+import { VERSION } from '../engine/version.js'
 import { main } from '../bin/sentinel.mjs'
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -14,6 +15,14 @@ const graph = {
   ],
   edges: [{ from: 'node_modules/alpha', to: 'node_modules/beta', name: 'beta', kind: 'runtime' }],
 }
+
+test('SBOM serializers default to the scanner package version', () => {
+  const cycloneDx = toCycloneDx(graph)
+  const spdx = toSpdx(graph)
+
+  assert.equal(cycloneDx.metadata.tools[0].version, VERSION)
+  assert.deepEqual(spdx.creationInfo.creators, [`Tool: dsh-sentinel-${VERSION}`])
+})
 
 test('CycloneDX output is deterministic and contains purls, hashes, and edges', () => {
   const a = toCycloneDx(graph, { toolVersion: '0.5.0' })

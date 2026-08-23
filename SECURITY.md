@@ -4,9 +4,9 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.3.x | ✅ 当前版本 |
-| 0.2.x | ✅ 安全修复 |
-| 0.1.x | ⚠️ 仅安全修复 |
+| 0.4.x | ✅ 当前版本 |
+| 0.3.x | ⚠️ 仅关键安全修复 |
+| ≤ 0.2.x | ❌ 不再支持 |
 
 ## Reporting a Vulnerability
 
@@ -62,8 +62,8 @@ dsh-sentinel 是一个安全扫描工具,自身的安全同样重要。请通过
 - 任何 ignore / skip / 截断都进入报告(ignored / hardSkipped / policySkips /
   coverageSkips / scanComplete),不完整扫描绝不显示 clean
 - 默认不上传任何源码;未来的联网能力只会上传包名/版本/hash
-- **不保证检测所有恶意插件**:静态启发式扫描存在天然漏报(跨文件污点、复杂控制流、
-  非 JS 语言、运行时混淆),扫描通过 ≠ 插件安全
+- **不保证检测所有恶意插件**:静态启发式扫描存在天然漏报(跨文件污点分析是有界的;
+  复杂回调/闭包/原型链、非 JS 语言语义和运行时混淆仍是能力边界),扫描通过 ≠ 插件安全
 - **SSRF 下载层有显式目标限制**:`--strict-dns`(或 `SENTINEL_STRICT_DNS=1`)在下载前
   解析 hostname 并拒绝私有/保留地址;注意 DNS rebinding 无法完全消除(TOCTOU),
   严格校验降低风险而非绝对防护

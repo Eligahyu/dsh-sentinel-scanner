@@ -1,6 +1,7 @@
 /** Deterministic CycloneDX 1.6 and SPDX 2.3 serializers. */
 
 import { createHash } from 'node:crypto'
+import { VERSION } from '../version.js'
 
 function purl(node) {
   return `pkg:npm/${node.name}@${node.version}`
@@ -29,7 +30,7 @@ export function sbomDigest(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
 }
 
-export function toCycloneDx(graph, { toolVersion = '0.5.0', serialNumber = null } = {}) {
+export function toCycloneDx(graph, { toolVersion = VERSION, serialNumber = null } = {}) {
   const nodes = sortedNodes(graph)
   const refs = new Map(nodes.map((node) => [node.id, purl(node)]))
   const components = nodes.map((node) => {
@@ -72,7 +73,7 @@ function spdxId(ref) {
   return `SPDXRef-${createHash('sha256').update(ref).digest('hex').slice(0, 16)}`
 }
 
-export function toSpdx(graph, { toolVersion = '0.5.0', created = '1970-01-01T00:00:00Z' } = {}) {
+export function toSpdx(graph, { toolVersion = VERSION, created = '1970-01-01T00:00:00Z' } = {}) {
   const nodes = sortedNodes(graph)
   const refs = new Map(nodes.map((node) => [node.id, spdxId(purl(node))]))
   const basisDigest = sbomDigest(canonicalBasis(graph))
