@@ -909,6 +909,7 @@ test('release:publish workflow binds the tag to VERSION and rejects republishing
   const workflow = readFileSync(join(root, '.github', 'workflows', 'publish.yml'), 'utf8')
 
   assert.ok(!workflow.includes('workflow_dispatch'), '发布只能由不可变版本标签触发')
+  assert.ok(workflow.includes("'v*.*.*'"), '发布工作流不得被 v0.4 等浮动 Action 标签触发')
   assert.ok(workflow.includes('GITHUB_REF_NAME'), '发布门禁必须读取触发标签')
   assert.ok(workflow.includes('v${package_version}'), '标签必须精确等于 package.json 版本')
   assert.ok(workflow.includes('npm view "${package_name}@${package_version}" version'), '发布前必须拒绝已存在的 npm 版本')

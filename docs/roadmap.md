@@ -26,7 +26,7 @@
 - [x] **DSH 集成**:确认无官方 pre-install hook(不伪造),提供 auditPackageBeforeInstall API + 集成设计文档
 - [x] **基准**:三级 benchmark(rule/finding±2 行/flow source→sink);151 项测试
 
-### v0.4.4 🚧(2026-08-23,Professional Scanner Release Candidate)
+### v0.4.4 ✅(2026-08-23,Professional Scanner Release)
 - [x] 完整度:read/hash/binary-sample/analysis/traversal 失败显式化(coverageSkips + scanComplete=false);filesAnalyzed 真实计数
 - [x] 资源安全:metadata 5MB / tarball 512MB 上限;tarball/quarantine 全生命周期 cleanup(幂等);下载层严格 DNS(默认关)
 - [x] 语义:凭据专属受信端点、multiple taints、bare sink import 绑定、IPv6/mapped SSRF、TypeScript 标注、解构污点
@@ -35,7 +35,7 @@
 - [x] 专业分析层:模块图、有界跨文件污点、攻击链、依赖图、能力图、SBOM、provenance
 - [x] TypeScript 模块图降级与 `.js → .ts` 回退;辅助层失败不再误判核心扫描不完整
 - [x] 证据:200 项测试全绿;benchmark 32 项(edge 16 项全 1.000);实际 tarball 安装冒烟通过
-- [ ] npm 0.4.4 与 GitHub Release(由 `v0.4.4` 标签触发后核验)
+- [x] npm 0.4.4 与 GitHub Release(已核验 registry latest、shasum 与 integrity)
 
 ### v0.5
 - [ ] pnpm/yarn/bun lockfile 标准化与 install-script 依赖链标注
@@ -68,7 +68,7 @@
 - [x] 全局安装 + CLI 冒烟测试通过
 - [x] 发布 v0.3.1(第二轮修复)
 - [x] 发布 v0.4.0–v0.4.3(发布加固,Node ^22.18.0 || >=24.11.0)
-- [ ] 发布 v0.4.4(专业分析升级;等待 tag workflow 与 npm registry 核验)
+- [x] 发布 v0.4.4(专业分析升级;npm registry 与 GitHub Release 已核验)
 - [ ] 配置 Trusted Publishing(OIDC)
 
 ### 4. 中文社区传播
