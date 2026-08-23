@@ -8,6 +8,7 @@ lib/
 # Local scratch
 scratch/
 .tmp/
+.worktrees/
 
 # Editor / OS
 .DS_Store
