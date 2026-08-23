@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
 
 permissions:
   id-token: write # Required for OIDC (trusted publishing)
@@ -16,6 +15,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Validate release tag and npm version
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_name=$(node -p "require('./package.json').name")
+          package_version=$(node -p "require('./package.json').version")
+
+          if [ "${GITHUB_REF_TYPE}" != "tag" ] || [ "${GITHUB_REF_NAME}" != "v${package_version}" ]; then
+            echo "Release tag ${GITHUB_REF_NAME} does not match package version v${package_version}" >&2
+            exit 1
+          fi
+
+          set +e
+          view_output=$(npm view "${package_name}@${package_version}" version --json 2>&1)
+          view_code=$?
+          set -e
+          if [ "$view_code" -eq 0 ]; then
+            echo "${package_name}@${package_version} is already published" >&2
+            exit 1
+          fi
+          if ! grep -Eq 'E404|404 Not Found' <<<"$view_output"; then
+            echo "$view_output" >&2
+            exit "$view_code"
+          fi
       - uses: actions/setup-node@v6
         with:
           node-version: '24'

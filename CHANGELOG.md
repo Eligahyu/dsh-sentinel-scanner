@@ -12,7 +12,7 @@
 
 - SBOM 默认工具版本改为统一 `VERSION` 来源,不再错误输出未来版本 `0.5.0`。
 - README 改为完整英文优先、完整中文随后;同步 SECURITY、architecture、roadmap 与示例报告。
-- 测试扩展至 199 项;保留 32 项 rule/finding/flow benchmark。
+- 测试扩展至 200 项;保留 32 项 rule/finding/flow benchmark。
 
 ### Fixed
 
@@ -28,7 +28,7 @@
 
 ### Verification
 
-- 197 项测试全绿；32 项 benchmark：rule F1 0.976、finding F1 0.957、flow F1 1.000。
+- 200 项测试全绿；32 项 benchmark：rule F1 0.976、finding F1 0.957、flow F1 1.000。
 - 6 个固定 commit 的真实 DSH 插件仓库全部 `scanComplete=true`。
 
 ## 0.4.3 (2026-08) — 文档同步

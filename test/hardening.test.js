@@ -691,10 +691,19 @@ test('release example report matches VERSION and contains no maintainer absolute
   const example = JSON.parse(readFileSync(new URL('../docs/example-report.json', import.meta.url), 'utf8'))
   const { VERSION } = await import('../engine/version.js')
   const report = example.evilFixtureReport
+  const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)))
+  const strings = []
+  JSON.stringify(example, (_key, value) => {
+    if (typeof value === 'string') strings.push(value)
+    return value
+  })
 
   assert.equal(report.version, VERSION)
   assert.equal(report.target.path, '<workspace>/test/fixtures/evil-plugin')
-  assert.ok(!JSON.stringify(example).includes('C:\\Users\\'))
+  for (const value of strings) {
+    assert.ok(!value.includes(repositoryRoot), '示例不得包含当前仓库绝对路径')
+    assert.doesNotMatch(value, /(?:[A-Za-z]:[\\/](?:Users|Documents and Settings)[\\/]|\/(?:home|Users)\/[^/\s]+\/)/)
+  }
 })
 
 // ---- §17.4 关键词覆盖(最终测试证据必须可见) ----
@@ -893,6 +902,16 @@ test('release:action npm ci 只作用于 github.action_path 且禁止 lifecycle'
     actionText.includes('github.action_path }}/bin/sentinel.mjs'),
     'CLI 必须从 github.action_path 解析',
   )
+})
+
+test('release:publish workflow binds the tag to VERSION and rejects republishing', () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+  const workflow = readFileSync(join(root, '.github', 'workflows', 'publish.yml'), 'utf8')
+
+  assert.ok(!workflow.includes('workflow_dispatch'), '发布只能由不可变版本标签触发')
+  assert.ok(workflow.includes('GITHUB_REF_NAME'), '发布门禁必须读取触发标签')
+  assert.ok(workflow.includes('v${package_version}'), '标签必须精确等于 package.json 版本')
+  assert.ok(workflow.includes('npm view "${package_name}@${package_version}" version'), '发布前必须拒绝已存在的 npm 版本')
 })
 
 // ---- P0-2: traversal completeness ----
