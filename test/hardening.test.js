@@ -915,6 +915,22 @@ test('release:publish workflow binds the tag to VERSION and rejects republishing
   assert.ok(workflow.includes('npm view "${package_name}@${package_version}" version'), '发布前必须拒绝已存在的 npm 版本')
 })
 
+test('release:CI executes the complete package test contract on Node 24 actions', () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+  const workflowsDir = join(root, '.github', 'workflows')
+  const testWorkflow = readFileSync(join(workflowsDir, 'test.yml'), 'utf8')
+  const workflowTexts = ['test.yml', 'action-smoke.yml', 'sentinel.yml', 'publish.yml']
+    .map((name) => readFileSync(join(workflowsDir, name), 'utf8'))
+
+  assert.match(testWorkflow, /run:\s+npm test(?:\r?\n|$)/, 'CI 必须调用 package.json 的完整测试契约')
+  assert.doesNotMatch(testWorkflow, /run:\s+node --test/, 'CI 不得维护一份会过期的测试文件清单')
+  for (const workflow of workflowTexts) {
+    assert.doesNotMatch(workflow, /actions\/checkout@v[1-6]\b/, 'checkout 必须使用 Node 24 运行时的 v7')
+    assert.doesNotMatch(workflow, /actions\/setup-node@v[1-6]\b/, 'setup-node 必须使用 Node 24 运行时的 v7')
+    assert.doesNotMatch(workflow, /github\/codeql-action\/upload-sarif@v[1-3]\b/, 'upload-sarif 必须使用 Node 24 运行时的 v4')
+  }
+})
+
 // ---- P0-2: traversal completeness ----
 
 test('completeness:目录 walk 失败 → scanComplete=false(§14)', async () => {

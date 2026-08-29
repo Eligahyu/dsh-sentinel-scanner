@@ -188,7 +188,7 @@ jobs:
   sentinel:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Scan plugin
         uses: Eligahyu/dsh-sentinel-scanner@v0.4
@@ -200,7 +200,7 @@ jobs:
 
       - name: Upload SARIF
         if: always() && hashFiles('sentinel.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: sentinel.sarif
 ```
@@ -551,7 +551,7 @@ jobs:
   sentinel:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Scan plugin
         uses: Eligahyu/dsh-sentinel-scanner@v0.4
@@ -563,7 +563,7 @@ jobs:
 
       - name: Upload SARIF
         if: always() && hashFiles('sentinel.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: sentinel.sarif
 ```
