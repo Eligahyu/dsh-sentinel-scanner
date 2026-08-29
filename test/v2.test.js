@@ -373,6 +373,24 @@ test('repository self-scan policy covers the shipped adapter without active find
     '自扫描必须证明已分析发布包中的插件适配器')
 })
 
+test('local .worktrees metadata is never scanned as nested project source', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'v2-worktree-metadata-'))
+  try {
+    mkdirSync(join(tmp, '.worktrees', 'branch'), { recursive: true })
+    writeFileSync(join(tmp, 'index.js'), 'export const safe = true\n')
+    writeFileSync(join(tmp, '.worktrees', 'branch', 'evil.js'), "eval(args.command)\n")
+
+    for (const mode of ['source', 'package']) {
+      const report = await scan(tmp, { mode })
+      assert.equal(report.findings.some((finding) => finding.file.includes('.worktrees/')), false)
+      assert.equal(report.summary.filesAnalyzed, 1)
+      assert.equal(report.analysisLayers.moduleGraph.nodes.some((node) => node.path.includes('.worktrees/')), false)
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
 // ─────────────────────────── overlap suppression ───────────────────────────
 
 test('SEN-AGENT-001 抑制同一行泛化 SEN-EXEC-002 的评分(证据保留)', async () => {

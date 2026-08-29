@@ -18,6 +18,7 @@
 - 支持带安全 options 参数的 `spawn` / `execFile` 调用，但 `shell` 选项仍保持告警。
 - 仅对明确的开发/语料脚本降权；未知 `scripts/**` 文件继续按运行时源码计分。
 - ignore 报告区分匹配条目和被剪枝目录，不再把未遍历目录误称为已统计文件。
+- 本地 `.worktrees/` 作为 Git 工作树元数据目录跳过，避免把并行检出重复当作目标源码。
 
 ## 0.4.4 (2026-08-23) — Professional Scanner Release
 

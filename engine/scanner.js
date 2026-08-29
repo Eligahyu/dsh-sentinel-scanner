@@ -48,14 +48,14 @@ export const EXEC_BINARY_EXTENSIONS = new Set([
 
 /** source mode 跳过的目录(GitHub 源码仓库视角)。 */
 export const SKIP_DIRECTORIES = new Set([
-  '.git', 'node_modules', 'dist', 'build', 'coverage', '.next', '.nuxt',
+  '.git', '.worktrees', 'node_modules', 'dist', 'build', 'coverage', '.next', '.nuxt',
   '.svelte-kit', '__pycache__', '.venv', 'venv', 'vendor', '.pytest_cache',
   '.turbo', '.cache', '.idea', '.vscode', 'target', 'out', 'scratch',
 ])
 
 /** package/profile mode 仍跳过的目录:实际执行产物(dist/build/lib/out/bundle)必须扫描。 */
 export const SKIP_PACKAGE_DIRECTORIES = new Set([
-  '.git', 'node_modules', 'coverage', '__pycache__', '.venv', 'venv',
+  '.git', '.worktrees', 'node_modules', 'coverage', '__pycache__', '.venv', 'venv',
   '.pytest_cache', '.cache', '.idea', '.vscode', 'scratch',
 ])
 
