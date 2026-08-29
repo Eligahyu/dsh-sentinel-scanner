@@ -354,7 +354,7 @@ evasion, and hardening-edge groups. The current checked-in benchmark records:
 | Hardening edge group | 1.000 | 1.000 | 1.000 |
 
 These metrics describe the checked-in corpus, not all real-world plugins. The
-project also maintains 200 automated tests covering the engine, CLI, plugin
+project also maintains 205 automated tests covering the engine, CLI, plugin
 loading, module/cross-file analysis, supply-chain layers, report contracts, and
 hardening behavior.
 
@@ -367,7 +367,7 @@ npm run verify:release
 ## Development
 
 ```sh
-npm install
+npm ci --ignore-scripts --no-audit --no-fund
 npm test              # automated test suite
 npm run benchmark     # rule / finding / flow benchmark
 npm run docs:rules    # regenerate docs/rules.md
@@ -392,7 +392,9 @@ normalization, stronger interprocedural reachability, larger public corpora, and
 stable integration contracts. See the [full roadmap](docs/roadmap.md).
 
 Issues and pull requests that add test-backed detections, reduce false positives,
-or improve documentation are welcome.
+or improve documentation are welcome. Before contributing, read the
+[contributing guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md).
+Report scanner vulnerabilities privately under the [security policy](SECURITY.md).
 
 ## License
 
@@ -681,7 +683,7 @@ npm metadata
 | Source-to-sink flow | 1.000 | 1.000 | 1.000 |
 | Hardening edge 分组 | 1.000 | 1.000 | 1.000 |
 
-这些数字只描述仓库内标注语料，不代表所有真实插件。项目目前有 200 项自动化测试，覆盖
+这些数字只描述仓库内标注语料，不代表所有真实插件。项目目前有 205 项自动化测试，覆盖
 引擎、CLI、插件加载、模块/跨文件分析、供应链层、报告契约和发布加固。
 
 ```sh
@@ -693,7 +695,7 @@ npm run verify:release
 ## 开发、路线图与贡献
 
 ```sh
-npm install
+npm ci --ignore-scripts --no-audit --no-fund
 npm test              # 自动化测试
 npm run benchmark     # rule / finding / flow 三级基准
 npm run docs:rules    # 重新生成 docs/rules.md
@@ -710,7 +712,9 @@ SARIF、二进制检查、模块/依赖/能力图、跨文件分析、SBOM、pro
 release verification。后续重点是更广的语言语义、更深入的 lockfile 标准化、跨过程
 reachability、更大的公开语料和稳定集成契约。详见[完整路线图](docs/roadmap.md)。
 
-欢迎通过 Issue 或 Pull Request 增加有测试覆盖的规则、降低误报或完善文档。
+欢迎通过 Issue 或 Pull Request 增加有测试覆盖的规则、降低误报或完善文档。提交前请阅读
+[贡献指南](CONTRIBUTING.md)与[行为准则](CODE_OF_CONDUCT.md)；扫描器自身漏洞必须按
+[安全策略](SECURITY.md)私密报告。
 
 ## License
 

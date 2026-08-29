@@ -1,0 +1,44 @@
+name: False positive
+description: Report a safe construct that dsh-sentinel flags incorrectly.
+title: '[False positive] '
+labels: [false-positive]
+body:
+  - type: markdown
+    attributes:
+      value: Thank you for improving detection quality. Remove secrets and private data before submitting.
+  - type: input
+    id: version
+    attributes:
+      label: dsh-sentinel version
+      placeholder: 0.4.4
+    validations:
+      required: true
+  - type: input
+    id: rule
+    attributes:
+      label: Rule ID and message
+      placeholder: SEN-... — finding title
+    validations:
+      required: true
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal safe reproducer
+      description: Include only the smallest code needed to trigger the finding.
+      render: javascript
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Why this is safe
+      description: Explain the expected behavior and relevant data-flow or execution constraints.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Redacted report details
+      description: Include command, scan mode, severity, confidence, and evidence metadata. Do not paste secrets.
+    validations:
+      required: true

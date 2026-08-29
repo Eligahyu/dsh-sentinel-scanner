@@ -931,6 +931,17 @@ test('release:CI executes the complete package test contract on Node 24 actions'
   }
 })
 
+test('security:CodeQL covers the scanner core excluded from recursive self-scan', () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+  const workflowPath = join(root, '.github', 'workflows', 'codeql.yml')
+  assert.ok(existsSync(workflowPath), '核心 engine 必须由独立 CodeQL workflow 覆盖')
+
+  const workflow = readFileSync(workflowPath, 'utf8')
+  assert.match(workflow, /github\/codeql-action\/init@v4/)
+  assert.match(workflow, /github\/codeql-action\/analyze@v4/)
+  assert.match(workflow, /languages:\s*['"]?javascript-typescript['"]?/)
+})
+
 // ---- P0-2: traversal completeness ----
 
 test('completeness:目录 walk 失败 → scanComplete=false(§14)', async () => {

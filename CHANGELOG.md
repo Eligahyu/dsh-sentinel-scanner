@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- 独立 CodeQL 工作流覆盖自扫描必须排除的规则引擎源码。
+- Dependabot、CODEOWNERS、贡献指南、行为准则，以及结构化 Issue / Pull Request 模板。
+
+### Changed
+
+- CI 改为执行 `package.json` 中的完整测试契约，并升级到 Node 24 运行时的官方 Actions。
+- 仓库递归自扫描显式报告 `engine/**`、`test/**`、`scripts/**` 排除范围；核心引擎改由 CodeQL 独立覆盖。
+
+### Fixed
+
+- 避免将能力说明中的 `exfiltration endpoints` 名词短语误判为提示注入。
+- 支持带 options 参数的安全 `spawn` / `execFile` 调用，且开发语料脚本不再按运行时源码计分。
+
 ## 0.4.4 (2026-08-23) — Professional Scanner Release
 
 ### Added

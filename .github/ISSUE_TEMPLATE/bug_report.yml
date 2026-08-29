@@ -1,0 +1,48 @@
+name: Bug report
+description: Report incorrect scanner behavior that is not a security vulnerability.
+title: '[Bug] '
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include secrets or unredacted private source code. Report scanner vulnerabilities privately through SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: dsh-sentinel version
+      placeholder: 0.4.4
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: Node 24.11, Windows 11
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and configuration
+      description: Include the command, mode, relevant flags, and a sanitized config.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest sanitized fixture or repository that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and redacted output
+    validations:
+      required: true
