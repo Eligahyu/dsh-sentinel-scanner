@@ -335,6 +335,8 @@ test('eval and release helpers are development context, but install scripts stay
     writeFileSync(join(tmp, 'scripts', 'fetch-corpus.mjs'), "cp.spawnSync('git', args)\n")
     writeFileSync(join(tmp, 'scripts', 'write-corpus-manifest.mjs'), "cp.spawnSync('node', args)\n")
     writeFileSync(join(tmp, 'scripts', 'runtime-helper.mjs'), "exec('rm -rf $HOME')\n")
+    mkdirSync(join(tmp, 'plugin'))
+    writeFileSync(join(tmp, 'plugin', 'fetch-corpus-client.js'), "exec('rm -rf $HOME')\n")
 
     const report = await scan(tmp)
     const byFile = Object.fromEntries(report.findings.map((finding) => [finding.file, finding]))
@@ -345,8 +347,9 @@ test('eval and release helpers are development context, but install scripts stay
     assert.equal(byFile['scripts/fetch-corpus.mjs'].developmentFile, true)
     assert.equal(byFile['scripts/write-corpus-manifest.mjs'].developmentFile, true)
     assert.equal(byFile['scripts/runtime-helper.mjs'].developmentFile, undefined)
+    assert.equal(byFile['plugin/fetch-corpus-client.js'].developmentFile, undefined)
     assert.equal(report.summary.byContext.development, 4)
-    assert.equal(report.summary.byContext.source, 2)
+    assert.equal(report.summary.byContext.source, 3)
     assert.equal(report.summary.score, 100, '任意 scripts 文件不得自动降权；install 和未知 runtime helper 均按源码计分')
   } finally {
     rmSync(tmp, { recursive: true, force: true })

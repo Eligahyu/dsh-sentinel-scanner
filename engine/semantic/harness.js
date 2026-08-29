@@ -140,11 +140,15 @@ export function scanPromptPoisoning(content, relPath) {
 
   for (let i = 0; i < fileLines.length; i += 1) {
     const line = fileLines[i]
-    const phraseIndex = POISON_PHRASES.findIndex((re) => re.test(line))
-    if (phraseIndex < 0) continue
+    const phraseIndexes = POISON_PHRASES
+      .map((re, index) => re.test(line) ? index : -1)
+      .filter((index) => index >= 0)
+    if (phraseIndexes.length === 0) continue
     // 能力清单中的名词短语只豁免自身的 exfiltration 词根；同一行若先命中
     // ignore/conceal/send 等独立投毒指令，仍必须报告。
-    if (phraseIndex === 6 && /\bexfiltration\s+endpoints?\b/i.test(line)) continue
+    const benignCapabilityNoun = /\bexfiltration\s+endpoints?\b/i.test(line)
+      && phraseIndexes.every((index) => index === 6)
+    if (benignCapabilityNoun) continue
     const lineNo = i + 1
     let confidence = 'low'
     let detail = '文档/测试/注释中出现投毒短语(需结合上下文判断)'

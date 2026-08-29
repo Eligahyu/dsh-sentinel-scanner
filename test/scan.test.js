@@ -307,6 +307,24 @@ test('shell-enabled spawn remains a finding even with an argv array', async () =
   }
 })
 
+test('spawn options that can hide shell activation are never exempted', async () => {
+  const tmp = mkdtempSync(join(process.env.TEMP ?? '/tmp', 'sentinel-spawnhiddenopts-'))
+  try {
+    const cases = [
+      "spawnSync('sh', ['-c', userInput], { 'shell': true })",
+      "spawnSync('sh', ['-c', userInput], { shell })",
+      "spawnSync('sh', ['-c', userInput], { ...options })",
+      "spawnSync('sh', ['-c', userInput], { ['sh' + 'ell']: true })",
+    ]
+    writeFileSync(join(tmp, 'unsafe.js'),
+      "import { spawnSync } from 'node:child_process'\n" + cases.join('\n') + '\n')
+    const report = await scan(join(tmp, 'unsafe.js'))
+    assert.equal(report.findings.filter((finding) => finding.id === 'SEN-EXEC-002').length, cases.length)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
 test('same-origin relative fetches (plugin API calls) are not outbound network', async () => {
   const tmp = mkdtempSync(join(process.env.TEMP ?? '/tmp', 'sentinel-sameorigin-'))
   try {

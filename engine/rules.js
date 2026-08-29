@@ -118,7 +118,7 @@ export const RULES = Object.freeze([
     // 单字符串常量(spawn('ls') / exec('npm --version'))仍标记——exec/spawn 默认走 shell,
     // 常量命令也要逐处审查;仅"字符串命令 + 数组参数"视为参数化安全形态。
     excludes: [
-      /(?:execFile|execFileSync|spawn|spawnSync)\s*\(\s*['"][^'"]*['"]\s*,\s*\[[^\]]*\]\s*(?:,\s*\{(?![^}]*\bshell\s*:)[^}]*\})?\s*\)/,
+      /(?:execFile|execFileSync|spawn|spawnSync)\s*\(\s*['"][^'"]*['"]\s*,\s*\[[^\]]*\]\s*(?:,\s*\{(?![^}]*\bshell\b)(?![^}]*\.\.\.)(?![^}]*\[)[^}]*\})?\s*\)/,
     ],
   },
   {

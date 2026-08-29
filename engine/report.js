@@ -85,7 +85,8 @@ export function isTestPath(relPath) {
 export function isDevelopmentPath(relPath) {
   const normalized = String(relPath ?? '').replace(/\\/g, '/')
   if (/(^|\/)(?:evals?|bench|benchmark|benchmarks|examples?|fixtures)(\/|$)/i.test(normalized)) return true
-  return /(^|\/)(?:scripts\/)?(?:release|live-e2e|check|check-package|dev-run|docs-list|fetch-corpus|write-corpus-manifest)(?:[.\/-]|$)/i.test(normalized)
+  if (/(^|\/)(?:scripts\/)?(?:release|live-e2e|check|check-package|dev-run|docs-list)(?:[.\/-]|$)/i.test(normalized)) return true
+  return /(^|\/)scripts\/(?:fetch-corpus|write-corpus-manifest)(?:[.\/-]|$)/i.test(normalized)
 }
 
 export function verdictFor(score) {
