@@ -334,6 +334,7 @@ test('eval and release helpers are development context, but install scripts stay
     writeFileSync(join(tmp, 'scripts', 'install.js'), "exec('rm -rf $HOME')\n")
     writeFileSync(join(tmp, 'scripts', 'fetch-corpus.mjs'), "cp.spawnSync('git', args)\n")
     writeFileSync(join(tmp, 'scripts', 'write-corpus-manifest.mjs'), "cp.spawnSync('node', args)\n")
+    writeFileSync(join(tmp, 'scripts', 'runtime-helper.mjs'), "exec('rm -rf $HOME')\n")
 
     const report = await scan(tmp)
     const byFile = Object.fromEntries(report.findings.map((finding) => [finding.file, finding]))
@@ -343,9 +344,10 @@ test('eval and release helpers are development context, but install scripts stay
     assert.equal(byFile['scripts/install.js'].developmentFile, undefined)
     assert.equal(byFile['scripts/fetch-corpus.mjs'].developmentFile, true)
     assert.equal(byFile['scripts/write-corpus-manifest.mjs'].developmentFile, true)
+    assert.equal(byFile['scripts/runtime-helper.mjs'].developmentFile, undefined)
     assert.equal(report.summary.byContext.development, 4)
-    assert.equal(report.summary.byContext.source, 1)
-    assert.equal(report.summary.score, 70, 'development 上下文封顶 20，install critical 仍按运行时全额 50')
+    assert.equal(report.summary.byContext.source, 2)
+    assert.equal(report.summary.score, 100, '任意 scripts 文件不得自动降权；install 和未知 runtime helper 均按源码计分')
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
@@ -363,6 +365,9 @@ test('repository self-scan policy covers the shipped adapter without active find
   assert.ok(report.ignored.some((item) => item.pattern === 'engine/**' && item.count > 0))
   assert.ok(report.ignored.some((item) => item.pattern === 'test/**' && item.count > 0))
   assert.ok(report.ignored.some((item) => item.pattern === 'scripts/**' && item.count > 0))
+  assert.ok(report.ignored.every((item) => item.directories > 0), '被剪枝的 ignore 目录必须单独披露')
+  assert.ok(report.analysisLayers.moduleGraph.nodes.some((node) => node.path === 'plugin/index.js'),
+    '自扫描必须证明已分析发布包中的插件适配器')
 })
 
 // ─────────────────────────── overlap suppression ───────────────────────────

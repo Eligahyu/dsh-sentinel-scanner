@@ -30,7 +30,7 @@ export function toHtml(report) {
     <td><code>${escapeHtml((c.flow ?? []).join(' → '))}</code></td></tr>`).join('')
 
   const ignoredRows = (report.ignored ?? []).map((g) => `
-    <tr><td><code>${escapeHtml(g.pattern)}</code></td><td>${g.count}</td></tr>`).join('')
+    <tr><td><code>${escapeHtml(g.pattern)}</code></td><td>${g.count}</td><td>${g.directories ?? 0}</td></tr>`).join('')
 
   const hardRows = (report.hardSkipped ?? []).map((h) => `
     <tr><td>${escapeHtml(h.path)}</td><td>${h.size}</td><td><code>${escapeHtml(String(h.sha256 ?? '').slice(0, 16))}…</code></td>
@@ -80,7 +80,7 @@ ${chainRows ? `<h2>Attack Chains</h2>
 ${rows || '<tr><td colspan="7">当前启用规则未发现问题;这不等价于插件已被证明安全。</td></tr>'}
 </table>
 ${ignoredRows ? `<h2>Ignored (${report.ignored.length} patterns)</h2>
-<table><tr><th>pattern</th><th>files skipped</th></tr>${ignoredRows}</table>` : ''}
+<table><tr><th>pattern</th><th>matched entries</th><th>pruned directories (contents not enumerated)</th></tr>${ignoredRows}</table>` : ''}
 ${hardRows ? `<h2>Hard-skipped files (${report.hardSkipped.length}) — 超过硬上限,仅记录 metadata,扫描不完整</h2>
 <table><tr><th>path</th><th>size</th><th>sha256</th><th>ext</th><th>type</th></tr>${hardRows}</table>` : ''}
 <p class="meta">启发式静态扫描 ≠ 安全保证。本报告由 dsh-sentinel ${escapeHtml(VERSION)} 生成;SARIF/HTML 只是结果展示,不是检测引擎。</p>

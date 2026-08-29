@@ -295,6 +295,18 @@ test('parameterized spawn argv remains safe when an options object is present', 
   }
 })
 
+test('shell-enabled spawn remains a finding even with an argv array', async () => {
+  const tmp = mkdtempSync(join(process.env.TEMP ?? '/tmp', 'sentinel-spawnshellopts-'))
+  try {
+    writeFileSync(join(tmp, 'unsafe.js'),
+      "import { spawnSync } from 'node:child_process'\nspawnSync('sh', ['-c', userInput], { shell: true })\n")
+    const report = await scan(join(tmp, 'unsafe.js'))
+    assert.equal(report.findings.some((finding) => finding.id === 'SEN-EXEC-002'), true)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
 test('same-origin relative fetches (plugin API calls) are not outbound network', async () => {
   const tmp = mkdtempSync(join(process.env.TEMP ?? '/tmp', 'sentinel-sameorigin-'))
   try {

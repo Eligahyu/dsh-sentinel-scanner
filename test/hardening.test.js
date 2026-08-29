@@ -929,6 +929,10 @@ test('release:CI executes the complete package test contract on Node 24 actions'
     assert.doesNotMatch(workflow, /actions\/setup-node@v[1-6]\b/, 'setup-node 必须使用 Node 24 运行时的 v7')
     assert.doesNotMatch(workflow, /github\/codeql-action\/upload-sarif@v[1-3]\b/, 'upload-sarif 必须使用 Node 24 运行时的 v4')
   }
+
+  const actionExample = readFileSync(join(root, 'action.yml'), 'utf8')
+  assert.doesNotMatch(actionExample, /actions\/checkout@v[1-6]\b/)
+  assert.doesNotMatch(actionExample, /github\/codeql-action\/upload-sarif@v[1-3]\b/)
 })
 
 test('security:CodeQL covers the scanner core excluded from recursive self-scan', () => {

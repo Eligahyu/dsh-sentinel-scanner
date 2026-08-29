@@ -15,7 +15,9 @@
 ### Fixed
 
 - 避免将能力说明中的 `exfiltration endpoints` 名词短语误判为提示注入。
-- 支持带 options 参数的安全 `spawn` / `execFile` 调用，且开发语料脚本不再按运行时源码计分。
+- 支持带安全 options 参数的 `spawn` / `execFile` 调用，但 `shell` 选项仍保持告警。
+- 仅对明确的开发/语料脚本降权；未知 `scripts/**` 文件继续按运行时源码计分。
+- ignore 报告区分匹配条目和被剪枝目录，不再把未遍历目录误称为已统计文件。
 
 ## 0.4.4 (2026-08-23) — Professional Scanner Release
 

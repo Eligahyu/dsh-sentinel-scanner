@@ -177,7 +177,7 @@ export function collectFiles(root, {
   let skipDirs = mode === 'source' ? SKIP_DIRECTORIES : SKIP_PACKAGE_DIRECTORIES
   if (mode === 'source' && includeBuildArtifacts) skipDirs = SKIP_PACKAGE_DIRECTORIES
   const ignoreRules = (ignore ?? []).map((pattern) => ({ pattern: String(pattern), re: globToRegExp(String(pattern)) }))
-  const ignoredCounts = new Map() // pattern → 被忽略的文件数
+  const ignoredCounts = new Map() // pattern → 匹配条目数 + 被剪枝目录数
   const entries = []
   const binaries = []
   const hardSkipped = []
@@ -185,11 +185,14 @@ export function collectFiles(root, {
   const skipped = { binary: 0, big: 0, dirs: 0, ignored: 0 }
   let truncated = false
 
-  const isIgnored = (relPath, counts) => {
+  const isIgnored = (relPath, kind = 'file') => {
     const norm = relPath.replace(/\\/g, '/')
     for (const rule of ignoreRules) {
       if (rule.re.test(norm)) {
-        ignoredCounts.set(rule.pattern, (ignoredCounts.get(rule.pattern) ?? 0) + counts)
+        const current = ignoredCounts.get(rule.pattern) ?? { count: 0, directories: 0 }
+        current.count += 1
+        if (kind === 'directory') current.directories += 1
+        ignoredCounts.set(rule.pattern, current)
         return true
       }
     }
@@ -228,7 +231,7 @@ export function collectFiles(root, {
           skipped.dirs += 1
           continue
         }
-        if (ignoreRules.length > 0 && isIgnored(rel + '/', 1)) {
+        if (ignoreRules.length > 0 && isIgnored(rel + '/', 'directory')) {
           skipped.ignored += 1
           continue
         }
@@ -236,7 +239,7 @@ export function collectFiles(root, {
         continue
       }
       if (!stat.isFile()) continue
-      if (ignoreRules.length > 0 && isIgnored(rel, 1)) {
+      if (ignoreRules.length > 0 && isIgnored(rel)) {
         skipped.ignored += 1
         continue
       }
@@ -264,7 +267,9 @@ export function collectFiles(root, {
     if (e.size > maxBytesPerFile) largeFiles.push(e)
     else files.push(e)
   }
-  const ignored = [...ignoredCounts].map(([pattern, count]) => ({ pattern, count }))
+  // Ignore directories are intentionally not traversed. `count` therefore means matched
+  // entries, while `directories` explicitly discloses how many directory trees were pruned.
+  const ignored = [...ignoredCounts].map(([pattern, stats]) => ({ pattern, ...stats }))
   return { files, largeFiles, binaries, hardSkipped, skipped, ignored, truncated, traversalFailures }
 }
 
