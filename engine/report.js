@@ -85,6 +85,8 @@ export function isTestPath(relPath) {
 export function isDevelopmentPath(relPath) {
   const normalized = String(relPath ?? '').replace(/\\/g, '/')
   if (/(^|\/)(?:evals?|bench|benchmark|benchmarks|examples?|fixtures)(\/|$)/i.test(normalized)) return true
+  if (/(^|\/)scripts\//i.test(normalized)
+    && !/(^|\/)(?:preinstall|install|postinstall|prepare|prepublish)(?:[.\/-]|$)/i.test(normalized)) return true
   return /(^|\/)(?:scripts\/)?(?:release|live-e2e|check|check-package|dev-run|docs-list)(?:[.\/-]|$)/i.test(normalized)
 }
 

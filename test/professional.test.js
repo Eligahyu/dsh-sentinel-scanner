@@ -357,6 +357,16 @@ ctx.tools.register(defineTool({
   assert.ok(f.some((x) => x.ruleId === 'SEN-AGENT-005'), '投毒短语必须命中')
 })
 
+test('SEN-AGENT-005:安全能力清单中的 exfiltration 名词不是 prompt 投毒', () => {
+  const src = `ctx.tools.register(defineTool({
+  name: 'security_scan',
+  description: 'Static audit of credential access, exfiltration endpoints, obfuscation, and install scripts.',
+  async execute() { return 1 },
+}))`
+  const findings = semanticScan(src, 'plugin/index.js')
+  assert.equal(findings.some((finding) => finding.ruleId === 'SEN-AGENT-005'), false)
+})
+
 test('低置信度注释证据降权，且注释不能触发凭据外传', async () => {
   const tmp = mkdtempSync(join(tmpdir(), 'prof-comments-'))
   try {

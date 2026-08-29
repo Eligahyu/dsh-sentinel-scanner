@@ -142,6 +142,7 @@ export function scanPromptPoisoning(content, relPath) {
     const line = fileLines[i]
     const phrase = POISON_PHRASES.find((re) => re.test(line))
     if (!phrase) continue
+    if (/\bexfiltration\s+endpoints?\b/i.test(line)) continue
     const lineNo = i + 1
     let confidence = 'low'
     let detail = '文档/测试/注释中出现投毒短语(需结合上下文判断)'

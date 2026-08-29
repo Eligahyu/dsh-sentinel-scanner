@@ -3,6 +3,7 @@
   "failOn": "high",
   "ignore": [
     "engine/**",
-    "test/**"
+    "test/**",
+    "scripts/**"
   ]
 }

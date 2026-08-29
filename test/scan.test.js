@@ -283,6 +283,18 @@ test('bare spawn/exec only flags when child_process is imported', async () => {
   }
 })
 
+test('parameterized spawn argv remains safe when an options object is present', async () => {
+  const tmp = mkdtempSync(join(process.env.TEMP ?? '/tmp', 'sentinel-spawnopts-'))
+  try {
+    writeFileSync(join(tmp, 'safe.js'),
+      "import { spawnSync } from 'node:child_process'\nspawnSync('git', ['status', dynamicPath], { stdio: 'ignore' })\n")
+    const report = await scan(join(tmp, 'safe.js'))
+    assert.equal(report.findings.some((finding) => finding.id === 'SEN-EXEC-002'), false)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
 test('same-origin relative fetches (plugin API calls) are not outbound network', async () => {
   const tmp = mkdtempSync(join(process.env.TEMP ?? '/tmp', 'sentinel-sameorigin-'))
   try {

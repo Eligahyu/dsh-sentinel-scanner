@@ -332,19 +332,37 @@ test('eval and release helpers are development context, but install scripts stay
     writeFileSync(join(tmp, 'evals', 'run.js'), "exec('rm -rf $HOME')\n")
     writeFileSync(join(tmp, 'scripts', 'release.mjs'), "exec('rm -rf $HOME')\n")
     writeFileSync(join(tmp, 'scripts', 'install.js'), "exec('rm -rf $HOME')\n")
+    writeFileSync(join(tmp, 'scripts', 'fetch-corpus.mjs'), "cp.spawnSync('git', args)\n")
+    writeFileSync(join(tmp, 'scripts', 'write-corpus-manifest.mjs'), "cp.spawnSync('node', args)\n")
 
     const report = await scan(tmp)
-    const byFile = Object.fromEntries(report.findings.filter((finding) => finding.id === 'SEN-FS-001').map((finding) => [finding.file, finding]))
+    const byFile = Object.fromEntries(report.findings.map((finding) => [finding.file, finding]))
     assert.equal(byFile['evals/run.js'].developmentFile, true)
     assert.equal(byFile['evals/run.js'].testFile, false)
     assert.equal(byFile['scripts/release.mjs'].developmentFile, true)
     assert.equal(byFile['scripts/install.js'].developmentFile, undefined)
-    assert.equal(report.summary.byContext.development, 2)
+    assert.equal(byFile['scripts/fetch-corpus.mjs'].developmentFile, true)
+    assert.equal(byFile['scripts/write-corpus-manifest.mjs'].developmentFile, true)
+    assert.equal(report.summary.byContext.development, 4)
     assert.equal(report.summary.byContext.source, 1)
     assert.equal(report.summary.score, 70, 'development 上下文封顶 20，install critical 仍按运行时全额 50')
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
+})
+
+test('repository self-scan policy covers the shipped adapter without active findings', async () => {
+  const root = join(FIXTURES, '..', '..')
+  const io = capture()
+  const code = await main([root, '--json'], io)
+  const report = JSON.parse(io.buf.out)
+
+  assert.equal(code, 0)
+  assert.equal(report.summary.scanComplete, true)
+  assert.deepEqual(report.findings, [])
+  assert.ok(report.ignored.some((item) => item.pattern === 'engine/**' && item.count > 0))
+  assert.ok(report.ignored.some((item) => item.pattern === 'test/**' && item.count > 0))
+  assert.ok(report.ignored.some((item) => item.pattern === 'scripts/**' && item.count > 0))
 })
 
 // ─────────────────────────── overlap suppression ───────────────────────────
