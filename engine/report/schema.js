@@ -2,7 +2,7 @@
 
 const LAYER_DEFAULTS = Object.freeze({
   moduleGraph: { complete: true, nodes: 0, edges: 0, unresolved: 0, failures: [], warnings: [] },
-  dependencyGraph: { complete: true, nodes: 0, edges: 0, unresolved: 0, failures: [] },
+  dependencyGraph: { complete: true, nodes: 0, edges: 0, unresolved: 0, failures: [], buildRequirements: [] },
   capabilityGraph: { complete: true, tools: 0, capabilities: [], attackPaths: 0, failures: [] },
   sbom: { status: 'not-requested', format: null, components: 0, digest: null, failures: [] },
   provenance: { status: 'not-requested', verified: false, reasons: [] },

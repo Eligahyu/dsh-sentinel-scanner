@@ -157,8 +157,10 @@ profile package.json direct dependencies
 - integrity:sha512 base64 与实际 tarball 比对;不匹配 → SEN-SUPPLY-004 + 至少 REVIEW
 - 解包被阻止 → SEN-SUPPLY-005 + BLOCK-RECOMMENDED + scanComplete=false
 - quarantine 目录在任何 success/failure/exception 路径都 finally cleanup
-- lockfile 识别(package-lock/shrinkwrap/pnpm/yarn/bun)+ 依赖统计;
-  package-lock 标准化为依赖图,其他复杂格式显式 unsupported/degraded
+- lockfile 识别(package-lock/shrinkwrap/pnpm/yarn/bun)+ 依赖统计; npm 与 pnpm v9 使用规范化图,
+  pnpm v9 解析 `importers/packages/snapshots`、workspace containment、peer-suffixed 实例和
+  `requiresBuild` 证据路径; malformed/escape/unresolved/unsupported/oversized 输入显式降级,
+  不猜测 direct/transitive 数量; yarn/bun 当前仅识别并报告 unsupported/degraded
 
 ## 8. 报告 schema v2
 

@@ -293,6 +293,7 @@ export async function scan(target, opts = {}) {
           nodes: dependencyGraph.nodes.length,
           edges: dependencyGraph.edges.length,
           complete: dependencyGraph.complete,
+          buildRequirements: dependencyGraph.buildRequirements ?? [],
         },
       } : {},
     },

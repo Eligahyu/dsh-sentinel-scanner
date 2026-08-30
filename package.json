@@ -75,6 +75,7 @@
     "cordis"
   ],
   "dependencies": {
-    "acorn": "^8.18.0"
+    "acorn": "^8.18.0",
+    "yaml": "^2.9.0"
   }
 }

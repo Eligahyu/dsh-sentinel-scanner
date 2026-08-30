@@ -38,7 +38,8 @@
 - [x] npm 0.4.4 与 GitHub Release(已核验 registry latest、shasum 与 integrity)
 
 ### v0.5
-- [ ] pnpm/yarn/bun lockfile 标准化与 install-script 依赖链标注
+- [x] pnpm v9 lockfile 标准化(importers/packages/snapshots)、workspace/peer 实例、`requiresBuild` 依赖路径、SBOM 引用与精确 direct/transitive 统计
+- [ ] yarn/bun lockfile 标准化与 install-script 依赖链标注(当前仅显式 unsupported/degraded)
 - [x] 静态 CommonJS `require` / `require.resolve` 模块图、TS fallback 与解构导入跨文件污点
 - [ ] 动态 import/require、复杂回调/闭包的跨文件 reachability
 - [ ] 原生 TypeScript parser,减少静态 import/export 降级

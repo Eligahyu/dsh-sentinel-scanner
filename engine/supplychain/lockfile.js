@@ -6,6 +6,7 @@
 
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { buildDependencyGraph } from './dependency-graph.js'
 
 export const LOCKFILES = ['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb']
 
@@ -24,8 +25,9 @@ export function detectLockfile(dir) {
 /**
  * 统计 lockfile 中的直接/传递依赖数量。
  * package-lock/shrinkwrap:精确(依赖 lockfile packages 图);
- * pnpm/yarn/bun:条目级估算(文档注明为估算值)。
- * @returns {{directDependencies: number, transitiveDependencies: number}}
+ * pnpm v9:精确(来自规范化 importers/packages/snapshots 图)。
+ * yarn/bun:条目级估算(文档注明为估算值)。
+ * @returns {{directDependencies: number, transitiveDependencies: number, dependencyCountComplete?: boolean, dependencyCountReason?: string}}
  */
 export function countDependencies(dir, lockfileName) {
   const read = () => readFileSync(join(dir, lockfileName), 'utf8')
@@ -48,9 +50,22 @@ export function countDependencies(dir, lockfileName) {
       return { directDependencies: 0, transitiveDependencies: entries }
     }
     if (lockfileName === 'pnpm-lock.yaml') {
-      const text = read()
-      const entries = (text.match(/^\s{2}[^\s/][^:]*:/gm) ?? []).length
-      return { directDependencies: 0, transitiveDependencies: entries }
+      const graph = buildDependencyGraph(dir, { lockfileName })
+      if (graph.complete !== true) {
+        return {
+          directDependencies: 0,
+          transitiveDependencies: 0,
+          dependencyCountComplete: false,
+          dependencyCountReason: graph.failures?.[0]?.reason ?? 'incomplete-graph',
+        }
+      }
+      const directDependencies = graph.root?.directDependencies ?? 0
+      const directInstances = (graph.nodes ?? []).filter((node) => node.direct === true).length
+      return {
+        directDependencies,
+        transitiveDependencies: Math.max(0, (graph.nodes ?? []).length - directInstances),
+        dependencyCountComplete: true,
+      }
     }
     if (lockfileName === 'bun.lock') {
       const text = read()

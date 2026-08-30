@@ -33,6 +33,7 @@ test('professional report exposes stable analysis-layer defaults', () => {
   ])
   assert.equal(report.analysisLayers.moduleGraph.complete, true)
   assert.equal(report.analysisLayers.dependencyGraph.complete, true)
+  assert.deepEqual(report.analysisLayers.dependencyGraph.buildRequirements, [])
   assert.equal(report.analysisLayers.capabilityGraph.complete, true)
   assert.equal(report.analysisLayers.sbom.status, 'not-requested')
   assert.equal(report.analysisLayers.provenance.status, 'not-requested')

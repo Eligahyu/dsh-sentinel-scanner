@@ -7,12 +7,14 @@
 - 独立 CodeQL 工作流覆盖自扫描必须排除的规则引擎源码。
 - Dependabot、CODEOWNERS、贡献指南、行为准则，以及结构化 Issue / Pull Request 模板。
 - 静态 CommonJS `require` / `require.resolve` 模块图边，以及 CommonJS 解构导入到导出函数/箭头函数的跨文件污点链。
+- pnpm v9 `importers` / `packages` / `snapshots` 规范化依赖图、workspace containment、peer 实例保留、`requiresBuild` 证据链和 CycloneDX / SPDX 组件引用。
 
 ### Changed
 
 - CI 改为执行 `package.json` 中的完整测试契约，并升级到 Node 24 运行时的官方 Actions。
 - 仓库递归自扫描显式报告 `engine/**`、`test/**`、`scripts/**` 排除范围；核心引擎改由 CodeQL 独立覆盖。
 - 动态模块目标现在作为结构化 warning 报告，不再静默忽略或猜测依赖边；TypeScript fallback 可恢复字面量 CommonJS 引用。
+- pnpm v9 direct/transitive 依赖统计改为读取规范化图；图失败时返回零计数和显式不完整原因，不再使用缩进正则猜测。
 
 ### Fixed
 
@@ -23,6 +25,7 @@
 - 本地 `.worktrees/` 作为 Git 工作树元数据目录跳过，避免把并行检出重复当作目标源码。
 - CodeQL 明确覆盖 `engine` / `plugin` / `bin` 发布面；测试语料不再混入核心代码告警。
 - 重写不受信源码的 child-process 别名提取、patch 行解析和开发 runner 识别，消除多项 polynomial ReDoS 路径；动态别名进入正则前执行完整元字符转义。
+- malformed pnpm YAML、workspace importer 路径逃逸、oversized lockfile 和未知 pnpm 版本均保留明确 dependency-layer failure；`requiresBuild` 不再被误称为已知安装脚本。
 
 ## 0.4.4 (2026-08-23) — Professional Scanner Release
 

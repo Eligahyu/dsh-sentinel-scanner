@@ -65,8 +65,8 @@ runs:
     # 安全红线:绝不在被扫描项目执行 npm install/npm ci——
     # 安装必须定向到 ${{ github.action_path }}(dsh-sentinel 自己的依赖),
     # 且强制 --ignore-scripts(最小执行面,防未来依赖出现 lifecycle 脚本)。
-    # 兜底:引擎自带 vendored acorn(.github/actions/dsh-sentinel/vendor/),
-    # 即使安装失败/离线,扫描仍可运行。
+    # 运行依赖必须在 action_path 内成功安装;不提供安装失败/离线兜底。
+    # npm ci 失败时 Action 必须失败,不得继续伪装为可扫描。
     - name: Install dsh-sentinel runtime dependencies
       shell: bash
       run: |

@@ -86,7 +86,7 @@ dsh-sentinel is designed for two audiences:
 | DSH manifest validation | Audits `dsh.bundle`, `cordis.patch.yml`, package entry contracts, and lexical/realpath/symlink containment. Escaping paths trigger `SEN-MAN-009`. |
 | Scan modes | `source` skips generated build trees by default; `package` includes distributable output such as `dist` and `build`; `profile` discovers and audits installed DSH plugins. |
 | Pre-install quarantine | Safely extracts npm tarballs while blocking traversal, absolute paths, drive paths, symlink/hardlink entries, and tar bombs. Verifies sha512 integrity and cleans up all artifacts. |
-| Supply-chain analysis | Inspects lifecycle scripts, lockfiles, normalized dependency graphs, package metadata, optional OSV advisories, optional provenance, and source-versus-package drift. |
+| Supply-chain analysis | Inspects lifecycle scripts, npm and pnpm v9 normalized lockfile graphs, package metadata, optional OSV advisories, optional provenance, and source-versus-package drift. Unsupported lockfile formats remain explicit warnings. |
 | Native artifacts | Audits `.wasm`, `.exe`, `.dll`, `.so`, `.node`, and related files using magic bytes, size, SHA-256, entropy, and printable strings. Binaries are never executed. |
 | Professional report layers | Stable report schema v2 with module graph, dependency graph, capability graph, SBOM, provenance, attack chains, coverage, and failure metadata. |
 | Output and CI | Text, JSON, SARIF 2.1.0, standalone HTML, CycloneDX, and SPDX output; stable fingerprints, baselines, threshold exits, and incomplete-scan enforcement. |
@@ -103,6 +103,37 @@ Scan completeness distinguishes security-critical coverage from optional enrichm
   not scanned;
 - unsupported or complex lockfile formats are reported instead of producing
   guessed dependency data.
+
+### pnpm v9 dependency intelligence
+
+dsh-sentinel supports the pnpm v9 lockfile layout as a read-only, normalized
+dependency graph. It parses `importers`, `packages`, and `snapshots` with a
+standards-aware YAML parser, preserves peer-suffixed package instances, resolves
+`workspace:` / `link:` importer relationships, and keeps npm aliases attached to
+the installed package identity. Workspace importer paths are containment-checked;
+malformed YAML, path escapes, unresolved references, oversized lockfiles, and
+unsupported pnpm lockfile versions are reported as explicit dependency-layer
+failures rather than converted into guessed nodes.
+
+The graph separates root direct dependencies from transitive package instances.
+The dependency summary uses this normalized graph for pnpm v9, so its direct and
+transitive counts are reproducible from the lockfile rather than inferred from
+indentation or regular-expression matches. If normalization fails, the summary
+returns zero counts with an explicit incomplete reason; it never presents a
+partial count as exact.
+
+pnpm's `requiresBuild: true` field is retained as build evidence. It means pnpm
+recorded that the package requires a build step in the install plan; it does not
+prove that a specific lifecycle script is present, and dsh-sentinel deliberately
+does not label it as a known install script. Each such package can include a
+shortest root-to-package dependency path in the report. The same evidence is
+carried into CycloneDX and SPDX exports, with unique component references for
+peer-suffixed instances. SBOM output remains a serialization of observed graph
+metadata, not a claim that package code was executed or installed.
+
+The current exact lockfile graph support is pnpm v9. Yarn and Bun lockfiles are
+recognized and reported with an explicit unsupported/degraded state; they are
+not counted as if their formats were fully normalized.
 
 ## Installation and quick start
 
@@ -463,7 +494,7 @@ DSH 插件可能拥有加载它的用户或 Agent 所具备的文件、网络、
 | DSH 清单检查 | 检查 `dsh.bundle`、`cordis.patch.yml`、入口契约，以及词法、realpath、symlink 三层路径 containment；路径逃逸触发 `SEN-MAN-009`。 |
 | 三种扫描模式 | `source` 默认跳过生成目录；`package` 扫描 `dist/build` 等发布产物；`profile` 发现并审计第三方 DSH 插件。 |
 | 安装前隔离审计 | 安全解包 tarball，阻止 traversal、绝对路径、盘符、symlink/hardlink 和 tar bomb；校验 sha512，并清理全部临时文件。 |
-| 供应链能力 | 生命周期脚本、lockfile、标准化依赖图、包元数据、可选 OSV、可选 provenance、源码与 npm 发布包漂移。 |
+| 供应链能力 | 生命周期脚本、npm 与 pnpm v9 标准化依赖图、包元数据、可选 OSV、可选 provenance、源码与 npm 发布包漂移；yarn/bun 当前明确报告 unsupported/degraded。 |
 | 原生二进制 | 对 `.wasm/.exe/.dll/.so/.node` 等提取 magic、大小、SHA-256、熵和 printable strings；只当数据分析。 |
 | 专业报告层 | 稳定 schema v2，包含模块图、依赖图、能力图、SBOM、provenance、攻击链、覆盖率和失败信息。 |
 | CI 与输出 | text、JSON、SARIF 2.1.0、单文件 HTML、CycloneDX、SPDX；支持 fingerprint、baseline、风险阈值和 incomplete gate。 |

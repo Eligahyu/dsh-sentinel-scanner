@@ -198,6 +198,89 @@ test('lockfile 检测与依赖统计(package-lock.json)', () => {
   }
 })
 
+test('pnpm v9 dependency counts use normalized direct and transitive graph nodes', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'v2-pnpm-count-'))
+  try {
+    writeFileSync(join(tmp, 'package.json'), JSON.stringify({
+      name: 'pnpm-app',
+      version: '1.0.0',
+      dependencies: { alpha: '^1.0.0' },
+    }))
+    writeFileSync(join(tmp, 'pnpm-lock.yaml'), [
+      "lockfileVersion: '9.0'",
+      'importers:',
+      '  .:',
+      '    dependencies:',
+      '      alpha:',
+      '        specifier: ^1.0.0',
+      '        version: 1.2.0',
+      'packages:',
+      '  alpha@1.2.0: {}',
+      '  beta@2.0.0: {}',
+      'snapshots:',
+      '  alpha@1.2.0:',
+      '    dependencies:',
+      '      beta: 2.0.0',
+      '  beta@2.0.0: {}',
+    ].join('\n'))
+
+    assert.deepEqual(countDependencies(tmp, 'pnpm-lock.yaml'), {
+      directDependencies: 1,
+      transitiveDependencies: 1,
+      dependencyCountComplete: true,
+    })
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('pnpm aliases count each root declaration while retaining one installed node', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'v2-pnpm-alias-count-'))
+  try {
+    writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'alias-app', version: '1.0.0' }))
+    writeFileSync(join(tmp, 'pnpm-lock.yaml'), [
+      "lockfileVersion: '9.0'",
+      'importers:',
+      '  .:',
+      '    dependencies:',
+      '      compat:',
+      '        specifier: npm:real-package@^1.0.0',
+      '        version: npm:real-package@1.2.0',
+      '      real-package:',
+      '        specifier: ^1.0.0',
+      '        version: 1.2.0',
+      'packages:',
+      '  real-package@1.2.0: {}',
+      'snapshots:',
+      '  real-package@1.2.0: {}',
+    ].join('\n'))
+
+    assert.deepEqual(countDependencies(tmp, 'pnpm-lock.yaml'), {
+      directDependencies: 2,
+      transitiveDependencies: 0,
+      dependencyCountComplete: true,
+    })
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('pnpm dependency count failure stays conservative and explicit', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'v2-pnpm-count-bad-'))
+  try {
+    writeFileSync(join(tmp, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\nimporters: [\n")
+
+    assert.deepEqual(countDependencies(tmp, 'pnpm-lock.yaml'), {
+      directDependencies: 0,
+      transitiveDependencies: 0,
+      dependencyCountComplete: false,
+      dependencyCountReason: 'parse-error',
+    })
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
 // ─────────────────────────── 二进制审计 ───────────────────────────
 
 test('binary strings / entropy / magic 单元', () => {

@@ -497,7 +497,8 @@
         "nodes": 0,
         "edges": 0,
         "unresolved": 0,
-        "failures": []
+        "failures": [],
+        "buildRequirements": []
       },
       "capabilityGraph": {
         "complete": true,
