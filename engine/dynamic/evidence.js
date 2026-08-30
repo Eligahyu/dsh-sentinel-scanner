@@ -5,23 +5,197 @@ const COLLECTIONS = Object.freeze([
   'stages', 'networkAttempts', 'dnsQueries', 'processes', 'fileEvents',
   'canaryEvents', 'policyViolations', 'limitations', 'failures',
 ])
-
 const ROOT_TEXT_FIELDS = Object.freeze(['stdout', 'stderr'])
+const TEXT = 'text'
+const NUMBER = 'number'
+const BOOLEAN = 'boolean'
+const PAYLOAD = 'payload'
+const TEXT_ARRAY = 'text-array'
+const OMIT = Symbol('omit')
 
-const EVENT_FIELDS = new Set([
-  'id', 'kind', 'name', 'stage', 'status', 'reason', 'code', 'message', 'detail',
-  'details', 'destination', 'hostname', 'recordType', 'answers', 'protocol',
-  'method', 'port', 'blocked', 'allowed', 'body', 'headers', 'request',
-  'response', 'command', 'argv', 'cwd', 'pid', 'exitCode', 'signal', 'path',
-  'operation', 'bytes', 'canaryId', 'canaryIds', 'boundary', 'source',
-  'location', 'detected', 'timestamp', 'durationMs', 'eventCount', 'dropped',
-  'maxEvents', 'maxListItems', 'maxTextBytes', 'maxEvidenceDepth', 'field',
-  'type', 'value', 'address', 'domain', 'query', 'args', 'resource', 'action',
-  'error',
+const CANARY_DEFINITIONS = Object.freeze([
+  ['apiKey', 'api-key'],
+  ['bearerToken', 'bearer-token'],
+  ['environmentSecret', 'environment-secret'],
+  ['sshFile', 'ssh-file'],
+  ['workspaceDocument', 'workspace-document'],
+  ['conversation', 'conversation'],
+  ['memory', 'memory'],
+  ['toolArgument', 'tool-argument'],
 ])
 
-const WINDOWS_ABSOLUTE_PATH = /[A-Za-z]:[\\/][^\s"'<>|]*/g
-const POSIX_ABSOLUTE_PATH = /(?<![A-Za-z0-9:/])\/(?:[^/\s"'<>|]+\/)*[^/\s"'<>|]+/g
+const PAYLOAD_SCHEMA = Object.freeze({
+  content: TEXT, data: TEXT, encoding: TEXT, length: NUMBER, message: TEXT,
+  name: TEXT, nested: TEXT, path: TEXT, reason: TEXT, text: TEXT, type: TEXT,
+  value: TEXT,
+})
+
+const COLLECTION_SCHEMAS = Object.freeze({
+  stages: Object.freeze({
+    durationMs: NUMBER, name: TEXT, reason: TEXT, stage: TEXT, startedAt: TEXT,
+    status: TEXT, timestamp: TEXT,
+  }),
+  networkAttempts: Object.freeze({
+    allowed: BOOLEAN, blocked: BOOLEAN, body: PAYLOAD, bytes: NUMBER,
+    destination: TEXT, headers: PAYLOAD, method: TEXT, port: NUMBER,
+    protocol: TEXT, reason: TEXT, request: PAYLOAD, response: PAYLOAD,
+    stage: TEXT, timestamp: TEXT,
+  }),
+  dnsQueries: Object.freeze({
+    answers: TEXT_ARRAY, blocked: BOOLEAN, hostname: TEXT, recordType: TEXT,
+    reason: TEXT, stage: TEXT, timestamp: TEXT,
+  }),
+  processes: Object.freeze({
+    argv: TEXT_ARRAY, blocked: BOOLEAN, command: TEXT, cwd: TEXT,
+    exitCode: NUMBER, pid: NUMBER, reason: TEXT, signal: TEXT, stage: TEXT,
+    timestamp: TEXT,
+  }),
+  fileEvents: Object.freeze({
+    blocked: BOOLEAN, bytes: NUMBER, operation: TEXT, path: TEXT, reason: TEXT,
+    stage: TEXT, timestamp: TEXT,
+  }),
+  canaryEvents: Object.freeze({
+    boundary: TEXT, detected: BOOLEAN, destination: TEXT, kind: TEXT,
+    location: TEXT, operation: TEXT, source: TEXT, stage: TEXT, timestamp: TEXT,
+  }),
+  policyViolations: Object.freeze({
+    action: TEXT, code: TEXT, detail: TEXT, details: PAYLOAD, reason: TEXT,
+    stage: TEXT, timestamp: TEXT,
+  }),
+  limitations: Object.freeze({
+    code: TEXT, detail: TEXT, dropped: NUMBER, kind: TEXT, location: TEXT,
+    maxEvidenceDepth: NUMBER, maxEvents: NUMBER, maxListItems: NUMBER,
+    maxTextBytes: NUMBER, reason: TEXT,
+  }),
+  failures: Object.freeze({
+    code: TEXT, detail: TEXT, details: PAYLOAD, reason: TEXT, stage: TEXT,
+    timestamp: TEXT,
+  }),
+})
+
+const ROOT_OUTPUT_FIELDS = new Set([...COLLECTIONS, ...ROOT_TEXT_FIELDS])
+const CANARY_IDS = new Set(CANARY_DEFINITIONS.map(([, id]) => id))
+
+class EvidenceRejected extends Error {
+  constructor(code) {
+    super(code)
+    this.code = code
+  }
+}
+
+function invalidCanarySet() {
+  return new EvidenceRejected('invalid-canary-set')
+}
+
+function unsafeInput() {
+  return new EvidenceRejected('unsafe-input')
+}
+
+function isRecord(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  try {
+    const prototype = Object.getPrototypeOf(value)
+    return prototype === Object.prototype || prototype === null
+  } catch {
+    throw unsafeInput()
+  }
+}
+
+function isArray(value) {
+  if (!Array.isArray(value)) return false
+  try {
+    return Object.getPrototypeOf(value) === Array.prototype
+  } catch {
+    throw unsafeInput()
+  }
+}
+
+function ownDataProperty(value, key) {
+  let descriptor
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(value, key)
+  } catch {
+    throw unsafeInput()
+  }
+  if (!descriptor) return { present: false, value: undefined }
+  if (!Object.hasOwn(descriptor, 'value')) throw unsafeInput()
+  return { present: true, value: descriptor.value }
+}
+
+function ownKeys(value) {
+  try {
+    return Reflect.ownKeys(value)
+  } catch {
+    throw unsafeInput()
+  }
+}
+
+function exactStringKeys(value, expected) {
+  const keys = ownKeys(value)
+  if (keys.some(key => typeof key !== 'string')) throw invalidCanarySet()
+  const actual = [...keys].sort()
+  const wanted = [...expected].sort()
+  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+    throw invalidCanarySet()
+  }
+}
+
+function assertNormalizedArrayKeys(value, length) {
+  const keys = ownKeys(value)
+  const expected = new Set(['length', ...Array.from({ length }, (_, index) => String(index))])
+  if (keys.length !== expected.size || keys.some(key => typeof key !== 'string' || !expected.has(key))) {
+    throw new Error('invalid normalized evidence')
+  }
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value, 'utf8').digest('hex')
+}
+
+function validateCanaries(canaries) {
+  try {
+    if (!isRecord(canaries)) throw invalidCanarySet()
+    exactStringKeys(canaries, ['values', 'descriptors'])
+    const valuesEntry = ownDataProperty(canaries, 'values')
+    const descriptorsEntry = ownDataProperty(canaries, 'descriptors')
+    if (!valuesEntry.present || !isRecord(valuesEntry.value)) throw invalidCanarySet()
+    if (!descriptorsEntry.present || !isArray(descriptorsEntry.value)) throw invalidCanarySet()
+
+    exactStringKeys(valuesEntry.value, CANARY_DEFINITIONS.map(([property]) => property))
+    const lengthEntry = ownDataProperty(descriptorsEntry.value, 'length')
+    if (!lengthEntry.present || lengthEntry.value !== CANARY_DEFINITIONS.length) throw invalidCanarySet()
+    exactStringKeys(descriptorsEntry.value, [
+      'length', ...CANARY_DEFINITIONS.map((_, index) => String(index)),
+    ])
+
+    const mapping = []
+    const seenValues = new Set()
+    for (let index = 0; index < CANARY_DEFINITIONS.length; index += 1) {
+      const [property, kind] = CANARY_DEFINITIONS[index]
+      const valueEntry = ownDataProperty(valuesEntry.value, property)
+      if (!valueEntry.present || typeof valueEntry.value !== 'string' || valueEntry.value.length === 0) {
+        throw invalidCanarySet()
+      }
+      if (seenValues.has(valueEntry.value)) throw invalidCanarySet()
+      seenValues.add(valueEntry.value)
+      const descriptorEntry = ownDataProperty(descriptorsEntry.value, String(index))
+      if (!descriptorEntry.present || !isRecord(descriptorEntry.value)) throw invalidCanarySet()
+      exactStringKeys(descriptorEntry.value, ['digest', 'id', 'kind'])
+      const idEntry = ownDataProperty(descriptorEntry.value, 'id')
+      const kindEntry = ownDataProperty(descriptorEntry.value, 'kind')
+      const digestEntry = ownDataProperty(descriptorEntry.value, 'digest')
+      if (idEntry.value !== kind || kindEntry.value !== kind || typeof digestEntry.value !== 'string') {
+        throw invalidCanarySet()
+      }
+      if (digestEntry.value !== sha256(valueEntry.value)) throw invalidCanarySet()
+      mapping.push({ id: kind, value: valueEntry.value })
+    }
+    return mapping.sort((left, right) => right.value.length - left.value.length || left.id.localeCompare(right.id))
+  } catch (error) {
+    if (error instanceof EvidenceRejected) throw error
+    throw unsafeInput()
+  }
+}
 
 function boundedLimit(value, fallback, hardLimit) {
   const numeric = Number(value)
@@ -29,203 +203,425 @@ function boundedLimit(value, fallback, hardLimit) {
   return Math.min(hardLimit, Math.max(0, Math.floor(numeric)))
 }
 
-function normalizeLimits(input = {}) {
+function normalizeLimits(input) {
+  const source = input === undefined ? null : input
+  if (source !== null && !isRecord(source)) throw unsafeInput()
+  const get = (key, fallback, hardLimit) => {
+    const entry = source === null ? { present: false } : ownDataProperty(source, key)
+    if (!entry.present) return fallback
+    if (typeof entry.value === 'object' && entry.value !== null) throw unsafeInput()
+    return boundedLimit(entry.value, fallback, hardLimit)
+  }
   return {
-    maxEvents: boundedLimit(input.maxEvents, DYNAMIC_HARD_LIMITS.maxEvents, DYNAMIC_HARD_LIMITS.maxEvents),
-    maxTextBytes: boundedLimit(input.maxTextBytes, DYNAMIC_HARD_LIMITS.maxTextBytes, DYNAMIC_HARD_LIMITS.maxTextBytes),
-    maxListItems: boundedLimit(input.maxListItems, DYNAMIC_HARD_LIMITS.maxListItems, DYNAMIC_HARD_LIMITS.maxListItems),
-    maxEvidenceDepth: boundedLimit(input.maxEvidenceDepth, DYNAMIC_HARD_LIMITS.maxEvidenceDepth, DYNAMIC_HARD_LIMITS.maxEvidenceDepth),
+    maxEvents: get('maxEvents', DYNAMIC_HARD_LIMITS.maxEvents, DYNAMIC_HARD_LIMITS.maxEvents),
+    maxTextBytes: get('maxTextBytes', DYNAMIC_HARD_LIMITS.maxTextBytes, DYNAMIC_HARD_LIMITS.maxTextBytes),
+    maxListItems: get('maxListItems', DYNAMIC_HARD_LIMITS.maxListItems, DYNAMIC_HARD_LIMITS.maxListItems),
+    maxEvidenceDepth: get('maxEvidenceDepth', DYNAMIC_HARD_LIMITS.maxEvidenceDepth, DYNAMIC_HARD_LIMITS.maxEvidenceDepth),
   }
 }
 
 function truncateUtf8(value, maxBytes) {
   const bytes = Buffer.from(value, 'utf8')
   if (bytes.length <= maxBytes) return { value, truncated: false }
-
   let result = bytes.subarray(0, maxBytes).toString('utf8')
   while (Buffer.byteLength(result, 'utf8') > maxBytes) result = result.slice(0, -1)
   return { value: result, truncated: true }
 }
 
-function redactHostPath(value) {
+const UNC_PATH = /\\\\[^\s\\/]+\\[^\r\n]*?(?=\s+(?:\\\\|[A-Za-z]:[\\/]|\/)|$)/g
+const DRIVE_PATH = /[A-Za-z]:[\\/][^\r\n"'<>|]*/g
+const POSIX_PATH = /(?<![A-Za-z0-9:/])\/(?:[^\r\n"'<>|]*?)(?=\s+(?:\\\\|[A-Za-z]:[\\/]|\/)|$)/g
+
+function redactHostPaths(value) {
   return value
-    .replace(WINDOWS_ABSOLUTE_PATH, '[HOST_PATH]')
-    .replace(POSIX_ABSOLUTE_PATH, '[HOST_PATH]')
+    .replace(UNC_PATH, '[HOST_PATH]')
+    .replace(DRIVE_PATH, '[HOST_PATH]')
+    .replace(POSIX_PATH, '[HOST_PATH]')
 }
 
-function canaryIndex(canaries) {
-  const descriptorsByProperty = new Map()
-  const values = canaries?.values
-  const descriptors = Array.isArray(canaries?.descriptors) ? canaries.descriptors : []
-  for (const descriptor of descriptors) {
-    if (typeof descriptor?.id !== 'string' || typeof descriptor?.kind !== 'string') continue
-    const value = values?.[descriptor.kind === 'api-key'
-      ? 'apiKey'
-      : descriptor.kind.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())]
-    if (typeof value === 'string' && value.length > 0) {
-      descriptorsByProperty.set(descriptor.id, { id: descriptor.id, value })
+function emptyEvidence() {
+  const evidence = {}
+  for (const field of COLLECTIONS) evidence[field] = []
+  return evidence
+}
+
+function rejectedEvidence(code) {
+  const evidence = emptyEvidence()
+  evidence.failures.push({ reason: 'evidence-rejected', code })
+  return evidence
+}
+
+function sortedNotices(notices) {
+  return [...notices].sort((left, right) => (
+    `${left.kind}|${left.location}|${left.reason}`.localeCompare(`${right.kind}|${right.location}|${right.reason}`)
+    || (left.dropped ?? 0) - (right.dropped ?? 0)
+  ))
+}
+
+function canonicalize(value, ancestors = new Set()) {
+  if (value === null) return 'null'
+  if (typeof value === 'string') return JSON.stringify(value)
+  if (typeof value === 'number') return Object.is(value, -0) ? '-0' : String(value)
+  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  if (Array.isArray(value)) {
+    if (ancestors.has(value)) throw new Error('invalid normalized evidence')
+    const next = new Set(ancestors)
+    next.add(value)
+    const lengthEntry = ownDataProperty(value, 'length')
+    if (!lengthEntry.present || !Number.isSafeInteger(lengthEntry.value)) throw new Error('invalid normalized evidence')
+    const items = []
+    for (let index = 0; index < lengthEntry.value; index += 1) {
+      const entry = ownDataProperty(value, String(index))
+      if (!entry.present) throw new Error('invalid normalized evidence')
+      items.push(canonicalize(entry.value, next))
     }
+    return `[${items.join(',')}]`
   }
-  if (descriptorsByProperty.size === 0 && values && typeof values === 'object') {
-    for (const [property, value] of Object.entries(values)) {
-      if (typeof value !== 'string' || value.length === 0) continue
-      const id = property.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)
-      descriptorsByProperty.set(id, { id, value })
-    }
-  }
-  return [...descriptorsByProperty.values()].sort((left, right) => right.value.length - left.value.length)
-}
-
-function normalizeCanaryIds(value, knownIds) {
-  const values = Array.isArray(value) ? value : [value]
-  return [...new Set(values.filter(item => typeof item === 'string' && knownIds.has(item)))]
-}
-
-function canonicalize(value) {
-  if (Array.isArray(value)) return `[${value.map(item => canonicalize(item)).join(',')}]`
   if (value && typeof value === 'object') {
-    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(',')}}`
+    if (ancestors.has(value)) throw new Error('invalid normalized evidence')
+    const next = new Set(ancestors)
+    next.add(value)
+    const parts = []
+    for (const key of ownKeys(value).sort()) {
+      if (typeof key !== 'string') throw new Error('invalid normalized evidence')
+      const entry = ownDataProperty(value, key)
+      if (!entry.present) throw new Error('invalid normalized evidence')
+      parts.push(`${JSON.stringify(key)}:${canonicalize(entry.value, next)}`)
+    }
+    return `{${parts.join(',')}}`
   }
-  return JSON.stringify(value)
+  throw new Error('invalid normalized evidence')
+}
+
+function validateNormalizedValue(value, schema, depth, ancestors, budget) {
+  if (depth > DYNAMIC_HARD_LIMITS.maxEvidenceDepth) throw new Error('invalid normalized evidence')
+  budget.nodes -= 1
+  if (budget.nodes < 0) throw new Error('invalid normalized evidence')
+  if (schema === TEXT) {
+    if (typeof value !== 'string') throw new Error('invalid normalized evidence')
+    budget.textBytes += Buffer.byteLength(value, 'utf8')
+    if (budget.textBytes > DYNAMIC_HARD_LIMITS.maxTextBytes) throw new Error('invalid normalized evidence')
+    return
+  }
+  if (schema === NUMBER) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error('invalid normalized evidence')
+    return
+  }
+  if (schema === BOOLEAN) {
+    if (typeof value !== 'boolean') throw new Error('invalid normalized evidence')
+    return
+  }
+  if (schema === TEXT_ARRAY) {
+    if (!isArray(value) || ancestors.has(value)) throw new Error('invalid normalized evidence')
+    const next = new Set(ancestors)
+    next.add(value)
+    const lengthEntry = ownDataProperty(value, 'length')
+    if (!lengthEntry.present || lengthEntry.value > DYNAMIC_HARD_LIMITS.maxListItems) throw new Error('invalid normalized evidence')
+    assertNormalizedArrayKeys(value, lengthEntry.value)
+    budget.items += lengthEntry.value
+    if (budget.items > DYNAMIC_HARD_LIMITS.maxListItems) throw new Error('invalid normalized evidence')
+    for (let index = 0; index < lengthEntry.value; index += 1) {
+      const entry = ownDataProperty(value, String(index))
+      if (!entry.present) throw new Error('invalid normalized evidence')
+      validateNormalizedValue(entry.value, TEXT, depth + 1, next, budget)
+    }
+    return
+  }
+  if (schema === PAYLOAD) {
+    if (typeof value === 'string') {
+      validateNormalizedValue(value, TEXT, depth, ancestors, budget)
+      return
+    }
+    validateNormalizedRecord(value, PAYLOAD_SCHEMA, depth + 1, ancestors, budget)
+    return
+  }
+  throw new Error('invalid normalized evidence')
+}
+
+function validateNormalizedRecord(value, schema, depth, ancestors, budget, extraKeys = []) {
+  if (!isRecord(value) || ancestors.has(value)) throw new Error('invalid normalized evidence')
+  const next = new Set(ancestors)
+  next.add(value)
+  const allowed = new Set([...Object.keys(schema), ...extraKeys])
+  for (const key of ownKeys(value)) {
+    if (typeof key !== 'string' || !allowed.has(key)) throw new Error('invalid normalized evidence')
+  }
+  for (const key of Object.keys(schema).sort()) {
+    const entry = ownDataProperty(value, key)
+    if (entry.present) validateNormalizedValue(entry.value, schema[key], depth, next, budget)
+  }
+}
+
+function validateNormalizedEvidence(value) {
+  if (!isRecord(value)) throw new Error('invalid normalized evidence')
+  const rootKeys = ownKeys(value)
+  if (rootKeys.some(key => typeof key !== 'string' || !ROOT_OUTPUT_FIELDS.has(key))) {
+    throw new Error('invalid normalized evidence')
+  }
+  for (const field of COLLECTIONS) {
+    const entry = ownDataProperty(value, field)
+    if (!entry.present || !isArray(entry.value)) throw new Error('invalid normalized evidence')
+    const lengthEntry = ownDataProperty(entry.value, 'length')
+    if (!lengthEntry.present || lengthEntry.value > DYNAMIC_HARD_LIMITS.maxListItems) {
+      throw new Error('invalid normalized evidence')
+    }
+    assertNormalizedArrayKeys(entry.value, lengthEntry.value)
+  }
+  const budget = {
+    nodes: DYNAMIC_HARD_LIMITS.maxEvents * 64 + DYNAMIC_HARD_LIMITS.maxListItems,
+    items: 0,
+    textBytes: 0,
+  }
+  let events = 0
+  for (const field of COLLECTIONS) {
+    const list = ownDataProperty(value, field).value
+    const length = ownDataProperty(list, 'length').value
+    events += length
+    if (events > DYNAMIC_HARD_LIMITS.maxEvents) throw new Error('invalid normalized evidence')
+    for (let index = 0; index < length; index += 1) {
+      const eventEntry = ownDataProperty(list, String(index))
+      if (!eventEntry.present || !isRecord(eventEntry.value)) throw new Error('invalid normalized evidence')
+      const event = eventEntry.value
+      const schema = COLLECTION_SCHEMAS[field]
+      const eventKeys = ownKeys(event)
+      for (const key of eventKeys) {
+        if (typeof key !== 'string' || (key !== 'canaryIds' && !Object.hasOwn(schema, key))) {
+          throw new Error('invalid normalized evidence')
+        }
+      }
+      validateNormalizedRecord(event, schema, 0, new Set(), budget, ['canaryIds'])
+      const canaryIdsEntry = ownDataProperty(event, 'canaryIds')
+      if (canaryIdsEntry.present) {
+        if (!isArray(canaryIdsEntry.value)) throw new Error('invalid normalized evidence')
+        const ids = canaryIdsEntry.value
+        const lengthEntry = ownDataProperty(ids, 'length')
+        if (!lengthEntry.present || lengthEntry.value > CANARY_IDS.size) throw new Error('invalid normalized evidence')
+        assertNormalizedArrayKeys(ids, lengthEntry.value)
+        const seen = new Set()
+        for (let idIndex = 0; idIndex < lengthEntry.value; idIndex += 1) {
+          const idEntry = ownDataProperty(ids, String(idIndex))
+          if (!idEntry.present || !CANARY_IDS.has(idEntry.value) || seen.has(idEntry.value)) {
+            throw new Error('invalid normalized evidence')
+          }
+          seen.add(idEntry.value)
+        }
+      }
+    }
+  }
+  for (const field of ROOT_TEXT_FIELDS) {
+    const entry = ownDataProperty(value, field)
+    if (entry.present) validateNormalizedValue(entry.value, TEXT, 0, new Set(), budget)
+  }
 }
 
 export function evidenceDigest(value) {
-  return createHash('sha256').update(canonicalize(value), 'utf8').digest('hex')
+  try {
+    validateNormalizedEvidence(value)
+    return createHash('sha256').update(canonicalize(value), 'utf8').digest('hex')
+  } catch {
+    throw new Error('invalid normalized evidence')
+  }
 }
 
-export function normalizeDynamicEvidence(input = {}, { canaries, limits: rawLimits } = {}) {
-  const limits = normalizeLimits(rawLimits)
-  const canariesByValue = canaryIndex(canaries)
-  const knownCanaryIds = new Set(canariesByValue.map(item => item.id))
-  const notices = []
-  const noticeKeys = new Set()
+export function normalizeDynamicEvidence(input = {}, options = {}) {
+  try {
+    const canariesEntry = isRecord(options) ? ownDataProperty(options, 'canaries') : { present: false }
+    const limitsEntry = isRecord(options) ? ownDataProperty(options, 'limits') : { present: false }
+    const canaries = canariesEntry.present ? validateCanaries(canariesEntry.value) : []
+    const limits = normalizeLimits(limitsEntry.present ? limitsEntry.value : undefined)
+    if (!isRecord(input)) throw unsafeInput()
 
-  const recordNotice = notice => {
-    const key = JSON.stringify(notice)
-    if (!noticeKeys.has(key)) {
-      noticeKeys.add(key)
-      notices.push(notice)
+    const normalized = emptyEvidence()
+    const notices = []
+    const noticeKeys = new Set()
+    const state = {
+      canaries,
+      limits,
+      notices,
+      noticeKeys,
+      textRemaining: limits.maxTextBytes,
+      itemsRemaining: limits.maxListItems,
+      nodesRemaining: limits.maxEvents * 64 + limits.maxListItems,
     }
-  }
-
-  const sanitizeText = (value, path, foundCanaries) => {
-    let result = value
-    for (const canary of canariesByValue) {
-      if (!result.includes(canary.value)) continue
-      result = result.split(canary.value).join(`[CANARY:${canary.id}]`)
-      foundCanaries.add(canary.id)
-    }
-    result = redactHostPath(result)
-    const bounded = truncateUtf8(result, limits.maxTextBytes)
-    if (bounded.truncated) {
-      recordNotice({ reason: 'evidence-truncated', kind: 'text', field: path, maxTextBytes: limits.maxTextBytes })
-    }
-    return bounded.value
-  }
-
-  const normalizeValue = (value, depth, path, foundCanaries, ancestors) => {
-    if (depth > limits.maxEvidenceDepth) {
-      recordNotice({ reason: 'evidence-truncated', kind: 'depth', field: path, maxEvidenceDepth: limits.maxEvidenceDepth })
-      return '[DEPTH_LIMIT]'
-    }
-    if (typeof value === 'string') return sanitizeText(value, path, foundCanaries)
-    if (value === null || typeof value === 'number' || typeof value === 'boolean') return value
-    if (Array.isArray(value)) {
-      if (ancestors.has(value)) {
-        recordNotice({ reason: 'evidence-truncated', kind: 'cycle', field: path })
-        return '[CYCLE]'
+    const addNotice = notice => {
+      const key = JSON.stringify(notice)
+      if (!noticeKeys.has(key)) {
+        noticeKeys.add(key)
+        notices.push(notice)
       }
-      const nextAncestors = new Set(ancestors)
-      nextAncestors.add(value)
-      const result = value.slice(0, limits.maxListItems).map((item, index) => (
-        normalizeValue(item, depth + 1, `${path}[${index}]`, foundCanaries, nextAncestors)
-      ))
-      if (value.length > limits.maxListItems) {
-        recordNotice({ reason: 'evidence-truncated', kind: 'items', field: path, dropped: value.length - limits.maxListItems, maxListItems: limits.maxListItems })
+    }
+    state.addNotice = addNotice
+
+    const sanitizeText = (value, location, foundCanaries = null) => {
+      if (state.textRemaining <= 0) {
+        if (value.length > 0) addNotice({ reason: 'evidence-truncated', kind: 'text', location, maxTextBytes: limits.maxTextBytes })
+        return ''
+      }
+      let result = value
+      for (const canary of canaries) {
+        if (!result.includes(canary.value)) continue
+        result = result.split(canary.value).join(`[CANARY:${canary.id}]`)
+        if (foundCanaries) foundCanaries.add(canary.id)
+      }
+      result = redactHostPaths(result)
+      const bounded = truncateUtf8(result, state.textRemaining)
+      state.textRemaining -= Buffer.byteLength(bounded.value, 'utf8')
+      if (bounded.truncated) {
+        addNotice({ reason: 'evidence-truncated', kind: 'text', location, maxTextBytes: limits.maxTextBytes })
+      }
+      return bounded.value
+    }
+
+    const consumeNode = location => {
+      if (state.nodesRemaining <= 0) {
+        addNotice({ reason: 'evidence-truncated', kind: 'nodes', location })
+        return false
+      }
+      state.nodesRemaining -= 1
+      return true
+    }
+
+    const consumeItem = location => {
+      if (state.itemsRemaining <= 0) {
+        addNotice({ reason: 'evidence-truncated', kind: 'items', location, maxListItems: limits.maxListItems })
+        return false
+      }
+      state.itemsRemaining -= 1
+      return true
+    }
+
+    const normalizeArray = (value, location, depth, foundCanaries) => {
+      if (!isArray(value)) return OMIT
+      if (depth > limits.maxEvidenceDepth) {
+        addNotice({ reason: 'evidence-truncated', kind: 'depth', location, maxEvidenceDepth: limits.maxEvidenceDepth })
+        return '[DEPTH_LIMIT]'
+      }
+      const lengthEntry = ownDataProperty(value, 'length')
+      const length = lengthEntry.present && Number.isSafeInteger(lengthEntry.value) ? lengthEntry.value : 0
+      const result = []
+      const count = Math.min(length, limits.maxListItems)
+      for (let index = 0; index < count; index += 1) {
+        if (!consumeItem(`${location}[${index}]`)) break
+        const entry = ownDataProperty(value, String(index))
+        if (!entry.present) continue
+        if (!consumeNode(`${location}[${index}]`)) break
+        if (typeof entry.value === 'string') result.push(sanitizeText(entry.value, `${location}[${index}]`, foundCanaries))
+      }
+      if (length > count) {
+        addNotice({ reason: 'evidence-truncated', kind: 'items', location, dropped: length - count, maxListItems: limits.maxListItems })
       }
       return result
     }
-    if (typeof value === 'object') {
-      if (ancestors.has(value)) {
-        recordNotice({ reason: 'evidence-truncated', kind: 'cycle', field: path })
-        return '[CYCLE]'
+
+    const normalizeRecord = (value, schema, location, depth, foundCanaries, countItems) => {
+      if (!isRecord(value)) return OMIT
+      if (depth > limits.maxEvidenceDepth) {
+        addNotice({ reason: 'evidence-truncated', kind: 'depth', location, maxEvidenceDepth: limits.maxEvidenceDepth })
+        return '[DEPTH_LIMIT]'
       }
-      const nextAncestors = new Set(ancestors)
-      nextAncestors.add(value)
       const result = {}
-      const entries = Object.entries(value)
-      for (const [key, child] of entries.slice(0, limits.maxListItems)) {
-        const safeKey = sanitizeText(key, `${path}.${key}`, foundCanaries)
-        result[safeKey] = normalizeValue(child, depth + 1, `${path}.${safeKey}`, foundCanaries, nextAncestors)
-      }
-      if (entries.length > limits.maxListItems) {
-        recordNotice({ reason: 'evidence-truncated', kind: 'items', field: path, dropped: entries.length - limits.maxListItems, maxListItems: limits.maxListItems })
+      for (const key of Object.keys(schema).sort()) {
+        const entry = ownDataProperty(value, key)
+        if (!entry.present) continue
+        if (countItems && !consumeItem(`${location}.${key}`)) break
+        if (!consumeNode(`${location}.${key}`)) break
+        const child = normalizeTyped(entry.value, schema[key], `${location}.${key}`, depth + 1, foundCanaries)
+        if (child !== OMIT) result[key] = child
       }
       return result
     }
-    return null
-  }
 
-  const normalized = {}
-  for (const field of COLLECTIONS) normalized[field] = []
-
-  const root = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
-  const rootCanaries = new Set()
-  for (const field of ROOT_TEXT_FIELDS) {
-    if (typeof root[field] === 'string') normalized[field] = sanitizeText(root[field], field, rootCanaries)
-  }
-
-  const retained = []
-  for (const field of COLLECTIONS) {
-    const source = Array.isArray(root[field]) ? root[field] : []
-    const itemLimit = Math.min(source.length, limits.maxListItems)
-    if (source.length > limits.maxListItems) {
-      recordNotice({ reason: 'evidence-truncated', kind: 'items', field, dropped: source.length - limits.maxListItems, maxListItems: limits.maxListItems })
+    const normalizeTyped = (value, schema, location, depth, foundCanaries) => {
+      if (schema === TEXT) return typeof value === 'string' ? sanitizeText(value, location, foundCanaries) : OMIT
+      if (schema === NUMBER) return typeof value === 'number' && Number.isFinite(value) ? value : OMIT
+      if (schema === BOOLEAN) return typeof value === 'boolean' ? value : OMIT
+      if (schema === PAYLOAD) {
+        if (typeof value === 'string') return sanitizeText(value, location, foundCanaries)
+        return normalizeRecord(value, PAYLOAD_SCHEMA, location, depth, foundCanaries, true)
+      }
+      if (schema === TEXT_ARRAY) return normalizeArray(value, location, depth, foundCanaries)
+      return OMIT
     }
-    for (let index = 0; index < itemLimit; index += 1) {
-      const item = source[index]
-      if (!item || typeof item !== 'object' || Array.isArray(item)) {
-        recordNotice({ reason: 'evidence-truncated', kind: 'invalid-event', field })
+
+    for (const field of ROOT_TEXT_FIELDS) {
+      const entry = ownDataProperty(input, field)
+      if (entry.present && typeof entry.value === 'string') normalized[field] = sanitizeText(entry.value, field)
+    }
+
+    const selected = []
+    let candidateCount = 0
+    for (const field of COLLECTIONS) {
+      const collectionEntry = ownDataProperty(input, field)
+      if (!collectionEntry.present) continue
+      if (!isArray(collectionEntry.value)) {
+        addNotice({ reason: 'evidence-truncated', kind: 'invalid-collection', location: field })
+        continue
+      }
+      const lengthEntry = ownDataProperty(collectionEntry.value, 'length')
+      const length = lengthEntry.present && Number.isSafeInteger(lengthEntry.value) ? lengthEntry.value : 0
+      const count = Math.min(length, limits.maxListItems)
+      candidateCount += count
+      if (length > count) {
+        addNotice({ reason: 'evidence-truncated', kind: 'items', location: field, dropped: length - count, maxListItems: limits.maxListItems })
+      }
+      for (let index = 0; index < count && selected.length < limits.maxEvents; index += 1) {
+        const eventEntry = ownDataProperty(collectionEntry.value, String(index))
+        selected.push({ field, index, present: eventEntry.present, value: eventEntry.value })
+      }
+    }
+
+    const normalizedEvents = []
+    for (const selectedEvent of selected) {
+      if (!selectedEvent.present || !isRecord(selectedEvent.value)) {
+        addNotice({ reason: 'evidence-truncated', kind: 'invalid-event', location: `${selectedEvent.field}[${selectedEvent.index}]` })
         continue
       }
       const foundCanaries = new Set()
-      const event = {}
-      for (const [key, value] of Object.entries(item)) {
-        if (!EVENT_FIELDS.has(key)) continue
-        if (key === 'canaryIds' || key === 'canaryId') {
-          const ids = normalizeCanaryIds(value, knownCanaryIds)
-          if (ids.length > 0) event[key] = key === 'canaryId' ? ids[0] : ids
-          continue
-        }
-        event[key] = normalizeValue(value, 0, `${field}[${index}].${key}`, foundCanaries, new Set())
-      }
-      if (foundCanaries.size > 0) {
-        event.canaryIds = [...new Set([...(event.canaryIds ?? []), ...foundCanaries])]
-      }
-      retained.push({ field, event })
+      const event = normalizeRecord(
+        selectedEvent.value,
+        COLLECTION_SCHEMAS[selectedEvent.field],
+        `${selectedEvent.field}[${selectedEvent.index}]`,
+        0,
+        foundCanaries,
+        false,
+      )
+      if (event === OMIT) continue
+      if (foundCanaries.size > 0) event.canaryIds = [...foundCanaries].sort()
+      normalizedEvents.push({ field: selectedEvent.field, event })
     }
-  }
 
-  const noticeLimit = Math.min(limits.maxListItems, limits.maxEvents)
-  const noticeEvents = notices.slice(0, noticeLimit).map(event => ({ field: 'limitations', event }))
-  if (limits.maxEvents === 0 && retained.length > 0) {
-    recordNotice({ reason: 'evidence-truncated', kind: 'events', dropped: retained.length, maxEvents: limits.maxEvents })
+    const noticeLimit = Math.min(limits.maxListItems, limits.maxEvents)
+    const baseNotices = sortedNotices(notices).slice(0, noticeLimit)
+    const baseCapacity = Math.max(0, limits.maxEvents - baseNotices.length)
+    const eventNoticeNeeded = candidateCount > baseCapacity || normalizedEvents.length > baseCapacity
+    let eventNotice = null
+    if (eventNoticeNeeded && baseNotices.length < noticeLimit) {
+      eventNotice = {
+        reason: 'evidence-truncated',
+        kind: 'events',
+        location: 'events',
+        dropped: 0,
+        maxEvents: limits.maxEvents,
+      }
+    }
+    const finalNotices = sortedNotices(eventNotice ? [...baseNotices, eventNotice] : baseNotices)
+      .slice(0, noticeLimit)
+    const eventCapacity = Math.max(0, limits.maxEvents - finalNotices.length)
+    const retained = normalizedEvents.slice(0, eventCapacity)
+    for (const field of COLLECTIONS) {
+      const fieldEvents = retained.filter(item => item.field === field)
+      const slots = field === 'limitations'
+        ? Math.max(0, limits.maxListItems - finalNotices.length)
+        : limits.maxListItems
+      for (const item of fieldEvents.slice(0, slots)) normalized[field].push(item.event)
+    }
+    const retainedCount = COLLECTIONS.reduce((total, field) => total + normalized[field].length, 0)
+    if (eventNotice) eventNotice.dropped = Math.max(0, candidateCount - retainedCount)
+    for (const notice of finalNotices) normalized.limitations.push(notice)
+    if (normalized.limitations.length > limits.maxListItems) normalized.limitations.length = limits.maxListItems
+    return normalized
+  } catch (error) {
+    if (error instanceof EvidenceRejected) return rejectedEvidence(error.code)
+    return rejectedEvidence('unsafe-input')
   }
-  const maxRetained = Math.max(0, limits.maxEvents - noticeEvents.length)
-  if (retained.length > maxRetained) {
-    recordNotice({ reason: 'evidence-truncated', kind: 'events', dropped: retained.length - maxRetained, maxEvents: limits.maxEvents })
-  }
-  const finalNotices = notices.slice(0, noticeLimit)
-  const finalMaxRetained = Math.max(0, limits.maxEvents - finalNotices.length)
-  const selected = retained.slice(0, finalMaxRetained)
-  for (const field of COLLECTIONS) {
-    const items = selected.filter(item => item.field === field)
-    const slots = field === 'limitations'
-      ? Math.max(0, limits.maxListItems - finalNotices.length)
-      : limits.maxListItems
-    for (const { event } of items.slice(0, slots)) normalized[field].push(event)
-  }
-  for (const notice of finalNotices) normalized.limitations.push(notice)
-
-  return normalized
 }

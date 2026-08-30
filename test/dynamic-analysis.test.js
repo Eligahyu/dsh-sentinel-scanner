@@ -251,3 +251,212 @@ test('dynamic evidence keeps truncation notices inside the total event cap', () 
   assert.ok(eventCount <= limits.maxEvents)
   assert.ok(normalized.limitations.length <= limits.maxEvents)
 })
+
+test('dynamic evidence rejects partial, duplicate, and arbitrary canary metadata safely', () => {
+  const canaries = createCanarySet({
+    runId: 'run-review',
+    entropy: size => Buffer.alloc(size, 0x42),
+  })
+  const malformed = [
+    { ...canaries, descriptors: canaries.descriptors.slice(0, -1) },
+    {
+      ...canaries,
+      descriptors: canaries.descriptors.map((descriptor, index) => (
+        index === 1 ? { ...descriptor, id: canaries.descriptors[0].id } : descriptor
+      )),
+    },
+    {
+      ...canaries,
+      descriptors: canaries.descriptors.map((descriptor, index) => (
+        index === 0 ? { ...descriptor, id: canaries.values.apiKey } : descriptor
+      )),
+    },
+  ]
+  const descriptorsWithExtraMetadata = [...canaries.descriptors]
+  Object.defineProperty(descriptorsWithExtraMetadata, 'untrusted', {
+    value: canaries.values.apiKey,
+    enumerable: true,
+  })
+  malformed.push({ ...canaries, descriptors: descriptorsWithExtraMetadata })
+
+  for (const candidate of malformed) {
+    const normalized = normalizeDynamicEvidence({
+      networkAttempts: [{ body: canaries.values.apiKey }],
+    }, { canaries: candidate })
+    const serialized = JSON.stringify(normalized)
+    assert.equal(serialized.includes(canaries.values.apiKey), false)
+    assert.equal(serialized.includes(`[CANARY:${canaries.values.apiKey}]`), false)
+    assert.deepEqual(normalized.failures, [{ reason: 'evidence-rejected', code: 'invalid-canary-set' }])
+  }
+})
+
+test('dynamic evidence never leaks raw canary keys through truncation notices', () => {
+  const canaries = createCanarySet({
+    runId: 'run-review',
+    entropy: size => Buffer.alloc(size, 0x43),
+  })
+  const body = {}
+  Object.defineProperty(body, canaries.values.apiKey, { value: 'hidden', enumerable: true })
+  const normalized = normalizeDynamicEvidence({
+    networkAttempts: [{ body }],
+  }, { canaries, limits: { ...DYNAMIC_HARD_LIMITS, maxTextBytes: 1 } })
+
+  assert.equal(JSON.stringify(normalized).includes(canaries.values.apiKey), false)
+  for (const limitation of normalized.limitations) {
+    assert.equal(typeof limitation.field === 'string' && limitation.field.includes(canaries.values.apiKey), false)
+  }
+})
+
+test('dynamic evidence drops unknown nested fields instead of preserving arbitrary payload keys', () => {
+  const canaries = createCanarySet({
+    runId: 'run-review',
+    entropy: size => Buffer.alloc(size, 0x44),
+  })
+  const normalized = normalizeDynamicEvidence({
+    networkAttempts: [{
+      body: {
+        content: canaries.values.apiKey,
+        unknownNested: { secret: canaries.values.bearerToken },
+      },
+    }],
+  }, { canaries })
+
+  assert.equal(normalized.networkAttempts[0].body.content, '[CANARY:api-key]')
+  assert.equal(Object.hasOwn(normalized.networkAttempts[0].body, 'unknownNested'), false)
+  assert.equal(JSON.stringify(normalized).includes(canaries.values.bearerToken), false)
+})
+
+test('dynamic evidence does not execute discarded getters', () => {
+  const canaries = createCanarySet({
+    runId: 'run-review',
+    entropy: size => Buffer.alloc(size, 0x45),
+  })
+  let getterRan = false
+  const event = { destination: 'sink.invalid' }
+  Object.defineProperty(event, 'unknownSecret', {
+    enumerable: true,
+    get() {
+      getterRan = true
+      throw new Error(canaries.values.apiKey)
+    },
+  })
+
+  const normalized = normalizeDynamicEvidence({ networkAttempts: [event] }, { canaries })
+  assert.equal(getterRan, false)
+  assert.equal(JSON.stringify(normalized).includes(canaries.values.apiKey), false)
+  assert.equal(Object.hasOwn(normalized.networkAttempts[0], 'unknownSecret'), false)
+})
+
+test('dynamic evidence converts throwing accessors and proxies to fixed safe failures', () => {
+  const canaries = createCanarySet({
+    runId: 'run-review',
+    entropy: size => Buffer.alloc(size, 0x46),
+  })
+  const event = {}
+  Object.defineProperty(event, 'destination', {
+    enumerable: true,
+    get() {
+      throw new Error(canaries.values.apiKey)
+    },
+  })
+  const accessorResult = normalizeDynamicEvidence({ networkAttempts: [event] }, { canaries })
+  assert.deepEqual(accessorResult.failures, [{ reason: 'evidence-rejected', code: 'unsafe-input' }])
+  assert.equal(JSON.stringify(accessorResult).includes(canaries.values.apiKey), false)
+
+  const proxyInput = new Proxy({}, {
+    getOwnPropertyDescriptor() {
+      throw new Error(canaries.values.bearerToken)
+    },
+  })
+  const proxyResult = normalizeDynamicEvidence(proxyInput, { canaries })
+  assert.deepEqual(proxyResult.failures, [{ reason: 'evidence-rejected', code: 'unsafe-input' }])
+  assert.equal(JSON.stringify(proxyResult).includes(canaries.values.bearerToken), false)
+})
+
+test('dynamic evidence enforces shared aggregate text and nested item budgets', () => {
+  const limits = { ...DYNAMIC_HARD_LIMITS, maxTextBytes: 10, maxListItems: 2 }
+  const normalized = normalizeDynamicEvidence({
+    stdout: '1234567890',
+    stderr: 'abcdefghij',
+    networkAttempts: [{ body: { first: 'a', second: 'b' }, headers: { first: 'c', second: 'd' } }],
+  }, { limits })
+
+  const textBytes = ['stdout', 'stderr']
+    .filter(field => typeof normalized[field] === 'string')
+    .reduce((total, field) => total + Buffer.byteLength(normalized[field], 'utf8'), 0)
+  assert.ok(textBytes <= limits.maxTextBytes)
+  assert.ok(
+    Object.keys(normalized.networkAttempts[0].body).length
+      + Object.keys(normalized.networkAttempts[0].headers).length <= limits.maxListItems,
+  )
+})
+
+test('dynamic evidence derives canary attribution instead of trusting supplied ids', () => {
+  const canaries = createCanarySet({
+    runId: 'run-review',
+    entropy: size => Buffer.alloc(size, 0x47),
+  })
+  const normalized = normalizeDynamicEvidence({
+    networkAttempts: [{
+      body: 'plain body',
+      canaryId: 'api-key',
+      canaryIds: ['bearer-token', 'forged-id'],
+    }],
+  }, { canaries })
+
+  assert.equal(Object.hasOwn(normalized.networkAttempts[0], 'canaryId'), false)
+  assert.equal(Object.hasOwn(normalized.networkAttempts[0], 'canaryIds'), false)
+})
+
+test('dynamic evidence digest is invariant to supplied attribution order', () => {
+  const canaries = createCanarySet({
+    runId: 'run-review',
+    entropy: size => Buffer.alloc(size, 0x48),
+  })
+  const first = normalizeDynamicEvidence({
+    networkAttempts: [{ body: canaries.values.apiKey, canaryIds: ['bearer-token', 'api-key'] }],
+  }, { canaries })
+  const second = normalizeDynamicEvidence({
+    networkAttempts: [{ body: canaries.values.apiKey, canaryIds: ['api-key', 'bearer-token'] }],
+  }, { canaries })
+
+  assert.equal(evidenceDigest(first), evidenceDigest(second))
+})
+
+test('dynamic evidence redacts UNC and spaced absolute paths', () => {
+  const unc = String.raw`\\server\share\folder with spaces\secret.txt`
+  const posix = '/home/alice/folder with spaces/secret.txt'
+  const normalized = normalizeDynamicEvidence({ stdout: `${unc} ${posix}` })
+
+  assert.equal(normalized.stdout.includes('server'), false)
+  assert.equal(normalized.stdout.includes('/home/'), false)
+  assert.equal(normalized.stdout.match(/\[HOST_PATH\]/g)?.length, 2)
+})
+
+test('dynamic evidence digest rejects cyclic direct input deterministically', () => {
+  const cyclic = { stages: [] }
+  cyclic.self = cyclic
+  assert.throws(() => evidenceDigest(cyclic), /^Error: invalid normalized evidence$/)
+
+  const sparse = { stages: [] }
+  sparse.stages.length = 1
+  assert.throws(() => evidenceDigest(sparse), /^Error: invalid normalized evidence$/)
+
+  const extraArrayProperty = normalizeDynamicEvidence({ stages: [{ name: 'stage' }] })
+  extraArrayProperty.stages.extra = 'must-not-be-ignored'
+  assert.throws(() => evidenceDigest(extraArrayProperty), /^Error: invalid normalized evidence$/)
+})
+
+test('dynamic evidence reports exact event drops after reserving the limitation', () => {
+  const normalized = normalizeDynamicEvidence({
+    networkAttempts: [
+      { destination: 'one' },
+      { destination: 'two' },
+      { destination: 'three' },
+    ],
+  }, { limits: { ...DYNAMIC_HARD_LIMITS, maxEvents: 2 } })
+
+  const eventCount = normalized.networkAttempts.length
+  const truncation = normalized.limitations.find(item => item.reason === 'evidence-truncated' && item.kind === 'events')
+  assert.equal(truncation.dropped, 3 - eventCount)
+})
