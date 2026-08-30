@@ -890,25 +890,32 @@ export function resolvePatchEntry(packageRoot, name, packageName = '') {
 export function parsePatchRows(patchText) {
   const rows = []
   let current = null
+  const scalar = (text, key) => {
+    const prefix = `${key}:`
+    if (!text.startsWith(prefix)) return null
+    let value = text.slice(prefix.length).trim()
+    if (value.length >= 2 && (value[0] === '"' || value[0] === "'") && value.at(-1) === value[0]) {
+      value = value.slice(1, -1)
+    }
+    return value
+  }
   for (const rawLine of patchText.split('\n')) {
     const line = rawLine.trim()
-    const idMatch = /^-\s*id:\s*(\S+)/.exec(line)
-    if (idMatch) {
+    const rowText = line.startsWith('-') ? line.slice(1).trimStart() : null
+    const rowId = rowText === null ? null : scalar(rowText, 'id')
+    if (rowId) {
       if (current) rows.push(current)
-      current = { id: idMatch[1] }
+      current = { id: rowId.split(/\s/, 1)[0] }
       continue
     }
     if (!current) {
-      const nameOnly = /^-\s*name:\s*['"]?([^'"]+)['"]?\s*$/.exec(line)
-      if (nameOnly) {
-        if (current) rows.push(current)
-        current = { name: nameOnly[1].trim() }
-      }
+      const nameOnly = rowText === null ? null : scalar(rowText, 'name')
+      if (nameOnly) current = { name: nameOnly }
       continue
     }
-    const nameMatch = /^name:\s*['"]?([^'"]+)['"]?\s*$/.exec(line)
-    if (nameMatch) current.name = nameMatch[1].trim()
-    if (/^disabled:\s*true/i.test(line)) current.disabled = true
+    const name = scalar(line, 'name')
+    if (name) current.name = name
+    if (scalar(line.toLowerCase(), 'disabled') === 'true') current.disabled = true
   }
   if (current) rows.push(current)
   return rows

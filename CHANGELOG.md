@@ -19,6 +19,8 @@
 - 仅对明确的开发/语料脚本降权；未知 `scripts/**` 文件继续按运行时源码计分。
 - ignore 报告区分匹配条目和被剪枝目录，不再把未遍历目录误称为已统计文件。
 - 本地 `.worktrees/` 作为 Git 工作树元数据目录跳过，避免把并行检出重复当作目标源码。
+- CodeQL 明确覆盖 `engine` / `plugin` / `bin` 发布面；测试语料不再混入核心代码告警。
+- 重写不受信源码的 child-process 别名提取、patch 行解析和开发 runner 识别，消除多项 polynomial ReDoS 路径；动态别名进入正则前执行完整元字符转义。
 
 ## 0.4.4 (2026-08-23) — Professional Scanner Release
 

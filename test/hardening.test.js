@@ -944,6 +944,24 @@ test('security:CodeQL covers the scanner core excluded from recursive self-scan'
   assert.match(workflow, /github\/codeql-action\/init@v4/)
   assert.match(workflow, /github\/codeql-action\/analyze@v4/)
   assert.match(workflow, /languages:\s*['"]?javascript-typescript['"]?/)
+  assert.match(workflow, /config-file:\s*\.\/\.github\/codeql\/codeql-config\.yml/)
+
+  const config = readFileSync(join(root, '.github', 'codeql', 'codeql-config.yml'), 'utf8')
+  for (const shippedPath of ['engine', 'plugin', 'bin']) {
+    assert.match(config, new RegExp(`^\\s*- ${shippedPath}\\s*$`, 'm'))
+  }
+  assert.doesNotMatch(config, /^\s*- test\/?\s*$/m, 'CodeQL 核心扫描不得把测试语料当成发布代码入口')
+})
+
+test('security:untrusted-input parsers avoid known polynomial regex shapes', () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+  const ast = readFileSync(join(root, 'engine', 'semantic', 'ast.js'), 'utf8')
+  const semantic = readFileSync(join(root, 'engine', 'semantic', 'index.js'), 'utf8')
+  const scanner = readFileSync(join(root, 'engine', 'scanner.js'), 'utf8')
+
+  assert.doesNotMatch(ast, /\\\{\\s\*\(\[\\s\\S\]\*\?\)/)
+  assert.doesNotMatch(semantic, /\\\{\\s\*\(\[\\s\\S\]\*\?\)/)
+  assert.doesNotMatch(scanner, /\['"]\?\(\[\^'"]\+\)\['"]\?\\s\*\$/)
 })
 
 // ---- P0-2: traversal completeness ----

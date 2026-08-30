@@ -153,7 +153,9 @@ export function collectImports(ast) {
 /** 收集 child_process 别名:const { exec: run } = require(...) / import { exec as run } / const cp = require(...)。 */
 export function collectAliases(content) {
   const aliases = new Map()
-  const destructureRe = /\{\s*([\s\S]*?)\s*}\s*=\s*(?:require|await\s+import)\s*\(\s*['"]child_process['"]\s*\)/g
+  // `[^{}]*` keeps matching linear on untrusted source and cannot wander across
+  // unrelated object literals while looking for a later require/import call.
+  const destructureRe = /\{([^{}]*)}\s*=\s*(?:require|await\s+import)\s*\(\s*['"](?:node:)?child_process['"]\s*\)/g
   let m
   while ((m = destructureRe.exec(content)) !== null) {
     for (const part of m[1].split(',')) {
@@ -163,7 +165,7 @@ export function collectAliases(content) {
       if (mm) aliases.set(mm[2] ?? mm[1], mm[1])
     }
   }
-  const importRe = /import\s*\{([\s\S]*?)}\s*from\s*['"]node:child_process['"]/g
+  const importRe = /import\s*\{([^{}]*)}\s*from\s*['"](?:node:)?child_process['"]/g
   while ((m = importRe.exec(content)) !== null) {
     for (const part of m[1].split(',')) {
       const t = part.trim()
@@ -171,7 +173,7 @@ export function collectAliases(content) {
       if (mm) aliases.set(mm[2] ?? mm[1], mm[1])
     }
   }
-  const cpVarRe = /(?:const|let|var)\s+(cp|child_process)\s*=\s*require\s*\(\s*['"]child_process['"]\s*\)/g
+  const cpVarRe = /(?:const|let|var)\s+(cp|child_process)\s*=\s*require\s*\(\s*['"](?:node:)?child_process['"]\s*\)/g
   while ((m = cpVarRe.exec(content)) !== null) {
     for (const name of ['exec', 'execSync', 'spawn', 'spawnSync', 'execFile', 'execFileSync', 'fork']) {
       aliases.set(`${m[1]}.${name}`, name)

@@ -379,6 +379,25 @@ test('SEN-AGENT-005:后置投毒短语不得被 exfiltration 名词豁免', () =
   assert.equal(findings.some((finding) => finding.ruleId === 'SEN-AGENT-005'), true)
 })
 
+test('regex fallback aliases support node:child_process without broad cross-brace capture', async () => {
+  const [{ collectAliases }, { collectAliasesForRegex, escapeRegExp }] = await Promise.all([
+    import('../engine/semantic/ast.js'),
+    import('../engine/semantic/index.js'),
+  ])
+  const src = `const {
+    exec: run,
+    spawn
+  } = require('node:child_process')
+  import { execFile as safeRun } from 'node:child_process'`
+
+  for (const aliases of [collectAliases(src), collectAliasesForRegex(src)]) {
+    assert.equal(aliases.get('run'), 'exec')
+    assert.equal(aliases.get('spawn'), 'spawn')
+    assert.equal(aliases.get('safeRun'), 'execFile')
+  }
+  assert.equal(escapeRegExp('cp.exec[0]+'), 'cp\\.exec\\[0\\]\\+')
+})
+
 test('低置信度注释证据降权，且注释不能触发凭据外传', async () => {
   const tmp = mkdtempSync(join(tmpdir(), 'prof-comments-'))
   try {

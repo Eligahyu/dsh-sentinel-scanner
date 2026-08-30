@@ -1,0 +1,8 @@
+name: dsh-sentinel shipped code
+
+# Self-scan excludes the rule engine because rule definitions intentionally contain
+# malicious signatures. CodeQL covers the shipped JavaScript surface independently.
+paths:
+  - engine
+  - plugin
+  - bin

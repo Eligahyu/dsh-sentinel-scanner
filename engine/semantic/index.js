@@ -83,7 +83,7 @@ function matchBrace(content, openIdx, open = '{', close = '}') {
 /** 收集 child_process 别名。 */
 export function collectAliasesForRegex(content) {
   const aliases = new Map()
-  const destructureRe = /\{\s*([\s\S]*?)\s*}\s*=\s*(?:require|await\s+import)\s*\(\s*['"]child_process['"]\s*\)/g
+  const destructureRe = /\{([^{}]*)}\s*=\s*(?:require|await\s+import)\s*\(\s*['"](?:node:)?child_process['"]\s*\)/g
   let m
   while ((m = destructureRe.exec(content)) !== null) {
     for (const part of m[1].split(',')) {
@@ -93,7 +93,7 @@ export function collectAliasesForRegex(content) {
       if (mm) aliases.set(mm[2] ?? mm[1], mm[1])
     }
   }
-  const importRe = /import\s*\{([\s\S]*?)}\s*from\s*['"]node:child_process['"]/g
+  const importRe = /import\s*\{([^{}]*)}\s*from\s*['"](?:node:)?child_process['"]/g
   while ((m = importRe.exec(content)) !== null) {
     for (const part of m[1].split(',')) {
       const t = part.trim()
@@ -101,11 +101,16 @@ export function collectAliasesForRegex(content) {
       if (mm) aliases.set(mm[2] ?? mm[1], mm[1])
     }
   }
-  const cpVarRe = /(?:const|let|var)\s+(cp|child_process)\s*=\s*require\s*\(\s*['"]child_process['"]\s*\)/g
+  const cpVarRe = /(?:const|let|var)\s+(cp|child_process)\s*=\s*require\s*\(\s*['"](?:node:)?child_process['"]\s*\)/g
   while ((m = cpVarRe.exec(content)) !== null) {
     for (const name of SINK_NAMES) aliases.set(`${m[1]}.${name}`, name)
   }
   return aliases
+}
+
+/** Escape every regular-expression metacharacter before interpolating a static alias. */
+export function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 /** 正则版语义扫描(解析失败时的兜底)。 */
@@ -192,7 +197,7 @@ export function regexSemanticScan(content, relPath) {
         while ((sm = calleeRe.exec(body)) !== null) checkSink(sm[1], sink, sm.index + sm[0].length - 1)
       }
       for (const { alias, sink } of aliasSinks) {
-        const aliasRe = new RegExp(`\\b${alias.replace(/\./g, '\\.')}\\s*\\(`, 'g')
+        const aliasRe = new RegExp(`\\b${escapeRegExp(alias)}\\s*\\(`, 'g')
         let sm
         while ((sm = aliasRe.exec(body)) !== null) checkSink(alias, sink, sm.index + sm[0].length - 1)
       }

@@ -354,7 +354,7 @@ evasion, and hardening-edge groups. The current checked-in benchmark records:
 | Hardening edge group | 1.000 | 1.000 | 1.000 |
 
 These metrics describe the checked-in corpus, not all real-world plugins. The
-project also maintains 210 automated tests covering the engine, CLI, plugin
+project also maintains 212 automated tests covering the engine, CLI, plugin
 loading, module/cross-file analysis, supply-chain layers, report contracts, and
 hardening behavior.
 
@@ -683,7 +683,7 @@ npm metadata
 | Source-to-sink flow | 1.000 | 1.000 | 1.000 |
 | Hardening edge 分组 | 1.000 | 1.000 | 1.000 |
 
-这些数字只描述仓库内标注语料，不代表所有真实插件。项目目前有 210 项自动化测试，覆盖
+这些数字只描述仓库内标注语料，不代表所有真实插件。项目目前有 212 项自动化测试，覆盖
 引擎、CLI、插件加载、模块/跨文件分析、供应链层、报告契约和发布加固。
 
 ```sh

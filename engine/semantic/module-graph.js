@@ -23,7 +23,14 @@ const TEST_PATH = /(^|[\\/])(?:test|tests|__tests__|spec|e2e)([\\/]|\.)|\.(?:spe
 
 /** Type declarations and explicit development runners do not participate in runtime reachability. */
 const DECLARATION_PATH = /\.d\.(?:ts|mts|cts)$/i
-const DEVELOPMENT_RUNNER_PATH = /(^|[\\/])scripts[\\/][^\\/]*(?:e2e|release|bench|eval|check|dev)[^\\/]*$/i
+const DEVELOPMENT_RUNNER_MARKERS = ['e2e', 'release', 'bench', 'eval', 'check', 'dev']
+
+function isDevelopmentRunnerPath(relPath) {
+  const parts = String(relPath).replace(/\\/g, '/').split('/')
+  if (parts.length < 2 || parts.at(-2).toLowerCase() !== 'scripts') return false
+  const fileName = parts.at(-1).toLowerCase()
+  return DEVELOPMENT_RUNNER_MARKERS.some((marker) => fileName.includes(marker))
+}
 
 function relPath(root, abs) {
   return relative(root, abs).replace(/\\/g, '/')
@@ -231,7 +238,7 @@ export function buildModuleGraph(root, files = []) {
     seen.add(rel)
     // 非 JS/TS 源码(如 .ps1/.py/.json 误入种子)不是模块图职责范围:跳过而非记 failure
     if (!SOURCE_EXTENSIONS.some((ext) => rel.toLowerCase().endsWith(ext))) continue
-    const downgradeMissingImport = TEST_PATH.test(rel) || DECLARATION_PATH.test(rel) || DEVELOPMENT_RUNNER_PATH.test(rel)
+    const downgradeMissingImport = TEST_PATH.test(rel) || DECLARATION_PATH.test(rel) || isDevelopmentRunnerPath(rel)
     let abs
     try {
       abs = resolveInside(rootAbs, rel)
