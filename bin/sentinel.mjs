@@ -18,6 +18,7 @@
 
 import { scan, scanProfile, RULES, VERSION } from '../engine/index.js'
 import { SEVERITY_ORDER } from '../engine/rules.js'
+import { normalizeDynamicOptions } from '../engine/dynamic/policy.js'
 import { relative as pathRelative, isAbsolute as pathIsAbsolute } from 'node:path'
 
 const VERDICT_EMOJI = { safe: '✅', review: '👀', risky: '⚠️', dangerous: '🚨' }
@@ -55,6 +56,10 @@ Options:
   --redact-paths  anonymize absolute paths in shareable reports (<workspace>/...)
   --advisories    query OSV for known vulnerabilities (default OFF; uploads name+version only)
   --provenance    read npm provenance attestations (default OFF)
+  --dynamic       request bounded dynamic analysis (Phase A may be unavailable)
+  --dynamic-backend <name>  backend: auto | docker | podman
+  --dynamic-profile observe  dynamic analysis profile (Phase A only)
+  --dynamic-timeout <ms>     dynamic analysis timeout in milliseconds
   -h, --help      show this help
 
 Exit codes: 0 = safe/review, 1 = risky/dangerous or --fail-on exceeded, 2 = usage error.
@@ -141,7 +146,7 @@ function redactReportPaths(report, basePath) {
 export async function main(argv, io = { stdout: process.stdout, stderr: process.stderr }) {
   const { stdout, stderr } = io
   const args = [...argv]
-  const opts = { json: false, format: 'text', out: null, maxFiles: undefined, maxPlugins: undefined, maxBytes: undefined, configPath: null, includeBuiltins: false, baseline: null, failOn: null, advisories: false, provenance: false, redactPaths: false, failOnIncomplete: false, strictExitCodes: false }
+  const opts = { json: false, format: 'text', out: null, maxFiles: undefined, maxPlugins: undefined, maxBytes: undefined, configPath: null, includeBuiltins: false, baseline: null, failOn: null, advisories: false, provenance: false, redactPaths: false, failOnIncomplete: false, strictExitCodes: false, dynamic: false, dynamicBackend: undefined, dynamicProfile: undefined, dynamicTimeoutMs: undefined }
   const positional = []
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i]
@@ -149,6 +154,37 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
       case '--json': opts.json = true; opts.format = 'json'; break
       case '--advisories': opts.advisories = true; break
       case '--provenance': opts.provenance = true; break
+      case '--dynamic': opts.dynamic = true; break
+      case '--dynamic-backend': {
+        const value = args[i + 1]
+        if (value === undefined || value.startsWith('-')) {
+          stderr.write('dsh-sentinel: --dynamic-backend requires a value (auto|docker|podman)\n')
+          return 2
+        }
+        opts.dynamicBackend = value
+        i += 1
+        break
+      }
+      case '--dynamic-profile': {
+        const value = args[i + 1]
+        if (value === undefined || value.startsWith('-')) {
+          stderr.write('dsh-sentinel: --dynamic-profile requires a value (observe)\n')
+          return 2
+        }
+        opts.dynamicProfile = value
+        i += 1
+        break
+      }
+      case '--dynamic-timeout': {
+        const value = args[i + 1]
+        if (value === undefined || value.startsWith('-')) {
+          stderr.write('dsh-sentinel: --dynamic-timeout requires a value in milliseconds\n')
+          return 2
+        }
+        opts.dynamicTimeoutMs = value
+        i += 1
+        break
+      }
       case '--redact-paths': opts.redactPaths = true; break
       case '--fail-on-incomplete': opts.failOnIncomplete = true; break
       case '--strict-exit-codes': opts.strictExitCodes = true; break
@@ -227,6 +263,12 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
       includeBuiltins: opts.includeBuiltins ? true : undefined,
       failOn: opts.failOn ?? config.failOn,
     })
+    const dynamicOptions = normalizeDynamicOptions({
+      dynamic: opts.dynamic || effective.dynamic,
+      dynamicBackend: opts.dynamicBackend ?? effective.dynamicBackend,
+      dynamicProfile: opts.dynamicProfile ?? effective.dynamicProfile,
+      dynamicTimeoutMs: opts.dynamicTimeoutMs ?? effective.dynamicTimeoutMs,
+    })
     effectiveFailOn = effective.failOn ?? null
     // 安装前审计:audit-install <pkg> 或 npm:<pkg>
     const auditSpec = positional[0] === 'audit-install' ? positional[1] : positional[0]?.startsWith('npm:') ? positional[0] : null
@@ -247,6 +289,7 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
         maxBytesPerFile: effective.maxBytesPerFile,
         includeBuiltins: effective.includeBuiltins,
         trustedScopes: config.trustedScopes,
+        ...dynamicOptions,
       })
     }
     if (positional.length === 0) {
@@ -260,6 +303,7 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
       mode: effective.mode,
       ignore: config.ignore,
       includeBuildArtifacts: config.includeBuildArtifacts,
+      ...dynamicOptions,
     })
   })()
 

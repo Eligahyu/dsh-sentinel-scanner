@@ -55,7 +55,7 @@
     }
   },
   "scripts": {
-    "test": "node --test test/scan.test.js test/plugin-load.test.js test/professional.test.js test/professional-contract.test.js test/module-graph.test.js test/cross-file-taint.test.js test/dependency-graph.test.js test/capability-graph.test.js test/public-corpus-manifest.test.js test/corpus-fetch.test.js test/temp-artifact-isolation.test.js test/sbom.test.js test/provenance.test.js test/supplychain.test.js test/v2.test.js test/hardening.test.js",
+    "test": "node --test test/scan.test.js test/plugin-load.test.js test/professional.test.js test/professional-contract.test.js test/module-graph.test.js test/cross-file-taint.test.js test/dependency-graph.test.js test/capability-graph.test.js test/public-corpus-manifest.test.js test/corpus-fetch.test.js test/temp-artifact-isolation.test.js test/sbom.test.js test/provenance.test.js test/supplychain.test.js test/v2.test.js test/hardening.test.js test/dynamic-analysis.test.js",
     "benchmark": "node scripts/benchmark.mjs",
     "verify:release": "npm test && npm run benchmark && npm pack --dry-run",
     "docs:rules": "node scripts/generate-rules-doc.mjs",

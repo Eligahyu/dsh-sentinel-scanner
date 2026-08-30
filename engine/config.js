@@ -25,6 +25,10 @@ export const DEFAULT_CONFIG = Object.freeze({
   redactPaths: false,
   advisories: false,
   failOn: 'high',
+  dynamic: false,
+  dynamicBackend: 'auto',
+  dynamicProfile: 'observe',
+  dynamicTimeoutMs: 15000,
 })
 
 /** 从 cwd(或显式路径)加载配置;文件缺失返回默认值。 */
