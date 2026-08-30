@@ -27,6 +27,7 @@ test('professional report exposes stable analysis-layer defaults', () => {
   assert.deepEqual(Object.keys(report.analysisLayers).sort(), [
     'capabilityGraph',
     'dependencyGraph',
+    'dynamic',
     'moduleGraph',
     'provenance',
     'sbom',
@@ -38,6 +39,76 @@ test('professional report exposes stable analysis-layer defaults', () => {
   assert.equal(report.analysisLayers.sbom.status, 'not-requested')
   assert.equal(report.analysisLayers.provenance.status, 'not-requested')
   assert.equal(typeof report.analysisLayers.moduleGraph.complete, 'boolean')
+})
+
+test('dynamic report contract exposes independent defaults', () => {
+  const report = buildReport(minimalParts())
+
+  assert.deepEqual(report.analysisLayers.dynamic, {
+    status: 'not-requested',
+    requested: false,
+    complete: false,
+    backend: null,
+    profile: null,
+    stages: [],
+    networkAttempts: [],
+    dnsQueries: [],
+    processes: [],
+    fileEvents: [],
+    canaryEvents: [],
+    policyViolations: [],
+    limitations: [],
+    failures: [],
+    evidenceDigest: null,
+  })
+  assert.equal(report.summary.dynamicRequested, false)
+  assert.equal(report.summary.dynamicComplete, false)
+  assert.equal(report.summary.dynamicStatus, 'not-requested')
+  assert.equal(report.summary.scanComplete, true)
+})
+
+test('dynamic report contract normalizes malformed values to safe defaults', () => {
+  const report = buildReport(minimalParts({
+    analysisLayers: {
+      dynamic: {
+        status: { arbitrary: true },
+        requested: 'yes',
+        complete: { arbitrary: true },
+        backend: { arbitrary: true },
+        profile: ['arbitrary'],
+        stages: { arbitrary: true },
+        networkAttempts: 'arbitrary',
+        dnsQueries: null,
+        processes: { arbitrary: true },
+        fileEvents: 'arbitrary',
+        canaryEvents: null,
+        policyViolations: { arbitrary: true },
+        limitations: 'arbitrary',
+        failures: { arbitrary: true },
+        evidenceDigest: ['arbitrary'],
+        unknown: 'discard me',
+      },
+    },
+  }))
+
+  assert.deepEqual(report.analysisLayers.dynamic, {
+    status: 'not-requested',
+    requested: false,
+    complete: false,
+    backend: null,
+    profile: null,
+    stages: [],
+    networkAttempts: [],
+    dnsQueries: [],
+    processes: [],
+    fileEvents: [],
+    canaryEvents: [],
+    policyViolations: [],
+    limitations: [],
+    failures: [],
+    evidenceDigest: null,
+  })
+  assert.equal(report.summary.scanComplete, true)
 })
 
 test('failed analysis layer makes the report incomplete and preserves reasons', () => {

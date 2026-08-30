@@ -127,6 +127,9 @@ export function suppressOverlaps(findings) {
  */
 export function buildReport(parts, maxFindings = 300) {
   const analysisLayers = normalizeAnalysisLayers(parts.analysisLayers)
+  const dynamic = analysisLayers.dynamic
+  const dynamicRequested = dynamic.requested === true
+  const dynamicComplete = dynamicRequested && dynamic.complete === true
   const layerIncompleteReasons = incompleteLayerReasons(analysisLayers)
   const counts = parts.allStats
     ? { bySeverity: { ...parts.allStats.bySeverity }, byCategory: { ...parts.allStats.byCategory } }
@@ -244,6 +247,9 @@ export function buildReport(parts, maxFindings = 300) {
       score,
       // 完整度
       scanComplete,
+      dynamicRequested,
+      dynamicComplete,
+      dynamicStatus: dynamic.status,
       incompleteScan: !scanComplete,
       incompleteReasons: [
         ...(parts.scanComplete === false ? ['scan'] : []),

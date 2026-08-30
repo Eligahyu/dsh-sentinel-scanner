@@ -1,11 +1,14 @@
 /** Stable report contracts for optional professional analysis layers. */
 
+import { DYNAMIC_STATUSES, emptyDynamicLayer, normalizeDynamicLayer } from '../dynamic/contracts.js'
+
 const LAYER_DEFAULTS = Object.freeze({
   moduleGraph: { complete: true, nodes: 0, edges: 0, unresolved: 0, failures: [], warnings: [] },
   dependencyGraph: { complete: true, nodes: 0, edges: 0, unresolved: 0, failures: [], buildRequirements: [] },
   capabilityGraph: { complete: true, tools: 0, capabilities: [], attackPaths: 0, failures: [] },
   sbom: { status: 'not-requested', format: null, components: 0, digest: null, failures: [] },
   provenance: { status: 'not-requested', verified: false, reasons: [] },
+  dynamic: emptyDynamicLayer(),
 })
 
 function clone(value) {
@@ -25,6 +28,7 @@ export function normalizeAnalysisLayers(input = {}) {
       layers[name] = { ...layers[name], ...input[name] }
     }
   }
+  layers.dynamic = normalizeDynamicLayer(input.dynamic)
   return layers
 }
 
@@ -58,6 +62,25 @@ export function assertReportContract(report) {
   if (!layers || typeof layers !== 'object') throw new Error('report analysisLayers missing')
   for (const name of Object.keys(LAYER_DEFAULTS)) {
     if (!layers[name] || typeof layers[name] !== 'object') throw new Error(`report analysis layer missing: ${name}`)
+  }
+  const dynamic = layers.dynamic
+  if (!DYNAMIC_STATUSES.includes(dynamic.status)) throw new Error('report dynamic status invalid')
+  if (typeof dynamic.requested !== 'boolean' || typeof dynamic.complete !== 'boolean') {
+    throw new Error('report dynamic flags invalid')
+  }
+  if (dynamic.status === 'not-requested'
+    && (dynamic.requested || dynamic.complete || dynamic.backend !== null || dynamic.profile !== null)) {
+    throw new Error('report dynamic not-requested invariant violated')
+  }
+  if (dynamic.status === 'complete' && (!dynamic.requested || !dynamic.complete)) {
+    throw new Error('report dynamic complete invariant violated')
+  }
+  if (['unavailable', 'refused', 'incomplete'].includes(dynamic.status)
+    && (!dynamic.requested || dynamic.complete)) {
+    throw new Error('report dynamic incomplete invariant violated')
+  }
+  for (const field of ['stages', 'networkAttempts', 'dnsQueries', 'processes', 'fileEvents', 'canaryEvents', 'policyViolations', 'limitations', 'failures']) {
+    if (!Array.isArray(dynamic[field])) throw new Error(`report dynamic list invalid: ${field}`)
   }
   if (report.summary?.scanComplete === true && incompleteLayerReasons(layers).length > 0) {
     throw new Error('complete report cannot contain failed analysis layers')
