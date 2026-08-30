@@ -53,13 +53,25 @@ function importsForSpecifier(content, specifier) {
   }
   const defaultImport = new RegExp(`import\\s+([A-Za-z_$][\\w$]*)\\s+from\\s*['"]${quoted}['"]`, 'g')
   while ((match = defaultImport.exec(content)) !== null) out.push({ imported: 'default', local: match[1] })
+  const commonJsNamed = new RegExp(`(?:const|let|var)\\s*\\{([^{}]*)\\}\\s*=\\s*require\\s*\\(\\s*['"]${quoted}['"]\\s*\\)`, 'g')
+  while ((match = commonJsNamed.exec(content)) !== null) {
+    for (const part of match[1].split(',')) {
+      const bits = part.trim().split(/\s*:\s*/)
+      const imported = bits[0]?.trim()
+      const local = bits[1]?.trim() ?? imported
+      if (imported && local) out.push({ imported, local })
+    }
+  }
   return out
 }
 
 function exportedFunction(content, name) {
   const escaped = escapeRe(name)
-  const fn = new RegExp(`export\\s+(?:async\\s+)?function\\s+${escaped}\\s*\\(\\s*([A-Za-z_$][\\w$]*)[^)]*\\)\\s*\\{`, 'm')
-  const match = fn.exec(content)
+  const patterns = [
+    new RegExp(`export\\s+(?:async\\s+)?function\\s+${escaped}\\s*\\(\\s*([A-Za-z_$][\\w$]*)[^)]*\\)\\s*\\{`, 'm'),
+    new RegExp(`(?:module\\s*\\.\\s*exports|exports)\\s*\\.\\s*${escaped}\\s*=\\s*(?:async\\s+)?function(?:\\s+[A-Za-z_$][\\w$]*)?\\s*\\(\\s*([A-Za-z_$][\\w$]*)[^)]*\\)\\s*\\{`, 'm'),
+  ]
+  const match = patterns.map((pattern) => pattern.exec(content)).find(Boolean)
   if (!match) return null
   const open = match.index + match[0].length - 1
   const end = braceEnd(content, open)

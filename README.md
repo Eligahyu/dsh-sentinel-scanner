@@ -81,7 +81,7 @@ dsh-sentinel is designed for two audiences:
 | --- | --- |
 | Heuristic rules | 51 rules across execution, credentials, exfiltration, obfuscation, install scripts, filesystem, network, manifests, Agent Tools, taint, supply chain, binaries, and persistence. |
 | Agent Tool analysis | Traces `defineTool` inputs such as `args.*` into shell, filesystem, network, and dynamic-code sinks. Handles aliases, computed properties, optional chaining, variable propagation, and bounded cross-function flows. |
-| Module and cross-file analysis | Builds a bounded JS/TS module graph, resolves common relative imports—including TypeScript `.js` specifiers that map to `.ts` sources—and supports bounded cross-file taint analysis. TypeScript parser limits are reported as a capability boundary instead of falsely failing every TS scan. |
+| Module and cross-file analysis | Builds a bounded JS/TS module graph across ESM and statically provable CommonJS `require` / `require.resolve` edges, including constant string concatenation and TypeScript `.js` specifiers that map to `.ts` sources. Cross-file taint follows ESM imports and destructured CommonJS exports; unprovable dynamic module specifiers are reported instead of guessed. TypeScript parser limits are reported as a capability boundary instead of falsely failing every TS scan. |
 | Language-aware coverage | JS-family files receive semantic analysis. TypeScript is conservatively degraded where syntax exceeds the parser boundary. Python and PowerShell files are not incorrectly fed into the JS parser and still receive applicable heuristic scanning. |
 | DSH manifest validation | Audits `dsh.bundle`, `cordis.patch.yml`, package entry contracts, and lexical/realpath/symlink containment. Escaping paths trigger `SEN-MAN-009`. |
 | Scan modes | `source` skips generated build trees by default; `package` includes distributable output such as `dist` and `build`; `profile` discovers and audits installed DSH plugins. |
@@ -287,6 +287,9 @@ File/plugin limits, files above the hard size ceiling, binary sampling limits, a
 core module/cross-file analysis failures can make a scan incomplete. TypeScript
 syntax outside the current parser capability is explicitly degraded and recorded;
 ordinary `.ts`, `.tsx`, or `.d.ts` presence is not an automatic scan failure.
+Dynamic `import()` / `require()` targets that cannot be reduced to a static string
+remain visible as `dynamic-module-specifier` warnings and never become invented
+module-graph edges.
 
 ## Pre-install package audit
 
@@ -455,7 +458,7 @@ DSH 插件可能拥有加载它的用户或 Agent 所具备的文件、网络、
 | --- | --- |
 | 启发式规则 | 51 条规则，覆盖执行、凭据、外传、混淆、安装脚本、文件系统、网络、manifest、Agent Tool、污点、供应链、二进制和持久化。 |
 | Agent Tool 语义分析 | 跟踪 `defineTool` 中 `args.*` 到 shell、文件、网络和动态代码 sink，支持别名、计算属性、optional chaining、变量传播和有界跨函数流。 |
-| 模块图与跨文件分析 | 构建有界 JS/TS 模块图，支持常见相对导入和 TypeScript 项目的 `.js -> .ts` 回退，并执行有界跨文件污点分析。 |
+| 模块图与跨文件分析 | 构建有界 JS/TS 模块图，支持 ESM、可静态证明的 CommonJS `require` / `require.resolve`、常量字符串拼接及 TypeScript `.js -> .ts` 回退；跨文件污点可沿 ESM import 和 CommonJS 解构导入追踪。无法静态确定的动态模块目标只报告 warning，不猜测依赖边。 |
 | 语言能力边界 | JS 系列文件执行语义分析；超出当前 parser 能力的 TypeScript 会降级并记录，不会因 `.ts/.tsx/.d.ts` 的存在就全部判扫描不完整；Python、PowerShell 不会错误送入 JS parser。 |
 | DSH 清单检查 | 检查 `dsh.bundle`、`cordis.patch.yml`、入口契约，以及词法、realpath、symlink 三层路径 containment；路径逃逸触发 `SEN-MAN-009`。 |
 | 三种扫描模式 | `source` 默认跳过生成目录；`package` 扫描 `dist/build` 等发布产物；`profile` 发现并审计第三方 DSH 插件。 |
@@ -625,6 +628,8 @@ parser 能力边界、ignore 和 hard skip 信息。
 文件或插件超过上限、文件超过 hard size、二进制采样受限、核心模块/跨文件分析失败等可能
 让扫描不完整。超出当前 parser 能力的 TypeScript 会显式降级并记录；正常存在
 `.ts/.tsx/.d.ts` 文件本身不会自动让扫描失败。
+无法归约为静态字符串的动态 `import()` / `require()` 会记录为
+`dynamic-module-specifier` warning，并且不会伪造模块图依赖边。
 
 ## 安装前隔离审计
 

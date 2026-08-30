@@ -41,6 +41,58 @@ test('module graph resolves relative, extensionless, directory, and external imp
   }
 })
 
+test('module graph resolves static CommonJS require and require.resolve edges', () => {
+  const root = fixture()
+  try {
+    writeFileSync(join(root, 'plugin', 'commonjs.cjs'), [
+      "const { run } = require('../lib/' + 'runner')",
+      "const toolPath = require.resolve('../pkg')",
+      'run(toolPath)',
+    ].join('\n'))
+
+    const graph = buildModuleGraph(root, ['plugin/commonjs.cjs'])
+
+    assert.equal(graph.complete, true)
+    assert.ok(graph.edges.some((edge) => edge.from === 'plugin/commonjs.cjs'
+      && edge.to === 'lib/runner.js'
+      && edge.specifier === '../lib/runner'
+      && edge.kind === 'static-require'))
+    assert.ok(graph.edges.some((edge) => edge.from === 'plugin/commonjs.cjs'
+      && edge.to === 'pkg/entry.js'
+      && edge.specifier === '../pkg'
+      && edge.kind === 'static-require-resolve'))
+    assert.equal(graph.failures.length, 0)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('module graph reports dynamic module specifiers without inventing edges', () => {
+  const root = fixture()
+  try {
+    writeFileSync(join(root, 'plugin', 'dynamic.cjs'), [
+      'const first = require(args.module)',
+      'const second = import(args.fallback)',
+      'module.exports = { first, second }',
+    ].join('\n'))
+
+    const graph = buildModuleGraph(root, ['plugin/dynamic.cjs'])
+
+    assert.equal(graph.complete, true)
+    assert.equal(graph.edges.length, 0)
+    assert.equal(graph.failures.length, 0)
+    assert.deepEqual(
+      graph.warnings
+        .filter((warning) => warning.reason === 'dynamic-module-specifier')
+        .map((warning) => warning.kind)
+        .sort(),
+      ['dynamic-import', 'dynamic-require'],
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('module graph rejects imports that escape the scan root', () => {
   const root = fixture()
   try {
@@ -95,6 +147,51 @@ test('typed TypeScript imports use a static fallback and resolve .js specifiers 
     assert.ok(graph.nodes.some((node) => node.path === 'plugin/typed.ts' && node.parser === 'unparsed'))
     assert.ok(graph.edges.some((edge) => edge.from === 'plugin/typed.ts' && edge.to === 'lib/typed-runner.ts'))
     assert.ok(graph.warnings.some((warning) => warning.path === 'plugin/typed.ts' && warning.reason === 'parser-unparsed'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('typed CommonJS files recover static require edges through the TypeScript fallback', () => {
+  const root = fixture()
+  try {
+    writeFileSync(join(root, 'plugin', 'typed.cts'), [
+      "const { run }: { run(value: string): void } = require('../lib/typed-runner.js')",
+      'run("safe")',
+    ].join('\n'))
+    writeFileSync(join(root, 'lib', 'typed-runner.ts'), 'export function run(value: string): void {}\n')
+
+    const graph = buildModuleGraph(root, ['plugin/typed.cts'])
+
+    assert.equal(graph.complete, true)
+    assert.ok(graph.nodes.some((node) => node.path === 'plugin/typed.cts' && node.parser === 'unparsed'))
+    assert.ok(graph.edges.some((edge) => edge.from === 'plugin/typed.cts'
+      && edge.to === 'lib/typed-runner.ts'
+      && edge.kind === 'static-require'))
+    assert.ok(graph.warnings.some((warning) => warning.path === 'plugin/typed.cts'
+      && warning.reason === 'parser-unparsed'
+      && warning.importsRecovered === 1))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('TypeScript fallback ignores require text inside strings', () => {
+  const root = fixture()
+  try {
+    writeFileSync(join(root, 'plugin', 'string-only.ts'), [
+      'const example: string = "require(\'../lib/runner.js\')"',
+      'export default example',
+    ].join('\n'))
+
+    const graph = buildModuleGraph(root, ['plugin/string-only.ts'])
+
+    assert.equal(graph.complete, true)
+    assert.equal(graph.edges.length, 0)
+    assert.deepEqual(graph.nodes.find((node) => node.path === 'plugin/string-only.ts')?.imports, [])
+    assert.ok(graph.warnings.some((warning) => warning.path === 'plugin/string-only.ts'
+      && warning.reason === 'parser-unparsed'
+      && warning.importsRecovered === 0))
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

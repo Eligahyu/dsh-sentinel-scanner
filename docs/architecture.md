@@ -141,12 +141,13 @@ profile package.json direct dependencies
 - env 凭据 → 网络(SEN-TAINT-001,受信端点豁免)
 - 文件读取/记忆 → 网络(SEN-TAINT-002)、解码 → 执行(SEN-TAINT-003)
 - SSRF 目标细化:云元数据端点 → critical
-- 有界跨文件污点流:静态 import/require 图上的参数传递与攻击链聚合
+- 有界跨文件污点流:ESM 与可静态证明的 CommonJS `require` / `require.resolve` 图上的参数传递与攻击链聚合
+- CommonJS 解构导入(`const {run} = require('./runner')`)到 `exports.run` / `module.exports.run` 的跨文件 source → sink 追踪
 - TypeScript `.js` specifier → `.ts/.tsx/.mts/.cts` 源文件回退;声明文件与开发入口降级为 warning
 
 不支持(已知限制):
-- 动态 import/require、复杂回调/闭包捕获/原型链的完整跨文件传播
-- 完整 TypeScript 类型语法 AST;超出 Acorn 能力时使用静态 import/export 降级
+- 运行时才能确定目标的动态 import/require、复杂回调/闭包捕获/原型链的完整跨文件传播;动态目标会显式记录 warning,不会猜测边
+- 完整 TypeScript 类型语法 AST;超出 Acorn 能力时使用静态 import/export/require 降级
 - 非 JS 语言的语义(走正则)
 
 ## 7. 供应链审计

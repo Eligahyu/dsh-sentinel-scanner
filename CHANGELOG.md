@@ -6,11 +6,13 @@
 
 - 独立 CodeQL 工作流覆盖自扫描必须排除的规则引擎源码。
 - Dependabot、CODEOWNERS、贡献指南、行为准则，以及结构化 Issue / Pull Request 模板。
+- 静态 CommonJS `require` / `require.resolve` 模块图边，以及 CommonJS 解构导入到导出函数的跨文件污点链。
 
 ### Changed
 
 - CI 改为执行 `package.json` 中的完整测试契约，并升级到 Node 24 运行时的官方 Actions。
 - 仓库递归自扫描显式报告 `engine/**`、`test/**`、`scripts/**` 排除范围；核心引擎改由 CodeQL 独立覆盖。
+- 动态模块目标现在作为结构化 warning 报告，不再静默忽略或猜测依赖边；TypeScript fallback 可恢复字面量 CommonJS 引用。
 
 ### Fixed
 

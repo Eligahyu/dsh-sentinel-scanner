@@ -10,7 +10,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, extname, join, relative, resolve } from 'node:path'
-import { parseJavaScript, walk, staticString } from './ast.js'
+import { parseJavaScript, walk, staticString, staticStringOf } from './ast.js'
 import { resolveInside } from '../path-safety.js'
 
 const SOURCE_EXTENSIONS = ['.js', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts', '.jsx']
@@ -119,13 +119,33 @@ function importSpecifiers(ast) {
   walk(ast, (node) => {
     if (node.type === 'ImportDeclaration') {
       const specifier = staticString(node.source)
-      if (specifier !== null) out.push({ specifier, start: node.source.start })
+      if (specifier !== null) out.push({ specifier, start: node.source.start, kind: 'static-import' })
     } else if (node.type === 'ExportNamedDeclaration' || node.type === 'ExportAllDeclaration') {
       const specifier = staticString(node.source)
-      if (specifier !== null) out.push({ specifier, start: node.source.start })
+      if (specifier !== null) out.push({ specifier, start: node.source.start, kind: 'static-import' })
     } else if (node.type === 'ImportExpression') {
-      const specifier = staticString(node.source)
-      if (specifier !== null) out.push({ specifier, start: node.source.start })
+      const specifier = staticStringOf(node.source)
+      out.push({
+        specifier,
+        start: node.source.start,
+        kind: specifier === null ? 'dynamic-import' : 'static-import',
+      })
+    } else if (node.type === 'CallExpression' && node.arguments.length === 1) {
+      const directRequire = node.callee?.type === 'Identifier' && node.callee.name === 'require'
+      const requireResolve = node.callee?.type === 'MemberExpression'
+        && node.callee.object?.type === 'Identifier'
+        && node.callee.object.name === 'require'
+        && ((!node.callee.computed && node.callee.property?.name === 'resolve')
+          || (node.callee.computed && staticStringOf(node.callee.property) === 'resolve'))
+      if (!directRequire && !requireResolve) return
+      const specifier = staticStringOf(node.arguments[0])
+      out.push({
+        specifier,
+        start: node.arguments[0].start,
+        kind: specifier === null
+          ? (requireResolve ? 'dynamic-require-resolve' : 'dynamic-require')
+          : (requireResolve ? 'static-require-resolve' : 'static-require'),
+      })
     }
   })
   return out
@@ -179,20 +199,44 @@ function withoutComments(content) {
   return out
 }
 
+/** Mark lexical code positions so fallback patterns cannot match examples inside strings. */
+function codePositions(content) {
+  const positions = new Uint8Array(content.length)
+  let quote = null
+  let escaped = false
+  for (let i = 0; i < content.length; i += 1) {
+    const ch = content[i]
+    if (quote) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') quote = ch
+    else positions[i] = 1
+  }
+  return positions
+}
+
 /** Conservative ESM import/export recovery for TypeScript Acorn cannot parse. */
 function fallbackImportSpecifiers(content) {
   const source = withoutComments(content)
+  const code = codePositions(source)
   const found = []
   const patterns = [
-    /(?:^|[;\r\n])\s*import\s*(['"])([^'"\r\n]+)\1/g,
-    /(?:^|[;\r\n])\s*(?:import|export)\s+(?:type\s+)?[^;]{0,2000}?\bfrom\s*(['"])([^'"\r\n]+)\1/g,
+    { pattern: /(?:^|[;\r\n])\s*import\s*(['"])([^'"\r\n]+)\1/g, keyword: /\bimport\b/, kind: 'static-import' },
+    { pattern: /(?:^|[;\r\n])\s*(?:import|export)\s+(?:type\s+)?[^;]{0,2000}?\bfrom\s*(['"])([^'"\r\n]+)\1/g, keyword: /\b(?:import|export)\b/, kind: 'static-import' },
+    { pattern: /(?<![\w$.])require\s*\.\s*resolve\s*\(\s*(['"])([^'"\r\n]+)\1\s*\)/g, keyword: /\brequire\b/, kind: 'static-require-resolve' },
+    { pattern: /(?<![\w$.])require\s*\(\s*(['"])([^'"\r\n]+)\1\s*\)/g, keyword: /\brequire\b/, kind: 'static-require' },
   ]
-  for (const pattern of patterns) {
+  for (const { pattern, keyword, kind } of patterns) {
     let match
     while ((match = pattern.exec(source)) !== null) {
+      const keywordOffset = match[0].search(keyword)
+      if (keywordOffset < 0 || code[match.index + keywordOffset] !== 1) continue
       const specifier = match[2]
       const start = match.index + match[0].lastIndexOf(specifier)
-      found.push({ specifier, start })
+      found.push({ specifier, start, kind })
     }
   }
   const seen = new Set()
@@ -212,7 +256,7 @@ function nodeFor(root, abs, content, ast) {
     bytes: Buffer.byteLength(content),
     sha256: hash(content),
     parser: ast ? 'acorn' : 'unparsed',
-    imports: ast ? importSpecifiers(ast).map((x) => x.specifier) : [],
+    imports: ast ? importSpecifiers(ast).map((x) => x.specifier).filter((value) => value !== null) : [],
   }
 }
 
@@ -270,9 +314,13 @@ export function buildModuleGraph(root, files = []) {
         continue
       }
       imports = fallbackImportSpecifiers(content)
-      warnings.push({ path: rel, reason: 'parser-unparsed', fallback: 'static-imports', importsRecovered: imports.length })
+      warnings.push({ path: rel, reason: 'parser-unparsed', fallback: 'static-module-specifiers', importsRecovered: imports.length })
     }
     for (const item of imports) {
+      if (item.specifier === null) {
+        warnings.push({ path: rel, reason: 'dynamic-module-specifier', kind: item.kind, start: item.start })
+        continue
+      }
       const result = resolveModuleSpecifier(rootAbs, rel, item.specifier)
       if (result.kind === 'external') {
         unresolved.push({ from: rel, specifier: item.specifier, external: true, start: item.start })
@@ -285,7 +333,7 @@ export function buildModuleGraph(root, files = []) {
         continue
       }
       const target = relPath(rootAbs, result.abs)
-      edges.push({ from: rel, to: target, specifier: item.specifier, start: item.start, kind: 'static-import' })
+      edges.push({ from: rel, to: target, specifier: item.specifier, start: item.start, kind: item.kind ?? 'static-import' })
       if (!seen.has(target)) queue.push(target)
     }
   }

@@ -30,6 +30,6 @@
 
 ## 已知边界
 
-- TypeScript 当前采用保守降级：模块图恢复静态 import/export，节点标记为 `parser: unparsed` 并给出 warning，不因 Acorn 无法解析类型语法而把扫描判为 incomplete。
+- TypeScript 当前采用保守降级：模块图恢复静态 import/export/require，节点标记为 `parser: unparsed` 并给出 warning，不因 Acorn 无法解析类型语法而把扫描判为 incomplete。
 - 辅助层（依赖图、SBOM、provenance、能力图）失败会报告 warning；核心文件遍历、读取、模块图路径逃逸与跨文件分析失败仍会影响完整性。
 - 风险分用于排序人工复核优先级，不能替代沙箱、签名、来源验证、动态行为分析或人工代码审计。

@@ -39,6 +39,7 @@
 
 ### v0.5
 - [ ] pnpm/yarn/bun lockfile 标准化与 install-script 依赖链标注
+- [x] 静态 CommonJS `require` / `require.resolve` 模块图、TS fallback 与解构导入跨文件污点
 - [ ] 动态 import/require、复杂回调/闭包的跨文件 reachability
 - [ ] 原生 TypeScript parser,减少静态 import/export 降级
 - [ ] GitHub Action 拆独立仓库 + 徽章服务

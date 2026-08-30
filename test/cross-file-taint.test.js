@@ -18,6 +18,23 @@ function writeFixture({ safe = false } = {}) {
   return root
 }
 
+function writeCommonJsFixture({ safe = false } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-cross-file-cjs-'))
+  mkdirSync(join(root, 'plugin'), { recursive: true })
+  mkdirSync(join(root, 'lib'), { recursive: true })
+  writeFileSync(join(root, 'plugin', 'index.cjs'), [
+    "const { run } = require('../lib/runner.cjs')",
+    'module.exports.apply = function apply(ctx) {',
+    `  ctx.tools.register(defineTool({ name: 'cjs', async execute(args) { run(${safe ? "'fixed'" : 'args.command'}) } }))`,
+    '}',
+  ].join('\n'))
+  writeFileSync(join(root, 'lib', 'runner.cjs'), [
+    "const { exec } = require('node:child_process')",
+    'exports.run = function run(command) { exec(command) }',
+  ].join('\n'))
+  return root
+}
+
 test('cross-file taint connects tool args to an imported shell sink', () => {
   const root = writeFixture()
   try {
@@ -42,6 +59,55 @@ test('cross-file taint does not flag a fixed argument as model-controlled', () =
     const result = analyzeCrossFileTaint(root, graph)
     assert.equal(result.findings.length, 0)
     assert.equal(result.attackChains.length, 0)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('cross-file taint connects CommonJS destructuring to an exported shell sink', () => {
+  const root = writeCommonJsFixture()
+  try {
+    const graph = buildModuleGraph(root, ['plugin/index.cjs'])
+    const result = analyzeCrossFileTaint(root, graph)
+    const finding = result.findings.find((item) => item.ruleId === 'SEN-AGENT-001')
+
+    assert.ok(finding)
+    assert.equal(finding.crossFile, true)
+    assert.deepEqual(finding.modulePath, ['plugin/index.cjs', 'lib/runner.cjs'])
+    assert.deepEqual(finding.flowSteps, ['args.command', 'run(command)', 'exec'])
+    assert.equal(result.attackChains.length, 1)
+    assert.equal(result.complete, true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('cross-file taint does not flag a fixed CommonJS argument as model-controlled', () => {
+  const root = writeCommonJsFixture({ safe: true })
+  try {
+    const graph = buildModuleGraph(root, ['plugin/index.cjs'])
+    const result = analyzeCrossFileTaint(root, graph)
+
+    assert.equal(result.findings.length, 0)
+    assert.equal(result.attackChains.length, 0)
+    assert.equal(result.complete, true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('scan report includes CommonJS cross-file findings and attack chains', async () => {
+  const root = writeCommonJsFixture()
+  try {
+    const report = await scan(root)
+    const finding = report.findings.find((item) => item.crossFile
+      && item.id === 'SEN-AGENT-001'
+      && item.file === 'lib/runner.cjs')
+
+    assert.ok(finding)
+    assert.deepEqual(finding.modulePath, ['plugin/index.cjs', 'lib/runner.cjs'])
+    assert.ok(report.attackChains.some((chain) => chain.id === finding.attackChainId))
+    assert.equal(report.analysisLayers.moduleGraph.crossFile.complete, true)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
