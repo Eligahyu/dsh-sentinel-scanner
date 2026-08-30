@@ -534,3 +534,39 @@ test('dynamic evidence keeps text-array containers digestable at zero evidence d
   assert.ok(Array.isArray(normalized.dnsQueries[0].answers))
   assert.doesNotThrow(() => evidenceDigest(normalized))
 })
+
+test('dynamic evidence structurally terminates drive UNC and POSIX path redaction', () => {
+  const cases = [
+    [`C:\\Users\\alice\\folder with spaces\\secret.txt\n could not be read`, '[HOST_PATH]\n could not be read'],
+    [`\\\\server\\share\\folder with spaces\\secret.txt\n could not be read`, '[HOST_PATH]\n could not be read'],
+    ['/home/alice/folder with spaces/secret.txt\n could not be read', '[HOST_PATH]\n could not be read'],
+    [`C:\\Users\\alice\\folder with spaces\\secret.txt could not be read`, '[HOST_PATH] could not be read'],
+    [`\\\\server\\share\\folder with spaces\\secret.txt could not be read`, '[HOST_PATH] could not be read'],
+    ['/home/alice/folder with spaces/secret.txt could not be read', '[HOST_PATH] could not be read'],
+    [`"C:\\Users\\alice\\folder with spaces\\secret.txt" could not be read`, '"[HOST_PATH]" could not be read'],
+    [`"\\\\server\\share\\folder with spaces\\secret.txt" could not be read`, '"[HOST_PATH]" could not be read'],
+    ['"/home/alice/folder with spaces/secret.txt" could not be read', '"[HOST_PATH]" could not be read'],
+    [`C:\\Users\\alice\\folder with spaces\\secret.txt`, '[HOST_PATH]'],
+    [`\\\\server\\share\\folder with spaces\\secret.txt`, '[HOST_PATH]'],
+    ['/home/alice/folder with spaces/secret.txt', '[HOST_PATH]'],
+  ]
+  for (const [input, expected] of cases) {
+    assert.equal(normalizeDynamicEvidence({ stdout: input }).stdout, expected, input)
+  }
+})
+
+test('dynamic evidence digest accepts any sorted non-empty canary subset', () => {
+  const onlySubset = normalizeDynamicEvidence({ networkAttempts: [{ destination: 'sink.invalid' }] })
+  onlySubset.networkAttempts[0].canaryIds = ['bearer-token']
+  assert.match(evidenceDigest(onlySubset), /^[a-f0-9]{64}$/)
+
+  for (const ids of [
+    ['bearer-token', 'api-key'],
+    ['bearer-token', 'bearer-token'],
+    ['unknown-id'],
+  ]) {
+    const invalid = normalizeDynamicEvidence({ networkAttempts: [{ destination: 'sink.invalid' }] })
+    invalid.networkAttempts[0].canaryIds = ids
+    assert.throws(() => evidenceDigest(invalid), /^Error: invalid normalized evidence$/)
+  }
+})

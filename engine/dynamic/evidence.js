@@ -75,7 +75,6 @@ const COLLECTION_SCHEMAS = Object.freeze({
 
 const ROOT_OUTPUT_FIELDS = new Set([...COLLECTIONS, ...ROOT_TEXT_FIELDS])
 const CANARY_IDS = new Set(CANARY_DEFINITIONS.map(([, id]) => id))
-const SORTED_CANARY_IDS = Object.freeze([...CANARY_IDS].sort())
 
 class EvidenceRejected extends Error {
   constructor(code) {
@@ -235,24 +234,54 @@ function truncateUtf8(value, maxBytes) {
   return { value: result, truncated: true }
 }
 
-const PATH_NARRATIVE = '(?:failed|succeeded|blocked|allowed|denied|error|warning|because|during|after|before|while|read|write)'
-const PATH_BOUNDARY = `(?=\\s+${PATH_NARRATIVE}\\b|\\s+(?:\\\\|[A-Za-z]:[\\/]|\/)|\\s*(?:\\r?$|\\r?\\n)|$)`
-const UNC_PATH = new RegExp(`\\\\\\\\[^\\s\\\\/]+\\\\[^\\r\\n"'<>|]*?${PATH_BOUNDARY}`, 'g')
-const DRIVE_PATH = new RegExp(`[A-Za-z]:[\\\\/][^\\r\\n"'<>|]*?${PATH_BOUNDARY}`, 'g')
-const POSIX_PATH = new RegExp(`(?<![A-Za-z0-9:/])\\/(?:[^\\r\\n"'<>|]*?)${PATH_BOUNDARY}`, 'g')
+const ABSOLUTE_ROOT = /\\\\[^\s\\/]+\\|[A-Za-z]:[\\/]|(?<![A-Za-z0-9:/])\//g
+const FILE_EXTENSION = /\.[A-Za-z0-9][A-Za-z0-9_-]{0,31}(?=\s|["']|$)/g
 
-function redactHostPaths(value, bounded = false) {
-  let result = value
-    .replace(UNC_PATH, '[HOST_PATH]')
-    .replace(DRIVE_PATH, '[HOST_PATH]')
-    .replace(POSIX_PATH, '[HOST_PATH]')
-  if (bounded) {
-    result = result
-      .replace(/\\\\[^\s\\/]+\\\\[^\r\n"'<>|]*$/g, '[HOST_PATH]')
-      .replace(/[A-Za-z]:[\\/][^\r\n"'<>|]*$/g, '[HOST_PATH]')
-      .replace(/(?<![A-Za-z0-9:/])\/(?:[^\r\n"'<>|]*)$/g, '[HOST_PATH]')
+function findPathEnd(line, contentStart, candidateEnd) {
+  const tail = line.slice(contentStart, candidateEnd)
+  FILE_EXTENSION.lastIndex = 0
+  let match
+  while ((match = FILE_EXTENSION.exec(tail)) !== null) {
+    const suffix = tail.slice(match.index + match[0].length)
+    if (!/[\\/]/.test(suffix)) return contentStart + match.index + match[0].length
   }
-  return result
+  return candidateEnd
+}
+
+function redactPathLine(line) {
+  let result = ''
+  let cursor = 0
+  ABSOLUTE_ROOT.lastIndex = 0
+  let root
+  while ((root = ABSOLUTE_ROOT.exec(line)) !== null) {
+    const rootStart = root.index
+    const rootEnd = ABSOLUTE_ROOT.lastIndex
+    result += line.slice(cursor, rootStart)
+
+    const quote = rootStart > 0 ? line[rootStart - 1] : null
+    if ((quote === '"' || quote === "'") && line.indexOf(quote, rootEnd) >= 0) {
+      const closingQuote = line.indexOf(quote, rootEnd)
+      result += '[HOST_PATH]'
+      cursor = closingQuote
+      ABSOLUTE_ROOT.lastIndex = cursor
+      continue
+    }
+
+    ABSOLUTE_ROOT.lastIndex = rootEnd
+    const nextRoot = ABSOLUTE_ROOT.exec(line)
+    const candidateEnd = nextRoot === null ? line.length : nextRoot.index
+    const pathEnd = findPathEnd(line, rootEnd, candidateEnd)
+    result += '[HOST_PATH]'
+    cursor = pathEnd
+    ABSOLUTE_ROOT.lastIndex = cursor
+  }
+  return result + line.slice(cursor)
+}
+
+function redactHostPaths(value) {
+  return value.split(/(\r\n|\r|\n)/).map((part, index) => (
+    index % 2 === 1 ? part : redactPathLine(part)
+  )).join('')
 }
 
 function emptyEvidence() {
@@ -421,11 +450,14 @@ function validateNormalizedEvidence(value) {
           throw new Error('invalid normalized evidence')
         }
         assertNormalizedArrayKeys(ids, lengthEntry.value)
+        let previousId = null
         for (let idIndex = 0; idIndex < lengthEntry.value; idIndex += 1) {
           const idEntry = ownDataProperty(ids, String(idIndex))
-          if (!idEntry.present || idEntry.value !== SORTED_CANARY_IDS[idIndex]) {
+          if (!idEntry.present || !CANARY_IDS.has(idEntry.value)
+            || (previousId !== null && previousId >= idEntry.value)) {
             throw new Error('invalid normalized evidence')
           }
+          previousId = idEntry.value
         }
       }
     }
