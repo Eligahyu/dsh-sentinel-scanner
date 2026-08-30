@@ -22,14 +22,21 @@ export function normalizeDynamicOptions(input = {}) {
     throw new Error(`invalid dynamic profile: ${String(profile)}`)
   }
 
-  const rawTimeout = input.dynamicTimeoutMs ?? DYNAMIC_HARD_LIMITS.defaultTimeoutMs
+  const rawTimeout = input.dynamicTimeoutMs === undefined
+    ? DYNAMIC_HARD_LIMITS.defaultTimeoutMs
+    : input.dynamicTimeoutMs
   let timeoutMs
-  try {
+  if (typeof rawTimeout === 'number') {
+    if (!Number.isFinite(rawTimeout)) {
+      throw new Error('invalid dynamic timeout: value must be finite')
+    }
+    timeoutMs = rawTimeout
+  } else if (typeof rawTimeout === 'string' && rawTimeout.trim().length > 0) {
     timeoutMs = Number(rawTimeout)
-  } catch {
-    throw new Error('invalid dynamic timeout: value must be finite')
-  }
-  if (!Number.isFinite(timeoutMs)) {
+    if (!Number.isFinite(timeoutMs)) {
+      throw new Error('invalid dynamic timeout: value must be finite')
+    }
+  } else {
     throw new Error('invalid dynamic timeout: value must be finite')
   }
 

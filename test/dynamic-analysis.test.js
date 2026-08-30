@@ -42,6 +42,13 @@ test('dynamic options reject unsupported values and non-finite timeouts', () => 
   assert.throws(() => normalizeDynamicOptions({ dynamicProfile: 'internet' }), /dynamic profile/i)
   assert.throws(() => normalizeDynamicOptions({ dynamicTimeoutMs: 'not-a-number' }), /dynamic timeout/i)
   assert.throws(() => normalizeDynamicOptions({ dynamicTimeoutMs: Infinity }), /dynamic timeout/i)
+  for (const value of ['', '   ', false, true, [], [1500]]) {
+    assert.throws(
+      () => normalizeDynamicOptions({ dynamicTimeoutMs: value }),
+      /dynamic timeout/i,
+      `rejects non-numeric timeout value ${JSON.stringify(value)}`,
+    )
+  }
 })
 
 test('dynamic configuration exposes only bounded primitive defaults', () => {
