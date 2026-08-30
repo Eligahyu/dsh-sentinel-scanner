@@ -460,3 +460,77 @@ test('dynamic evidence reports exact event drops after reserving the limitation'
   const truncation = normalized.limitations.find(item => item.reason === 'evidence-truncated' && item.kind === 'events')
   assert.equal(truncation.dropped, 3 - eventCount)
 })
+
+test('dynamic evidence bounds text scanning and buffering before expensive sanitization', () => {
+  const canaries = createCanarySet({
+    runId: 'run-round-two',
+    entropy: size => Buffer.alloc(size, 0x49),
+  })
+  const limits = { ...DYNAMIC_HARD_LIMITS, maxTextBytes: 64 }
+  const huge = `${canaries.values.apiKey} ${'x'.repeat(8 * 1024 * 1024)}`
+  const originalIncludes = String.prototype.includes
+  const originalBufferFrom = Buffer.from
+  let largestScannedString = 0
+  let oversizedBufferInput = false
+  String.prototype.includes = function (...args) {
+    largestScannedString = Math.max(largestScannedString, this.length)
+    return originalIncludes.apply(this, args)
+  }
+  Buffer.from = function (value, ...args) {
+    if (typeof value === 'string' && value.length > 4096) oversizedBufferInput = true
+    return originalBufferFrom.call(this, value, ...args)
+  }
+  try {
+    const normalized = normalizeDynamicEvidence({ stdout: huge }, { canaries, limits })
+    assert.match(normalized.stdout, /\[CANARY:api-key\]/)
+    assert.ok(Buffer.byteLength(normalized.stdout, 'utf8') <= limits.maxTextBytes)
+  } finally {
+    String.prototype.includes = originalIncludes
+    Buffer.from = originalBufferFrom
+  }
+  assert.ok(largestScannedString <= 4096)
+  assert.equal(oversizedBufferInput, false)
+})
+
+test('dynamic evidence redacts paths before newline and preserves trailing narrative', () => {
+  const cases = [
+    [`C:\\Users\\alice\\folder with spaces\\secret.txt\n failed to read`, '[HOST_PATH]\n failed to read'],
+    [`\\\\server\\share\\folder with spaces\\secret.txt\n failed to read`, '[HOST_PATH]\n failed to read'],
+    ['/home/alice/folder with spaces/secret.txt\n failed to read', '[HOST_PATH]\n failed to read'],
+    [`C:\\Users\\alice\\folder with spaces\\secret.txt failed to read`, '[HOST_PATH] failed to read'],
+    [`\\\\server\\share\\folder with spaces\\secret.txt failed to read`, '[HOST_PATH] failed to read'],
+    ['/home/alice/folder with spaces/secret.txt failed to read', '[HOST_PATH] failed to read'],
+  ]
+  for (const [input, expected] of cases) {
+    const normalized = normalizeDynamicEvidence({ stdout: input })
+    assert.equal(normalized.stdout, expected, input)
+  }
+})
+
+test('dynamic evidence digest rejects non-enumerable and non-canonical normalized fields', () => {
+  const nonEnumerable = normalizeDynamicEvidence({ networkAttempts: [{ destination: 'sink.invalid' }] })
+  Object.defineProperty(nonEnumerable.networkAttempts[0], 'destination', {
+    value: 'sink.invalid', enumerable: false, writable: true, configurable: true,
+  })
+  assert.throws(() => evidenceDigest(nonEnumerable), /^Error: invalid normalized evidence$/)
+
+  const canaries = createCanarySet({
+    runId: 'run-round-two-digest',
+    entropy: size => Buffer.alloc(size, 0x4a),
+  })
+  const unsorted = normalizeDynamicEvidence({
+    networkAttempts: [{ body: `${canaries.values.apiKey} ${canaries.values.bearerToken}` }],
+  }, { canaries })
+  const ids = unsorted.networkAttempts[0].canaryIds
+  ids.reverse()
+  assert.throws(() => evidenceDigest(unsorted), /^Error: invalid normalized evidence$/)
+})
+
+test('dynamic evidence keeps text-array containers digestable at zero evidence depth', () => {
+  const normalized = normalizeDynamicEvidence({
+    dnsQueries: [{ answers: ['safe.example'] }],
+  }, { limits: { ...DYNAMIC_HARD_LIMITS, maxEvidenceDepth: 0 } })
+
+  assert.ok(Array.isArray(normalized.dnsQueries[0].answers))
+  assert.doesNotThrow(() => evidenceDigest(normalized))
+})

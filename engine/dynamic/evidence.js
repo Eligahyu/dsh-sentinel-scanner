@@ -75,6 +75,7 @@ const COLLECTION_SCHEMAS = Object.freeze({
 
 const ROOT_OUTPUT_FIELDS = new Set([...COLLECTIONS, ...ROOT_TEXT_FIELDS])
 const CANARY_IDS = new Set(CANARY_DEFINITIONS.map(([, id]) => id))
+const SORTED_CANARY_IDS = Object.freeze([...CANARY_IDS].sort())
 
 class EvidenceRejected extends Error {
   constructor(code) {
@@ -119,7 +120,7 @@ function ownDataProperty(value, key) {
   }
   if (!descriptor) return { present: false, value: undefined }
   if (!Object.hasOwn(descriptor, 'value')) throw unsafeInput()
-  return { present: true, value: descriptor.value }
+  return { present: true, value: descriptor.value, enumerable: descriptor.enumerable }
 }
 
 function ownKeys(value) {
@@ -145,6 +146,12 @@ function assertNormalizedArrayKeys(value, length) {
   const expected = new Set(['length', ...Array.from({ length }, (_, index) => String(index))])
   if (keys.length !== expected.size || keys.some(key => typeof key !== 'string' || !expected.has(key))) {
     throw new Error('invalid normalized evidence')
+  }
+  const lengthEntry = ownDataProperty(value, 'length')
+  if (!lengthEntry.present || lengthEntry.enumerable !== false) throw new Error('invalid normalized evidence')
+  for (let index = 0; index < length; index += 1) {
+    const entry = ownDataProperty(value, String(index))
+    if (!entry.present || entry.enumerable !== true) throw new Error('invalid normalized evidence')
   }
 }
 
@@ -228,15 +235,24 @@ function truncateUtf8(value, maxBytes) {
   return { value: result, truncated: true }
 }
 
-const UNC_PATH = /\\\\[^\s\\/]+\\[^\r\n]*?(?=\s+(?:\\\\|[A-Za-z]:[\\/]|\/)|$)/g
-const DRIVE_PATH = /[A-Za-z]:[\\/][^\r\n"'<>|]*/g
-const POSIX_PATH = /(?<![A-Za-z0-9:/])\/(?:[^\r\n"'<>|]*?)(?=\s+(?:\\\\|[A-Za-z]:[\\/]|\/)|$)/g
+const PATH_NARRATIVE = '(?:failed|succeeded|blocked|allowed|denied|error|warning|because|during|after|before|while|read|write)'
+const PATH_BOUNDARY = `(?=\\s+${PATH_NARRATIVE}\\b|\\s+(?:\\\\|[A-Za-z]:[\\/]|\/)|\\s*(?:\\r?$|\\r?\\n)|$)`
+const UNC_PATH = new RegExp(`\\\\\\\\[^\\s\\\\/]+\\\\[^\\r\\n"'<>|]*?${PATH_BOUNDARY}`, 'g')
+const DRIVE_PATH = new RegExp(`[A-Za-z]:[\\\\/][^\\r\\n"'<>|]*?${PATH_BOUNDARY}`, 'g')
+const POSIX_PATH = new RegExp(`(?<![A-Za-z0-9:/])\\/(?:[^\\r\\n"'<>|]*?)${PATH_BOUNDARY}`, 'g')
 
-function redactHostPaths(value) {
-  return value
+function redactHostPaths(value, bounded = false) {
+  let result = value
     .replace(UNC_PATH, '[HOST_PATH]')
     .replace(DRIVE_PATH, '[HOST_PATH]')
     .replace(POSIX_PATH, '[HOST_PATH]')
+  if (bounded) {
+    result = result
+      .replace(/\\\\[^\s\\/]+\\\\[^\r\n"'<>|]*$/g, '[HOST_PATH]')
+      .replace(/[A-Za-z]:[\\/][^\r\n"'<>|]*$/g, '[HOST_PATH]')
+      .replace(/(?<![A-Za-z0-9:/])\/(?:[^\r\n"'<>|]*)$/g, '[HOST_PATH]')
+  }
+  return result
 }
 
 function emptyEvidence() {
@@ -345,6 +361,8 @@ function validateNormalizedRecord(value, schema, depth, ancestors, budget, extra
   const allowed = new Set([...Object.keys(schema), ...extraKeys])
   for (const key of ownKeys(value)) {
     if (typeof key !== 'string' || !allowed.has(key)) throw new Error('invalid normalized evidence')
+    const entry = ownDataProperty(value, key)
+    if (!entry.present || entry.enumerable !== true) throw new Error('invalid normalized evidence')
   }
   for (const key of Object.keys(schema).sort()) {
     const entry = ownDataProperty(value, key)
@@ -357,6 +375,10 @@ function validateNormalizedEvidence(value) {
   const rootKeys = ownKeys(value)
   if (rootKeys.some(key => typeof key !== 'string' || !ROOT_OUTPUT_FIELDS.has(key))) {
     throw new Error('invalid normalized evidence')
+  }
+  for (const key of rootKeys) {
+    const entry = ownDataProperty(value, key)
+    if (!entry.present || entry.enumerable !== true) throw new Error('invalid normalized evidence')
   }
   for (const field of COLLECTIONS) {
     const entry = ownDataProperty(value, field)
@@ -395,15 +417,15 @@ function validateNormalizedEvidence(value) {
         if (!isArray(canaryIdsEntry.value)) throw new Error('invalid normalized evidence')
         const ids = canaryIdsEntry.value
         const lengthEntry = ownDataProperty(ids, 'length')
-        if (!lengthEntry.present || lengthEntry.value > CANARY_IDS.size) throw new Error('invalid normalized evidence')
+        if (!lengthEntry.present || lengthEntry.value === 0 || lengthEntry.value > CANARY_IDS.size) {
+          throw new Error('invalid normalized evidence')
+        }
         assertNormalizedArrayKeys(ids, lengthEntry.value)
-        const seen = new Set()
         for (let idIndex = 0; idIndex < lengthEntry.value; idIndex += 1) {
           const idEntry = ownDataProperty(ids, String(idIndex))
-          if (!idEntry.present || !CANARY_IDS.has(idEntry.value) || seen.has(idEntry.value)) {
+          if (!idEntry.present || idEntry.value !== SORTED_CANARY_IDS[idIndex]) {
             throw new Error('invalid normalized evidence')
           }
-          seen.add(idEntry.value)
         }
       }
     }
@@ -451,19 +473,25 @@ export function normalizeDynamicEvidence(input = {}, options = {}) {
       }
     }
     state.addNotice = addNotice
+    const maxCanaryLength = canaries.reduce(
+      (maximum, canary) => Math.max(maximum, canary.value.length),
+      0,
+    )
+    const textScanLimit = limits.maxTextBytes + maxCanaryLength + 256
 
     const sanitizeText = (value, location, foundCanaries = null) => {
       if (state.textRemaining <= 0) {
         if (value.length > 0) addNotice({ reason: 'evidence-truncated', kind: 'text', location, maxTextBytes: limits.maxTextBytes })
         return ''
       }
-      let result = value
+      const boundedInput = value.length > textScanLimit
+      let result = boundedInput ? value.slice(0, textScanLimit) : value
       for (const canary of canaries) {
         if (!result.includes(canary.value)) continue
         result = result.split(canary.value).join(`[CANARY:${canary.id}]`)
         if (foundCanaries) foundCanaries.add(canary.id)
       }
-      result = redactHostPaths(result)
+      result = redactHostPaths(result, boundedInput)
       const bounded = truncateUtf8(result, state.textRemaining)
       state.textRemaining -= Buffer.byteLength(bounded.value, 'utf8')
       if (bounded.truncated) {
@@ -494,7 +522,13 @@ export function normalizeDynamicEvidence(input = {}, options = {}) {
       if (!isArray(value)) return OMIT
       if (depth > limits.maxEvidenceDepth) {
         addNotice({ reason: 'evidence-truncated', kind: 'depth', location, maxEvidenceDepth: limits.maxEvidenceDepth })
-        return '[DEPTH_LIMIT]'
+        const sentinel = '[DEPTH_LIMIT]'
+        if (limits.maxListItems === 0 || state.itemsRemaining <= 0 || state.nodesRemaining <= 0) return []
+        if (state.textRemaining < Buffer.byteLength(sentinel, 'utf8')) return []
+        state.itemsRemaining -= 1
+        state.nodesRemaining -= 1
+        state.textRemaining -= Buffer.byteLength(sentinel, 'utf8')
+        return [sentinel]
       }
       const lengthEntry = ownDataProperty(value, 'length')
       const length = lengthEntry.present && Number.isSafeInteger(lengthEntry.value) ? lengthEntry.value : 0
