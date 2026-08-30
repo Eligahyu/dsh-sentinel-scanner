@@ -18,7 +18,7 @@ function writeFixture({ safe = false } = {}) {
   return root
 }
 
-function writeCommonJsFixture({ safe = false } = {}) {
+function writeCommonJsFixture({ safe = false, arrow = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'dsh-cross-file-cjs-'))
   mkdirSync(join(root, 'plugin'), { recursive: true })
   mkdirSync(join(root, 'lib'), { recursive: true })
@@ -30,7 +30,9 @@ function writeCommonJsFixture({ safe = false } = {}) {
   ].join('\n'))
   writeFileSync(join(root, 'lib', 'runner.cjs'), [
     "const { exec } = require('node:child_process')",
-    'exports.run = function run(command) { exec(command) }',
+    arrow
+      ? 'module.exports.run = (command) => exec(command)'
+      : 'exports.run = function run(command) { exec(command) }',
   ].join('\n'))
   return root
 }
@@ -91,6 +93,34 @@ test('cross-file taint does not flag a fixed CommonJS argument as model-controll
     assert.equal(result.findings.length, 0)
     assert.equal(result.attackChains.length, 0)
     assert.equal(result.complete, true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('cross-file taint follows a CommonJS arrow-function export to a shell sink', () => {
+  const root = writeCommonJsFixture({ arrow: true })
+  try {
+    const graph = buildModuleGraph(root, ['plugin/index.cjs'])
+    const result = analyzeCrossFileTaint(root, graph)
+    const finding = result.findings.find((item) => item.ruleId === 'SEN-AGENT-001')
+
+    assert.ok(finding)
+    assert.deepEqual(finding.flowSteps, ['args.command', 'run(command)', 'exec'])
+    assert.deepEqual(finding.modulePath, ['plugin/index.cjs', 'lib/runner.cjs'])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('cross-file taint does not flag a fixed argument passed to a CommonJS arrow export', () => {
+  const root = writeCommonJsFixture({ safe: true, arrow: true })
+  try {
+    const graph = buildModuleGraph(root, ['plugin/index.cjs'])
+    const result = analyzeCrossFileTaint(root, graph)
+
+    assert.equal(result.findings.length, 0)
+    assert.equal(result.attackChains.length, 0)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

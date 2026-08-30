@@ -142,7 +142,7 @@ profile package.json direct dependencies
 - 文件读取/记忆 → 网络(SEN-TAINT-002)、解码 → 执行(SEN-TAINT-003)
 - SSRF 目标细化:云元数据端点 → critical
 - 有界跨文件污点流:ESM 与可静态证明的 CommonJS `require` / `require.resolve` 图上的参数传递与攻击链聚合
-- CommonJS 解构导入(`const {run} = require('./runner')`)到 `exports.run` / `module.exports.run` 的跨文件 source → sink 追踪
+- CommonJS 解构导入(`const {run} = require('./runner')`)到 `exports.run` / `module.exports.run` 的函数或箭头函数跨文件 source → sink 追踪
 - TypeScript `.js` specifier → `.ts/.tsx/.mts/.cts` 源文件回退;声明文件与开发入口降级为 warning
 
 不支持(已知限制):

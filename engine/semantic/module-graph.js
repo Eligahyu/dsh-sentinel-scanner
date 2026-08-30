@@ -224,18 +224,23 @@ function fallbackImportSpecifiers(content) {
   const code = codePositions(source)
   const found = []
   const patterns = [
-    { pattern: /(?:^|[;\r\n])\s*import\s*(['"])([^'"\r\n]+)\1/g, keyword: /\bimport\b/, kind: 'static-import' },
-    { pattern: /(?:^|[;\r\n])\s*(?:import|export)\s+(?:type\s+)?[^;]{0,2000}?\bfrom\s*(['"])([^'"\r\n]+)\1/g, keyword: /\b(?:import|export)\b/, kind: 'static-import' },
-    { pattern: /(?<![\w$.])require\s*\.\s*resolve\s*\(\s*(['"])([^'"\r\n]+)\1\s*\)/g, keyword: /\brequire\b/, kind: 'static-require-resolve' },
-    { pattern: /(?<![\w$.])require\s*\(\s*(['"])([^'"\r\n]+)\1\s*\)/g, keyword: /\brequire\b/, kind: 'static-require' },
+    { pattern: /(?:^|[;\r\n])\s*import\s*(['"])([^'"\r\n]+)\1/g, keyword: /\bimport\b/, kind: 'static-import', specifierGroup: 2 },
+    { pattern: /(?:^|[;\r\n])\s*(?:import|export)\s+(?:type\s+)?[^;]{0,2000}?\bfrom\s*(['"])([^'"\r\n]+)\1/g, keyword: /\b(?:import|export)\b/, kind: 'static-import', specifierGroup: 2 },
+    { pattern: /(?<![\w$.])require\s*\.\s*resolve\s*\(\s*(['"])([^'"\r\n]+)\1\s*\)/g, keyword: /\brequire\b/, kind: 'static-require-resolve', specifierGroup: 2 },
+    { pattern: /(?<![\w$.])require\s*\(\s*(['"])([^'"\r\n]+)\1\s*\)/g, keyword: /\brequire\b/, kind: 'static-require', specifierGroup: 2 },
+    { pattern: /(?<![\w$.])require\s*\.\s*resolve\s*\((?!\s*['"])\s*/g, keyword: /\brequire\b/, kind: 'dynamic-require-resolve' },
+    { pattern: /(?<![\w$.])require\s*\((?!\s*['"])\s*/g, keyword: /\brequire\b/, kind: 'dynamic-require' },
+    { pattern: /\bimport\s*\((?!\s*['"])\s*/g, keyword: /\bimport\b/, kind: 'dynamic-import' },
   ]
-  for (const { pattern, keyword, kind } of patterns) {
+  for (const { pattern, keyword, kind, specifierGroup } of patterns) {
     let match
     while ((match = pattern.exec(source)) !== null) {
       const keywordOffset = match[0].search(keyword)
       if (keywordOffset < 0 || code[match.index + keywordOffset] !== 1) continue
-      const specifier = match[2]
-      const start = match.index + match[0].lastIndexOf(specifier)
+      const specifier = specifierGroup ? match[specifierGroup] : null
+      const start = specifier === null
+        ? match.index + match[0].length
+        : match.index + match[0].lastIndexOf(specifier)
       found.push({ specifier, start, kind })
     }
   }

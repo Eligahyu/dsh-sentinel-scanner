@@ -156,7 +156,7 @@ test('typed CommonJS files recover static require edges through the TypeScript f
   const root = fixture()
   try {
     writeFileSync(join(root, 'plugin', 'typed.cts'), [
-      "const { run }: { run(value: string): void } = require('../lib/typed-runner.js')",
+      "const { run }: { run(value: string): void } = require(  '../lib/typed-runner.js'  )",
       'run("safe")',
     ].join('\n'))
     writeFileSync(join(root, 'lib', 'typed-runner.ts'), 'export function run(value: string): void {}\n')
@@ -171,6 +171,7 @@ test('typed CommonJS files recover static require edges through the TypeScript f
     assert.ok(graph.warnings.some((warning) => warning.path === 'plugin/typed.cts'
       && warning.reason === 'parser-unparsed'
       && warning.importsRecovered === 1))
+    assert.equal(graph.warnings.some((warning) => warning.reason === 'dynamic-module-specifier'), false)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -192,6 +193,33 @@ test('TypeScript fallback ignores require text inside strings', () => {
     assert.ok(graph.warnings.some((warning) => warning.path === 'plugin/string-only.ts'
       && warning.reason === 'parser-unparsed'
       && warning.importsRecovered === 0))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('TypeScript fallback reports dynamic import and require specifiers', () => {
+  const root = fixture()
+  try {
+    writeFileSync(join(root, 'plugin', 'dynamic.ts'), [
+      'const name: string = getModuleName()',
+      'const first = require(name)',
+      'const second = require.resolve(name)',
+      'const third = import(name)',
+      'export default [first, second, third]',
+    ].join('\n'))
+
+    const graph = buildModuleGraph(root, ['plugin/dynamic.ts'])
+
+    assert.equal(graph.complete, true)
+    assert.equal(graph.edges.length, 0)
+    assert.deepEqual(
+      graph.warnings
+        .filter((warning) => warning.reason === 'dynamic-module-specifier')
+        .map((warning) => warning.kind)
+        .sort(),
+      ['dynamic-import', 'dynamic-require', 'dynamic-require-resolve'],
+    )
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

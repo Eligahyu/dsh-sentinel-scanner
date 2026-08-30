@@ -72,11 +72,25 @@ function exportedFunction(content, name) {
     new RegExp(`(?:module\\s*\\.\\s*exports|exports)\\s*\\.\\s*${escaped}\\s*=\\s*(?:async\\s+)?function(?:\\s+[A-Za-z_$][\\w$]*)?\\s*\\(\\s*([A-Za-z_$][\\w$]*)[^)]*\\)\\s*\\{`, 'm'),
   ]
   const match = patterns.map((pattern) => pattern.exec(content)).find(Boolean)
-  if (!match) return null
-  const open = match.index + match[0].length - 1
-  const end = braceEnd(content, open)
-  if (end < 0) return null
-  return { param: match[1], body: content.slice(open + 1, end), start: match.index }
+  if (match) {
+    const open = match.index + match[0].length - 1
+    const end = braceEnd(content, open)
+    if (end < 0) return null
+    return { param: match[1], body: content.slice(open + 1, end), start: match.index }
+  }
+
+  const arrow = new RegExp(`(?:module\\s*\\.\\s*exports|exports)\\s*\\.\\s*${escaped}\\s*=\\s*(?:async\\s+)?(?:\\(\\s*([A-Za-z_$][\\w$]*)[^)]*\\)|([A-Za-z_$][\\w$]*))\\s*=>\\s*`, 'm').exec(content)
+  if (!arrow) return null
+  const param = arrow[1] ?? arrow[2]
+  const bodyStart = arrow.index + arrow[0].length
+  if (content[bodyStart] === '{') {
+    const end = braceEnd(content, bodyStart)
+    if (end < 0) return null
+    return { param, body: content.slice(bodyStart + 1, end), start: arrow.index }
+  }
+  const lineEnd = content.slice(bodyStart).search(/[;\r\n]/)
+  const bodyEnd = lineEnd < 0 ? content.length : bodyStart + lineEnd
+  return { param, body: content.slice(bodyStart, bodyEnd), start: arrow.index }
 }
 
 function boundSink(body, param, content) {

@@ -6,7 +6,7 @@
 
 - 独立 CodeQL 工作流覆盖自扫描必须排除的规则引擎源码。
 - Dependabot、CODEOWNERS、贡献指南、行为准则，以及结构化 Issue / Pull Request 模板。
-- 静态 CommonJS `require` / `require.resolve` 模块图边，以及 CommonJS 解构导入到导出函数的跨文件污点链。
+- 静态 CommonJS `require` / `require.resolve` 模块图边，以及 CommonJS 解构导入到导出函数/箭头函数的跨文件污点链。
 
 ### Changed
 
