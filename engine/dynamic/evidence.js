@@ -248,6 +248,16 @@ function findPathEnd(line, contentStart, candidateEnd) {
   return candidateEnd
 }
 
+function findClosingQuote(line, contentStart, quote) {
+  let backslashRun = 0
+  for (let index = contentStart; index < line.length; index += 1) {
+    const character = line[index]
+    if (character === quote && backslashRun % 2 === 0) return index
+    backslashRun = character === '\\' ? backslashRun + 1 : 0
+  }
+  return -1
+}
+
 function redactPathLine(line) {
   let result = ''
   let cursor = 0
@@ -259,9 +269,10 @@ function redactPathLine(line) {
     result += line.slice(cursor, rootStart)
 
     const quote = rootStart > 0 ? line[rootStart - 1] : null
-    if ((quote === '"' || quote === "'") && line.indexOf(quote, rootEnd) >= 0) {
-      const closingQuote = line.indexOf(quote, rootEnd)
+    if (quote === '"' || quote === "'") {
+      const closingQuote = findClosingQuote(line, rootEnd, quote)
       result += '[HOST_PATH]'
+      if (closingQuote < 0) return result
       cursor = closingQuote
       ABSOLUTE_ROOT.lastIndex = cursor
       continue

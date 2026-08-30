@@ -555,6 +555,22 @@ test('dynamic evidence structurally terminates drive UNC and POSIX path redactio
   }
 })
 
+test('dynamic evidence redacts quoted host paths with escaped delimiters safely', () => {
+  const cases = [
+    [String.raw`"/home/alice/a\"b/secret.txt" arbitrary narrative`, '"[HOST_PATH]" arbitrary narrative'],
+    [String.raw`'C:\Users\alice\a\'b\secret.txt' arbitrary narrative`, "'[HOST_PATH]' arbitrary narrative"],
+    [String.raw`"\\server\share\a\"b\secret.txt" arbitrary narrative`, '"[HOST_PATH]" arbitrary narrative'],
+    [String.raw`'/home/alice/a\'b/secret.txt' arbitrary narrative`, "'[HOST_PATH]' arbitrary narrative"],
+    [String.raw`"C:\Users\alice\escaped\\" arbitrary narrative`, '"[HOST_PATH]" arbitrary narrative'],
+    [String.raw`'\\server\share\escaped\\' arbitrary narrative`, "'[HOST_PATH]' arbitrary narrative"],
+    ['"/home/alice/secret.txt\nnext narrative', '"[HOST_PATH]\nnext narrative'],
+    [String.raw`"/home/alice/a\"b/secret.txt arbitrary narrative`, '"[HOST_PATH]'],
+  ]
+  for (const [input, expected] of cases) {
+    assert.equal(normalizeDynamicEvidence({ stdout: input }).stdout, expected, input)
+  }
+})
+
 test('dynamic evidence digest accepts any sorted non-empty canary subset', () => {
   const onlySubset = normalizeDynamicEvidence({ networkAttempts: [{ destination: 'sink.invalid' }] })
   onlySubset.networkAttempts[0].canaryIds = ['bearer-token']
