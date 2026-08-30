@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { buildReport } from '../engine/report.js'
+import { assertReportContract } from '../engine/report/schema.js'
 
 function minimalParts(overrides = {}) {
   return {
@@ -109,6 +110,45 @@ test('dynamic report contract normalizes malformed values to safe defaults', () 
     evidenceDigest: null,
   })
   assert.equal(report.summary.scanComplete, true)
+})
+
+test('assertReportContract rejects missing or contradictory dynamic summary fields', () => {
+  const report = buildReport(minimalParts())
+
+  for (const field of ['dynamicRequested', 'dynamicComplete', 'dynamicStatus']) {
+    const tampered = structuredClone(report)
+    delete tampered.summary[field]
+    assert.throws(() => assertReportContract(tampered), /dynamic summary contract/)
+  }
+
+  for (const [field, value] of [
+    ['dynamicRequested', true],
+    ['dynamicComplete', true],
+    ['dynamicStatus', 'complete'],
+  ]) {
+    const tampered = structuredClone(report)
+    tampered.summary[field] = value
+    assert.throws(() => assertReportContract(tampered), /dynamic summary contract/)
+  }
+})
+
+test('assertReportContract rejects non-string dynamic scalar fields', () => {
+  const report = buildReport(minimalParts({
+    analysisLayers: {
+      dynamic: {
+        status: 'incomplete',
+        backend: 'sandbox',
+        profile: 'default',
+        evidenceDigest: 'sha256:abc',
+      },
+    },
+  }))
+
+  for (const field of ['backend', 'profile', 'evidenceDigest']) {
+    const tampered = structuredClone(report)
+    tampered.analysisLayers.dynamic[field] = { arbitrary: true }
+    assert.throws(() => assertReportContract(tampered), /dynamic scalar invalid/)
+  }
 })
 
 test('failed analysis layer makes the report incomplete and preserves reasons', () => {

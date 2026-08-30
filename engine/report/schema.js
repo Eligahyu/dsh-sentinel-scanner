@@ -82,6 +82,21 @@ export function assertReportContract(report) {
   for (const field of ['stages', 'networkAttempts', 'dnsQueries', 'processes', 'fileEvents', 'canaryEvents', 'policyViolations', 'limitations', 'failures']) {
     if (!Array.isArray(dynamic[field])) throw new Error(`report dynamic list invalid: ${field}`)
   }
+  for (const field of ['backend', 'profile', 'evidenceDigest']) {
+    if (dynamic[field] !== null && typeof dynamic[field] !== 'string') {
+      throw new Error(`report dynamic scalar invalid: ${field}`)
+    }
+  }
+  const summary = report.summary
+  if (!summary
+    || typeof summary.dynamicRequested !== 'boolean'
+    || typeof summary.dynamicComplete !== 'boolean'
+    || typeof summary.dynamicStatus !== 'string'
+    || summary.dynamicRequested !== dynamic.requested
+    || summary.dynamicComplete !== (dynamic.requested && dynamic.complete)
+    || summary.dynamicStatus !== dynamic.status) {
+    throw new Error('report dynamic summary contract invalid')
+  }
   if (report.summary?.scanComplete === true && incompleteLayerReasons(layers).length > 0) {
     throw new Error('complete report cannot contain failed analysis layers')
   }
