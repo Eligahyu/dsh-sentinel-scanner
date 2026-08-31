@@ -46,6 +46,20 @@ dsh-sentinel 是一个安全扫描工具,自身的安全同样重要。请通过
   绝不执行 `npm install` / preinstall / install / postinstall / prepare
 - 报告此类的漏洞将被优先处理
 
+### Phase A 动态分析的延后执行边界
+
+- Phase A 是实验性、显式 opt-in 的动态分析基础设施；生产 resolver 故意返回 unavailable，
+  不能通过 CLI 或普通 API 获得真实 backend
+- Phase A 绝不执行插件代码、绝不启动容器、绝不调用 Docker/Podman、绝不执行 host fallback；
+  测试中唯一可运行的 adapter 是显式注入的 fake backend
+- 静态完整性与动态完整性独立记录。请求动态扫描得到 unavailable/refused/incomplete 时，
+  只有 `--fail-on-incomplete` 或 `--strict-exit-codes` 才以 exit 3 阻断 CI
+- 动态 policy 的 timeout 默认 15000ms，并强制限制在 1000–30000ms；事件和 evidence 也有
+  不可变数量、字节与深度上限
+- 动态 evidence 在写入报告前必须复制、验证、规范化、脱敏和摘要；hostile/malformed evidence
+  或不确定 cleanup 只能形成安全的 incomplete 状态，不能泄露 backend 错误或 secret
+- Docker/Podman 的实际实现只会在 Phase B、并经过独立安全审计后开始；该审计是发布门禁。
+
 ### 默认行为意外联网
 
 - 所有联网能力默认关闭(`--advisories` 才查询 OSV,仅上传包名+版本;

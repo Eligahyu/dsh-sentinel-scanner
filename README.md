@@ -9,9 +9,9 @@
 Heuristic rules, AST/taint analysis, package quarantine, dependency intelligence,
 SBOM export, SARIF, and CI policy enforcement—without executing scanned code.
 
-`Node.js ^22.18.0 or >=24.11.0 · Static analysis only · MIT`
+`Node.js ^22.18.0 or >=24.11.0 · Static analysis primary; experimental dynamic infrastructure is opt-in and unavailable in Phase A · MIT`
 
-[English](#english) · [中文](#中文说明) · [Rules](docs/rules.md) ·
+[English](#english) · [中文](README.zh-CN.md) · [Rules](docs/rules.md) ·
 [Architecture](docs/architecture.md) · [Roadmap](docs/roadmap.md)
 
 </div>
@@ -74,6 +74,13 @@ dsh-sentinel is designed for two audiences:
    boundaries, and policy skips are represented in the report.
 6. **Automation is not detection.** SARIF, HTML, GitHub Actions, and SBOM formats
    transport or present results; detection capability lives in the engine.
+7. **Phase A dynamic analysis executes nothing.** It is experimental, opt-in
+   infrastructure only. A requested deep scan has no production backend in this
+   release, so it is reported as unavailable rather than running plugin code,
+   starting a container, or falling back to the host.
+8. **There is no host-execution fallback.** This is a permanent boundary, not a
+   temporary implementation gap. Docker/Podman execution is deferred to Phase B
+   and may begin only after its independent security audit gate.
 
 ## Capabilities
 
@@ -91,6 +98,7 @@ dsh-sentinel is designed for two audiences:
 | Professional report layers | Stable report schema v2 with module graph, dependency graph, capability graph, SBOM, provenance, attack chains, coverage, and failure metadata. |
 | Output and CI | Text, JSON, SARIF 2.1.0, standalone HTML, CycloneDX, and SPDX output; stable fingerprints, baselines, threshold exits, and incomplete-scan enforcement. |
 | Privacy | Automatic secret redaction, optional path anonymization with `--redact-paths`, and no hidden ignore/skip behavior. |
+| Experimental dynamic layer | Opt-in Phase A contracts, policy, evidence redaction, and a test-injected fake backend. The production resolver deliberately returns unavailable; no plugin, container, backend, process, or network execution occurs. |
 
 ### Core analysis versus auxiliary analysis
 
@@ -103,6 +111,33 @@ Scan completeness distinguishes security-critical coverage from optional enrichm
   not scanned;
 - unsupported or complex lockfile formats are reported instead of producing
   guessed dependency data.
+
+### Experimental dynamic analysis (Phase A)
+
+Static completeness and dynamic completeness are separate signals. The static
+scan remains the primary verdict and continues to report `summary.scanComplete`.
+When `--dynamic` is requested, a dedicated `analysisLayers.dynamic` record
+reports the deep-analysis state instead of changing or hiding static coverage.
+
+Phase A provides the contract and safety controls only. It never executes a
+plugin, starts Docker or Podman, invokes a production backend, or falls back to
+host execution. The only executable-style backend accepted by the orchestrator
+is an explicitly injected fake adapter used by tests. In normal CLI/API use, the
+production resolver deliberately reports `backend-not-implemented-phase-a`.
+
+The four opt-in controls are:
+
+| Option | Phase A behavior |
+| --- | --- |
+| `--dynamic` | Request experimental deep analysis. The production result is unavailable in Phase A. |
+| `--dynamic-backend <auto\|docker\|podman>` | Declare the future backend preference; it does not start Docker or Podman in Phase A. |
+| `--dynamic-profile observe` | Select the only supported observation profile. |
+| `--dynamic-timeout <ms>` | Request a bounded timeout. Default: `15000`; values are clamped to the enforced `1000`–`30000` ms range. |
+
+An unavailable, refused, or incomplete requested deep scan exits with code `3`
+only when `--fail-on-incomplete` or `--strict-exit-codes` is set. Without either
+strict flag, the deep-layer result remains visible but does not by itself fail
+CI. This policy applies independently of static completeness.
 
 ### pnpm v9 dependency intelligence
 
@@ -168,6 +203,14 @@ npx deepseek-harness-sentinel ./plugin \
   --fail-on high \
   --fail-on-incomplete \
   --strict-exit-codes
+
+# Exercise the experimental dynamic contract. Phase A reports unavailable;
+# it neither starts Docker/Podman nor runs the target on this host.
+npx deepseek-harness-sentinel ./plugin \
+  --dynamic \
+  --dynamic-backend auto \
+  --dynamic-profile observe \
+  --dynamic-timeout 15000
 
 # Audit a package before installation; no lifecycle script is executed
 npx deepseek-harness-sentinel audit-install some-plugin@1.2.3
@@ -261,6 +304,10 @@ dsh-sentinel --rules                print the rule catalog
 | `--fail-on <severity>` | Exit 1 when a finding reaches `critical`, `high`, `medium`, or `low`. |
 | `--fail-on-incomplete` | Exit 3 when coverage is incomplete. |
 | `--strict-exit-codes` | Preserve distinct threshold, runtime, and incomplete-scan exits. |
+| `--dynamic` | Request experimental deep analysis. Phase A's production resolver returns unavailable without executing the target. |
+| `--dynamic-backend <auto\|docker\|podman>` | Declare a future container backend preference; Phase A does not invoke Docker or Podman. |
+| `--dynamic-profile observe` | Select the Phase A observation profile. |
+| `--dynamic-timeout <ms>` | Bounded deep-analysis timeout; default `15000`, clamped to `1000`–`30000` ms. |
 | `--max-files`, `--max-plugins`, `--max-bytes` | Set bounded resource limits. |
 | `--config <file>` | Load `sentinel.config.json`; CLI values override config values. |
 | `--redact-paths` | Replace absolute paths with shareable workspace labels. |
@@ -274,7 +321,7 @@ Exit codes:
 | `0` | Scan completed and the configured policy threshold was not exceeded. |
 | `1` | Risk or policy threshold exceeded. |
 | `2` | Usage or runtime error. |
-| `3` | Scan incomplete when `--fail-on-incomplete` is enabled. |
+| `3` | Static scan incomplete, or requested dynamic analysis unavailable/refused/incomplete, only when `--fail-on-incomplete` or `--strict-exit-codes` is enabled. |
 
 ## Risk scoring and verdicts
 
@@ -321,6 +368,12 @@ ordinary `.ts`, `.tsx`, or `.d.ts` presence is not an automatic scan failure.
 Dynamic `import()` / `require()` targets that cannot be reduced to a static string
 remain visible as `dynamic-module-specifier` warnings and never become invented
 module-graph edges.
+
+Static completeness does not imply dynamic completeness, and dynamic state does
+not overwrite the static verdict. A requested Phase A deep scan may therefore
+be `unavailable`, `refused`, or `incomplete` while the static report remains
+complete; strict CI flags decide whether that separate deep-layer state returns
+exit code `3`.
 
 ## Pre-install package audit
 
@@ -369,6 +422,11 @@ target
   -> all-finding scoring and verdict
   -> redacted JSON / text / SARIF / HTML / SBOM output
 ```
+
+If explicitly requested, the Phase A dynamic state machine runs after the
+static verdict and records only its separate, redacted analysis layer. Production
+resolution deliberately stops at `unavailable`; it does not call a process,
+network, Docker, Podman, container runtime, or host-execution fallback.
 
 The scanner never follows target symlinks and applies lexical plus realpath
 containment to manifest-controlled paths. Medium-sized files receive lightweight
@@ -424,6 +482,10 @@ package drift detection, and release verification.
 Planned work focuses on broader language-aware semantic analysis, deeper lockfile
 normalization, stronger interprocedural reachability, larger public corpora, and
 stable integration contracts. See the [full roadmap](docs/roadmap.md).
+
+Dynamic execution is deliberately not on the current production path. Phase B
+may add Docker/Podman support only after an independent security audit clears
+that deferred gate.
 
 Issues and pull requests that add test-backed detections, reduce false positives,
 or improve documentation are welcome. Before contributing, read the

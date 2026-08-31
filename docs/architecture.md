@@ -176,3 +176,34 @@ profile package.json direct dependencies
   "ignored": [], "hardSkipped": [], "policySkips": [], "coverageSkips": []
 }
 ```
+
+## 9. Phase A 动态分析边界（实验性 opt-in）
+
+Phase A 是动态分析的**基础设施和安全契约**，不是生产执行器。`--dynamic` 显式请求后，
+静态扫描先完成并形成独立裁决；动态层随后只在 `analysisLayers.dynamic` 中记录状态，绝不
+修改 `summary.scanComplete`。因此静态完整性和动态完整性必须分别解释。
+
+```text
+not-requested
+  -- --dynamic --> preflight
+preflight -- static incomplete / entrypoint unresolved / high-risk blocker --> refused
+preflight -- eligible --> backend resolution
+backend resolution -- production resolver --> unavailable
+backend resolution -- test-injected fake adapter --> load → registration → invocation
+stage / evidence / cleanup failure --> incomplete
+all stages + exact cleanup --> complete
+```
+
+- 生产 `backend-resolver` 故意只返回 `backend-not-implemented-phase-a`；唯一可用 adapter
+  是测试注入的 fake backend，不能由常规 CLI/API 配置获得。
+- Phase A 不执行插件、不创建容器、不调用 Docker/Podman、不调用进程或网络，也没有主机
+  执行回退路径。Docker/Podman 实现推迟到 Phase B，前提是通过独立安全审计门禁。
+- policy 是不可变硬上限：timeout 默认 `15000` ms，强制夹在 `1000`–`30000` ms；事件、
+  文本、列表项和证据深度同样受限。
+- 注入 backend 的每个阶段都通过 AbortSignal、超时和 cleanup 协议限制；cleanup 不是精确
+  `{ complete: true }` 时，结果为 `incomplete`。
+- backend 证据先复制并结构化验证，再规范化、脱敏、限长、摘要化。访问器、proxy、循环、
+  超深/超大或异常 evidence 只产生安全的 `incomplete`，不能泄露 backend 错误或 secret。
+- CLI 只有在 `--fail-on-incomplete` 或 `--strict-exit-codes` 下，才会将请求的
+  `unavailable` / `refused` / `incomplete` 以退出码 `3` 告知 CI；不带严格选项时结果仍可见，
+  但不会仅因动态层状态失败。
