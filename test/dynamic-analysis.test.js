@@ -6,6 +6,13 @@ import { tmpdir } from 'node:os'
 import { DYNAMIC_HARD_LIMITS, normalizeDynamicOptions } from '../engine/dynamic/policy.js'
 import { createCanarySet } from '../engine/dynamic/canaries.js'
 import { evidenceDigest, normalizeDynamicEvidence } from '../engine/dynamic/evidence.js'
+import { resolveDynamicBackend } from '../engine/dynamic/backend-resolver.js'
+import {
+  DYNAMIC_STAGES,
+  evaluateDynamicPreflight,
+  runDynamicAnalysis,
+} from '../engine/dynamic/orchestrator.js'
+import { FakeDynamicBackend } from './helpers/fake-dynamic-backend.js'
 import { loadConfig } from '../engine/config.js'
 import { main } from '../bin/sentinel.mjs'
 
@@ -585,4 +592,204 @@ test('dynamic evidence digest accepts any sorted non-empty canary subset', () =>
     invalid.networkAttempts[0].canaryIds = ids
     assert.throws(() => evidenceDigest(invalid), /^Error: invalid normalized evidence$/)
   }
+})
+
+const dynamicOptions = (overrides = {}) => ({
+  dynamic: true,
+  dynamicBackend: 'auto',
+  dynamicProfile: 'observe',
+  dynamicTimeoutMs: 1000,
+  ...overrides,
+})
+
+const eligiblePreflight = () => ({
+  scanComplete: true,
+  entrypoints: ['index.js'],
+})
+
+test('dynamic orchestrator leaves an unrequested run untouched', async () => {
+  const backend = new FakeDynamicBackend()
+  const result = await runDynamicAnalysis({
+    target: 'fixture',
+    options: dynamicOptions({ dynamic: false }),
+    backend,
+    preflight: eligiblePreflight(),
+  })
+
+  assert.equal(result.status, 'not-requested')
+  assert.equal(result.requested, false)
+  assert.equal(backend.calls.length, 0)
+})
+
+test('dynamic orchestrator refuses static preflight before checking backend availability', async () => {
+  const backend = new FakeDynamicBackend()
+  const result = await runDynamicAnalysis({
+    target: 'fixture',
+    options: dynamicOptions(),
+    backend,
+    preflight: { scanComplete: false, entrypoints: ['index.js'] },
+  })
+
+  assert.equal(result.status, 'refused')
+  assert.deepEqual(result.failures, [{ reason: 'preflight-refused', code: 'static-scan-incomplete' }])
+  assert.equal(backend.calls.length, 0)
+})
+
+test('dynamic orchestrator reports unavailable after eligible preflight without a Phase A backend', async () => {
+  const result = await runDynamicAnalysis({
+    target: 'fixture',
+    options: dynamicOptions(),
+    preflight: eligiblePreflight(),
+  })
+
+  assert.equal(result.status, 'unavailable')
+  assert.deepEqual(result.failures, [{ reason: 'backend-unavailable', code: 'backend-not-implemented-phase-a' }])
+})
+
+test('dynamic orchestrator evaluates explicit preflight denials with fixed reason codes', () => {
+  assert.deepEqual(
+    evaluateDynamicPreflight({ scanComplete: true, entrypoints: [], blockers: [] }),
+    { allowed: false, code: 'entrypoint-unresolved' },
+  )
+  assert.deepEqual(
+    evaluateDynamicPreflight({ scanComplete: true, entrypoints: ['index.js'], blockers: [{ highRisk: true }] }),
+    { allowed: false, code: 'high-risk-blocker' },
+  )
+})
+
+test('dynamic orchestrator completes with normalized evidence and immutable run data', async () => {
+  const backend = new FakeDynamicBackend({
+    evidence: { networkAttempts: [{ destination: 'sink.invalid' }] },
+  })
+  const result = await runDynamicAnalysis({
+    target: 'fixture',
+    options: dynamicOptions(),
+    backend,
+    preflight: eligiblePreflight(),
+  })
+
+  assert.equal(result.status, 'complete')
+  assert.equal(result.complete, true)
+  assert.equal(result.backend, 'fake')
+  assert.deepEqual(result.stages.map(item => item.stage), DYNAMIC_STAGES)
+  assert.equal(result.networkAttempts[0].destination, 'sink.invalid')
+  assert.match(result.evidenceDigest, /^[a-f0-9]{64}$/)
+  assert.equal(backend.prepareCalls.length, 1)
+  assert.equal(Object.isFrozen(backend.prepareCalls[0]), true)
+  assert.equal(Object.isFrozen(backend.prepareCalls[0].canaries), true)
+  assert.equal(backend.cleanupCalls.length, 1)
+})
+
+test('dynamic orchestrator retains normalized stage evidence returned by the backend', async () => {
+  const backend = new FakeDynamicBackend({
+    stageEvidence: { load: { stages: [{ stage: 'load', durationMs: 7, status: 'observed' }] } },
+  })
+  const result = await runDynamicAnalysis({
+    target: 'fixture', options: dynamicOptions(), backend, preflight: eligiblePreflight(),
+  })
+
+  assert.deepEqual(
+    result.stages.find(item => item.durationMs === 7),
+    { stage: 'load', durationMs: 7, status: 'observed' },
+  )
+})
+
+for (const [name, fixture, expectedCode] of [
+  ['stage failure', { stageErrors: { registration: new Error('backend secret') } }, 'stage-failed'],
+  ['collection failure', { collectError: new Error('backend secret') }, 'collection-failed'],
+  ['timeout', { delays: { runStage: 1100 } }, 'timeout'],
+]) {
+  test(`dynamic orchestrator marks ${name} incomplete and cleans an acquired handle once`, async () => {
+    const backend = new FakeDynamicBackend(fixture)
+    const result = await runDynamicAnalysis({
+      target: 'fixture',
+      options: dynamicOptions(),
+      backend,
+      preflight: eligiblePreflight(),
+    })
+
+    assert.equal(result.status, 'incomplete')
+    assert.deepEqual(result.failures, [{ reason: 'execution-incomplete', code: expectedCode }])
+    assert.equal(backend.prepareCalls.length, 1)
+    assert.equal(backend.cleanupCalls.length, 1)
+    assert.equal(JSON.stringify(result).includes('backend secret'), false)
+  })
+}
+
+test('dynamic orchestrator cleans an acquired handle once after cancellation', async () => {
+  const controller = new AbortController()
+  const backend = new FakeDynamicBackend({ delays: { runStage: 100 } })
+  const run = runDynamicAnalysis({
+    target: 'fixture',
+    options: dynamicOptions(),
+    backend,
+    preflight: eligiblePreflight(),
+    signal: controller.signal,
+  })
+  setTimeout(() => controller.abort(), 10)
+  const result = await run
+
+  assert.equal(result.status, 'incomplete')
+  assert.deepEqual(result.failures, [{ reason: 'execution-incomplete', code: 'cancelled' }])
+  assert.equal(backend.cleanupCalls.length, 1)
+})
+
+test('dynamic orchestrator makes cleanup uncertainty incomplete without backend output', async () => {
+  const backend = new FakeDynamicBackend({ cleanupComplete: false })
+  const result = await runDynamicAnalysis({
+    target: 'fixture',
+    options: dynamicOptions(),
+    backend,
+    preflight: eligiblePreflight(),
+  })
+
+  assert.equal(result.status, 'incomplete')
+  assert.deepEqual(result.failures, [{ reason: 'execution-incomplete', code: 'cleanup-incomplete' }])
+  assert.equal(backend.cleanupCalls.length, 1)
+})
+
+test('dynamic orchestrator never prepares unavailable or refused runs', async () => {
+  const unavailable = new FakeDynamicBackend({ available: false })
+  const unavailableResult = await runDynamicAnalysis({
+    target: 'fixture', options: dynamicOptions(), backend: unavailable, preflight: eligiblePreflight(),
+  })
+  const refused = new FakeDynamicBackend()
+  const refusedResult = await runDynamicAnalysis({
+    target: 'fixture', options: dynamicOptions(), backend: refused,
+    preflight: { scanComplete: true, entrypoints: [], blockers: [] },
+  })
+
+  assert.equal(unavailableResult.status, 'unavailable')
+  assert.equal(refusedResult.status, 'refused')
+  assert.equal(unavailable.prepareCalls.length, 0)
+  assert.equal(refused.prepareCalls.length, 0)
+})
+
+test('dynamic orchestrator replaces backend diagnostics with fixed bounded codes', async () => {
+  const unavailableBackend = new FakeDynamicBackend({ available: false, availableCode: 'host path C:\\secret' })
+  const unavailable = await runDynamicAnalysis({
+    target: 'fixture', options: dynamicOptions(), backend: unavailableBackend, preflight: eligiblePreflight(),
+  })
+  const noisyEvidenceBackend = new FakeDynamicBackend({
+    evidence: { failures: [{ reason: 'backend stack trace: private detail', code: 'untrusted-code' }] },
+  })
+  const completed = await runDynamicAnalysis({
+    target: 'fixture', options: dynamicOptions(), backend: noisyEvidenceBackend, preflight: eligiblePreflight(),
+  })
+
+  assert.deepEqual(unavailable.failures, [{ reason: 'backend-unavailable', code: 'backend-unavailable' }])
+  assert.equal(JSON.stringify(unavailable).includes('host path'), false)
+  assert.deepEqual(completed.failures, [])
+  assert.equal(JSON.stringify(completed).includes('backend stack trace'), false)
+})
+
+test('dynamic orchestrator resolver exposes only injected backends in Phase A', async () => {
+  const injectedBackend = new FakeDynamicBackend()
+  const injected = await resolveDynamicBackend({ backendName: 'docker', injectedBackend })
+  const unavailable = await resolveDynamicBackend({ backendName: 'docker' })
+
+  assert.equal(injected.backend, injectedBackend)
+  assert.equal(unavailable.available, false)
+  assert.equal(unavailable.code, 'backend-not-implemented-phase-a')
+  assert.equal(Object.isFrozen(unavailable), true)
 })
