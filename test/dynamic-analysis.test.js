@@ -970,3 +970,65 @@ test('dynamic orchestrator reports only configured backend identity and preserve
     { reason: 'cleanup-uncertain', code: 'cleanup-incomplete' },
   ])
 })
+
+for (const [name, fixture, settledEvent] of [
+  ['stage', { delays: { runStage: 1100 }, ignoreAbort: { runStage: true }, stageErrors: { load: new Error('late stage rejection') } }, 'runStage:settled'],
+  ['collection', { delays: { collect: 1100 }, ignoreAbort: { collect: true }, collectError: new Error('late collection rejection') }, 'collect:settled'],
+]) {
+  test(`dynamic orchestrator cleans once after a late ${name} rejection without an unhandled rejection`, async () => {
+    const backend = new FakeDynamicBackend(fixture)
+    const unhandled = []
+    const observeUnhandled = reason => unhandled.push(reason)
+    process.on('unhandledRejection', observeUnhandled)
+    try {
+      const result = await runDynamicAnalysis({
+        target: 'fixture', options: dynamicOptions(), backend, preflight: eligiblePreflight(),
+      })
+      await pause(150)
+
+      assert.equal(result.status, 'incomplete')
+      assert.equal(result.failures[0].code, 'timeout')
+      assert.equal(result.failures[1].code, 'operation-not-quiesced')
+      assert.equal(backend.cleanupCalls.length, 1)
+      assert.ok(backend.events.indexOf(settledEvent) < backend.events.indexOf('cleanup:start'))
+      assert.equal(unhandled.length, 0)
+    } finally {
+      process.removeListener('unhandledRejection', observeUnhandled)
+    }
+  })
+}
+
+test('dynamic orchestrator clones own prototype-named target and entrypoint data without prototype mutation', async () => {
+  const target = {}
+  const entrypoint = { resolved: true }
+  const targetProtoPayload = { inheritedTarget: 'attacker-data' }
+  const entrypointProtoPayload = { inheritedEntrypoint: 'attacker-data' }
+  for (const [value, protoPayload] of [[target, targetProtoPayload], [entrypoint, entrypointProtoPayload]]) {
+    Object.defineProperty(value, '__proto__', { value: protoPayload, enumerable: true, writable: true, configurable: true })
+    Object.defineProperty(value, 'constructor', { value: { kind: 'constructor-data' }, enumerable: true, writable: true, configurable: true })
+    Object.defineProperty(value, 'prototype', { value: { kind: 'prototype-data' }, enumerable: true, writable: true, configurable: true })
+  }
+  const backend = new FakeDynamicBackend()
+  const result = await runDynamicAnalysis({
+    target, options: dynamicOptions(), backend,
+    preflight: { scanComplete: true, entrypoints: [entrypoint] },
+  })
+  const runSpec = backend.prepareCalls[0]
+
+  assert.equal(result.status, 'complete')
+  assert.equal(Object.getPrototypeOf(runSpec.target), Object.prototype)
+  assert.equal(Object.getPrototypeOf(runSpec.entrypoints[0]), Object.prototype)
+  for (const [clone, protoPayload] of [[runSpec.target, targetProtoPayload], [runSpec.entrypoints[0], entrypointProtoPayload]]) {
+    assert.equal(Object.hasOwn(clone, '__proto__'), true)
+    assert.deepEqual(clone.__proto__, protoPayload)
+    assert.deepEqual(clone.constructor, { kind: 'constructor-data' })
+    assert.deepEqual(clone.prototype, { kind: 'prototype-data' })
+    assert.equal(Object.isFrozen(clone.__proto__), true)
+    assert.equal(clone.inheritedTarget, undefined)
+    assert.equal(clone.inheritedEntrypoint, undefined)
+  }
+  assert.equal(Object.getPrototypeOf(target), Object.prototype)
+  assert.equal(Object.getPrototypeOf(entrypoint), Object.prototype)
+  assert.equal(target.inheritedTarget, undefined)
+  assert.equal(entrypoint.inheritedEntrypoint, undefined)
+})

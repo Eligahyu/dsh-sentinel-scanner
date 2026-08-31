@@ -163,7 +163,12 @@ function cloneJson(value, seen = new Set(), depth = 0) {
     for (const key of keys.sort()) {
       const entry = safeDescriptor(value, key)
       if (entry.unsafe || !entry.found || !entry.enumerable) throw new Error('invalid run spec')
-      copy[key] = cloneJson(entry.value, seen, depth + 1)
+      Object.defineProperty(copy, key, {
+        value: cloneJson(entry.value, seen, depth + 1),
+        enumerable: true,
+        writable: false,
+        configurable: false,
+      })
     }
     return Object.freeze(copy)
   } finally {
@@ -321,8 +326,8 @@ export async function runDynamicAnalysis({ target, options, backend = null, pref
   const deferCleanup = (pendingOperation, lateHandle = false) => {
     failures.push(cleanupFailure('operation-not-quiesced'))
     void pendingOperation.settled.then(late => {
-      const resource = lateHandle ? late.value : handle
-      if (late.state === 'fulfilled' && resource !== null && resource !== undefined) return cleanupOnce(resource)
+      const resource = lateHandle && late.state === 'fulfilled' ? late.value : lateHandle ? null : handle
+      if (resource !== null && resource !== undefined) return cleanupOnce(resource)
       return null
     }).catch(() => {})
   }
