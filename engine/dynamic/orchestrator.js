@@ -116,15 +116,17 @@ async function runBoundedOperation(invoke, timeoutMs, parentSignal = null) {
     removeParentAbort?.()
   }
   if (first && typeof first === 'object') {
-    return { kind: first.state, value: first.value, quiesced: true, settled }
+    return { kind: first.state, value: first.value, settledState: first.state, quiesced: true, settled }
   }
   controller.abort()
   const late = await Promise.race([
     settled,
     pause(QUIESCENCE_GRACE_MS).then(() => ({ state: 'pending' })),
   ])
-  if (late.state !== 'pending') return { kind: first, value: late.value, quiesced: true, settled }
-  return { kind: first, quiesced: false, settled }
+  if (late.state !== 'pending') {
+    return { kind: first, value: late.value, settledState: late.state, quiesced: true, settled }
+  }
+  return { kind: first, settledState: null, quiesced: false, settled }
 }
 
 function cloneJson(value, seen = new Set(), depth = 0) {
@@ -177,7 +179,7 @@ function cloneJson(value, seen = new Set(), depth = 0) {
   }
 }
 
-function copyArray(value, cap) {
+function copyArray(value, cap, retainCap = cap) {
   try {
     if (!Array.isArray(value)) return { values: [], rejected: true }
     const lengthEntry = safeDescriptor(value, 'length')
@@ -185,45 +187,76 @@ function copyArray(value, cap) {
       return { values: [], rejected: true }
     }
     const values = []
-    for (let index = 0; index < lengthEntry.value; index += 1) {
+    const count = Math.min(lengthEntry.value, retainCap)
+    for (let index = 0; index < count; index += 1) {
       const entry = safeDescriptor(value, String(index))
       if (entry.unsafe || !entry.found) return { values: [], rejected: true }
       values.push(entry.value)
     }
-    return { values, rejected: false }
+    return {
+      values,
+      rejected: false,
+      truncated: count < lengthEntry.value,
+      dropped: lengthEntry.value - count,
+    }
   } catch {
     return { values: [], rejected: true }
   }
 }
 
 function collectEvidence(parts, completedStages) {
-  const evidence = { stages: completedStages.map(stage => ({ stage, status: 'complete' })) }
+  const evidence = { stages: [] }
   for (const field of EVIDENCE_FIELDS) evidence[field] = []
   let rejected = false
-  const copyCollection = (part, field, destination) => {
+  let truncated = false
+  let dropped = 0
+  const entries = []
+  const append = (field, value) => entries.push({ field, value })
+  for (const stage of completedStages) append('stages', { stage, status: 'complete' })
+  const copyCollection = (part, field) => {
     const entry = safeDescriptor(part, field)
     if (entry.unsafe) {
       rejected = true
       return
     }
     if (!entry.found) return
-    const copied = copyArray(entry.value, DYNAMIC_HARD_LIMITS.maxListItems)
+    const remaining = Math.max(0, DYNAMIC_HARD_LIMITS.maxEvents - entries.length)
+    const copied = copyArray(entry.value, DYNAMIC_HARD_LIMITS.maxListItems, remaining)
     if (copied.rejected) {
       rejected = true
       return
     }
-    for (const value of copied.values) destination.push(value)
+    for (const value of copied.values) append(field, value)
+    if (copied.truncated) {
+      truncated = true
+      dropped += copied.dropped
+    }
   }
   for (const part of parts) {
-    copyCollection(part, 'stages', evidence.stages)
-    for (const field of EVIDENCE_FIELDS) copyCollection(part, field, evidence[field])
+    copyCollection(part, 'stages')
+    for (const field of EVIDENCE_FIELDS) copyCollection(part, field)
     for (const field of ['stdout', 'stderr']) {
       const entry = safeDescriptor(part, field)
       if (entry.unsafe) rejected = true
       else if (entry.found && typeof entry.value === 'string') evidence[field] = entry.value
     }
   }
-  return { evidence, rejected }
+  if (truncated) {
+    const retained = entries.slice(0, Math.max(0, DYNAMIC_HARD_LIMITS.maxEvents - 1))
+    for (const { field, value } of retained) evidence[field].push(value)
+    if (DYNAMIC_HARD_LIMITS.maxEvents > 0) {
+      evidence.limitations.unshift({
+        reason: 'evidence-truncated',
+        kind: 'events',
+        location: 'events',
+        dropped: dropped + entries.length - retained.length,
+        maxEvents: DYNAMIC_HARD_LIMITS.maxEvents,
+      })
+    }
+  } else {
+    for (const { field, value } of entries) evidence[field].push(value)
+  }
+  return { evidence, rejected, truncated }
 }
 
 function exactCleanupComplete(value) {
@@ -340,6 +373,11 @@ export async function runDynamicAnalysis({ target, options, backend = null, pref
     if (operation.kind !== 'fulfilled') {
       failures.push(executionFailure(operation.kind === 'cancelled' ? 'cancelled' : operation.kind === 'timeout' ? 'timeout' : 'prepare-failed'))
       if (!operation.quiesced) deferCleanup(operation, true)
+      else if (operation.settledState === 'fulfilled'
+        && operation.value !== null && operation.value !== undefined) {
+        const cleanupResult = await cleanupOnce(operation.value)
+        if (cleanupResult) failures.push(cleanupResult)
+      }
     } else {
       handle = operation.value
       for (const name of DYNAMIC_STAGES) {
@@ -384,6 +422,11 @@ export async function runDynamicAnalysis({ target, options, backend = null, pref
   }
   if (collected.rejected || evidence.failures.some(item => item.reason === 'evidence-rejected')) {
     failures.push(executionFailure('evidence-invalid'))
+  }
+  const evidenceTruncated = collected.truncated
+    || evidence.limitations.some(item => item.reason === 'evidence-truncated')
+  if (evidenceTruncated && !failures.some(item => item.code === 'evidence-truncated')) {
+    failures.push(executionFailure('evidence-truncated'))
   }
   return layerFor({
     status: failures.length > 0 ? 'incomplete' : 'complete', options: normalizedOptions,

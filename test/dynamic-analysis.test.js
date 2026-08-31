@@ -14,7 +14,7 @@ import {
 } from '../engine/dynamic/orchestrator.js'
 import { FakeDynamicBackend } from './helpers/fake-dynamic-backend.js'
 import { loadConfig } from '../engine/config.js'
-import { scan } from '../engine/index.js'
+import { scan, scanProfile } from '../engine/index.js'
 import { main } from '../bin/sentinel.mjs'
 
 const capture = () => {
@@ -1040,6 +1040,72 @@ test('dynamic orchestrator cleans a late prepare handle once without an unhandle
     assert.equal(unhandled.length, 0)
   } finally {
     process.removeListener('unhandledRejection', observeUnhandled)
+  }
+})
+
+test('dynamic orchestrator cleans a prepare handle that settles during the quiescence grace period', async () => {
+  const backend = new FakeDynamicBackend({ delays: { prepare: 1020 }, ignoreAbort: { prepare: true } })
+  const unhandled = []
+  const observeUnhandled = reason => unhandled.push(reason)
+  process.on('unhandledRejection', observeUnhandled)
+  try {
+    const result = await runDynamicAnalysis({
+      target: 'fixture', options: dynamicOptions(), backend, preflight: eligiblePreflight(),
+    })
+
+    assert.equal(result.status, 'incomplete')
+    assert.deepEqual(result.failures, [{ reason: 'execution-incomplete', code: 'timeout' }])
+    assert.equal(backend.cleanupCalls.length, 1)
+    assert.equal(unhandled.length, 0)
+  } finally {
+    process.removeListener('unhandledRejection', observeUnhandled)
+  }
+})
+
+test('dynamic orchestrator marks aggregate evidence budget loss incomplete with a safe limitation', async () => {
+  const batch = prefix => Array.from(
+    { length: 500 },
+    (_, index) => ({ destination: `${prefix}-${index}.invalid` }),
+  )
+  const backend = new FakeDynamicBackend({
+    stageEvidence: {
+      load: { networkAttempts: batch('load') },
+      registration: { networkAttempts: batch('registration') },
+      invocation: { networkAttempts: batch('invocation') },
+    },
+    evidence: { networkAttempts: batch('collect'), dnsQueries: batch('dropped') },
+  })
+
+  const result = await runDynamicAnalysis({
+    target: 'fixture', options: dynamicOptions(), backend, preflight: eligiblePreflight(),
+  })
+
+  assert.equal(result.status, 'incomplete')
+  assert.ok(result.failures.some(item => item.code === 'evidence-truncated'))
+  assert.ok(result.limitations.some(item => item.reason === 'evidence-truncated' && item.kind === 'events'))
+  assert.equal(JSON.stringify(result).includes('dropped-499.invalid'), false)
+})
+
+test('profile dynamic requests are reported as unavailable and strict mode exits 3', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dynamic-profile-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = root
+  try {
+    const direct = await scanProfile('web', { dynamic: true })
+    assert.equal(direct.analysisLayers.dynamic.requested, true)
+    assert.equal(direct.analysisLayers.dynamic.status, 'unavailable')
+    assert.equal(direct.summary.dynamicStatus, 'unavailable')
+
+    const io = capture()
+    const code = await main(['--profile', 'web', '--dynamic', '--strict-exit-codes', '--json'], io)
+    assert.equal(code, 3)
+    const report = JSON.parse(io.buf.out)
+    assert.equal(report.analysisLayers.dynamic.requested, true)
+    assert.equal(report.analysisLayers.dynamic.status, 'unavailable')
+  } finally {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(root, { recursive: true, force: true })
   }
 })
 

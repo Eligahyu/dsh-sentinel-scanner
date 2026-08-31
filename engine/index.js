@@ -27,6 +27,8 @@ import { analyzeCrossFileTaint } from './semantic/cross-file-taint.js'
 import { buildDependencyGraph } from './supplychain/dependency-graph.js'
 import { buildCapabilityGraph, evaluateCapabilityPolicy } from './semantic/capability-graph.js'
 import { runDynamicAnalysis } from './dynamic/orchestrator.js'
+import { emptyDynamicLayer, normalizeDynamicLayer } from './dynamic/contracts.js'
+import { normalizeDynamicOptions } from './dynamic/policy.js'
 
 export { VERSION } from './version.js'
 export { RULES } from './rules.js'
@@ -452,6 +454,14 @@ export async function scanProfile(profile = 'web', opts = {}) {
   const home = resolveDshHome(opts.env ?? process.env)
   const profileDir = resolve(join(home, 'profiles', profile))
   const modulesDir = join(profileDir, 'node_modules')
+  const normalizedDynamicOptions = normalizeDynamicOptions(opts)
+  const dynamic = normalizedDynamicOptions.requested
+    ? normalizeDynamicLayer({
+      status: 'unavailable',
+      profile: normalizedDynamicOptions.profile,
+      failures: [{ reason: 'backend-unavailable', code: 'profile-dynamic-not-supported' }],
+    })
+    : emptyDynamicLayer()
   const maxPlugins = opts.maxPlugins ?? 12
   const maxTransitive = opts.maxTransitive ?? 500
   const perPluginMaxFiles = Math.max(200, Math.floor((opts.maxFiles ?? 3000) / Math.max(1, maxPlugins)))
@@ -672,6 +682,7 @@ export async function scanProfile(profile = 'web', opts = {}) {
       policySkips,
       coverageSkips,
       scanMs: Date.now() - started,
+      ...(normalizedDynamicOptions.requested ? { analysisLayers: { dynamic } } : {}),
     },
     opts.maxFindings,
   )
