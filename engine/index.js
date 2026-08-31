@@ -26,6 +26,7 @@ import { buildModuleGraph } from './semantic/module-graph.js'
 import { analyzeCrossFileTaint } from './semantic/cross-file-taint.js'
 import { buildDependencyGraph } from './supplychain/dependency-graph.js'
 import { buildCapabilityGraph, evaluateCapabilityPolicy } from './semantic/capability-graph.js'
+import { runDynamicAnalysis } from './dynamic/orchestrator.js'
 
 export { VERSION } from './version.js'
 export { RULES } from './rules.js'
@@ -135,8 +136,10 @@ export async function scan(target, opts = {}) {
   let attackChains = []
   let coverageSkips = []
   let dependencyGraph = null
+  let runtimeEntrypoints = []
 
   if (existsSync(abs) && statSync(abs).isFile()) {
+    runtimeEntrypoints = [...computeRuntimeEntries(findBundleRoot(dirname(abs)))]
     const size = statSync(abs).size
     // 单文件超过 hardMax:只做 metadata 记录并强制 incomplete(绝不 silent skip)。
     if (size > limits.hardMaxBytesPerFile) {
@@ -198,6 +201,7 @@ export async function scan(target, opts = {}) {
     const bundleRoot = findBundleRoot(abs)
     const bundle = inspectBundle(bundleRoot)
     const runtimeEntries = computeRuntimeEntries(bundleRoot)
+    runtimeEntrypoints = [...runtimeEntries]
     const testReachableFiles = new Set()
     for (const rel of runtimeEntries) {
       const relToTarget = relative(abs, join(bundleRoot, rel)).replace(/\\/g, '/')
@@ -261,6 +265,25 @@ export async function scan(target, opts = {}) {
     }
   }
   analysisLayers = { ...analysisLayers, capabilityGraph }
+
+  // Phase A dynamic analysis is strictly opt-in and runs only after the
+  // complete static verdict, its runtime entries, and explicit high-risk
+  // blockers are known. Evidence remains in its dedicated layer.
+  const dynamicBlockers = findings
+    .filter((finding) => finding.severity === 'critical' || finding.severity === 'high')
+    .map((finding) => ({ severity: finding.severity, code: finding.id ?? finding.ruleId }))
+  const dynamic = await runDynamicAnalysis({
+    target: abs,
+    options: opts,
+    backend: opts.dynamicBackendAdapter,
+    preflight: {
+      scanComplete,
+      entrypoints: runtimeEntrypoints,
+      blockers: dynamicBlockers,
+    },
+    signal: opts.signal ?? null,
+  })
+  analysisLayers = { ...analysisLayers, dynamic }
 
   return buildReport(
     {

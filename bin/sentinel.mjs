@@ -77,6 +77,13 @@ function formatText(report, out) {
   if (s.scanComplete === false) {
     out.write(`${color(31, '⚠ INCOMPLETE SCAN — 扫描不完整,结果仅代表已分析部分', tty)}\n`)
   }
+  const dynamic = report.analysisLayers?.dynamic
+  if (dynamic?.requested === true) {
+    out.write(`dynamic analysis ${dynamic.status}\n`)
+    if (dynamic.complete !== true) {
+      out.write('dynamic analysis is not a successful deep verdict.\n')
+    }
+  }
   out.write(`target        ${report.target.kind === 'profile' ? `profile "${report.target.name}"` : report.target.path}\n`)
   const m = report.manifest
   if (m?.name) out.write(`manifest      ${m.name}${m.version ? `@${m.version}` : ''} · isBundle=${m.isBundle}${m.patch ? ` · patch=${m.patch}` : ''}\n`)
@@ -263,12 +270,18 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
       includeBuiltins: opts.includeBuiltins ? true : undefined,
       failOn: opts.failOn ?? config.failOn,
     })
-    const dynamicOptions = normalizeDynamicOptions({
+    const normalizedDynamicOptions = normalizeDynamicOptions({
       dynamic: opts.dynamic || effective.dynamic,
       dynamicBackend: opts.dynamicBackend ?? effective.dynamicBackend,
       dynamicProfile: opts.dynamicProfile ?? effective.dynamicProfile,
       dynamicTimeoutMs: opts.dynamicTimeoutMs ?? effective.dynamicTimeoutMs,
     })
+    const dynamicOptions = {
+      dynamic: normalizedDynamicOptions.requested,
+      dynamicBackend: normalizedDynamicOptions.backendName,
+      dynamicProfile: normalizedDynamicOptions.profile,
+      dynamicTimeoutMs: normalizedDynamicOptions.timeoutMs,
+    }
     effectiveFailOn = effective.failOn ?? null
     // 安装前审计:audit-install <pkg> 或 npm:<pkg>
     const auditSpec = positional[0] === 'audit-install' ? positional[1] : positional[0]?.startsWith('npm:') ? positional[0] : null
@@ -435,10 +448,11 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
     } else {
       exitCode = output.summary.verdict === 'risky' || output.summary.verdict === 'dangerous' ? 1 : 0
     }
-    // 不完整扫描:--fail-on-incomplete / --strict-exit-codes → exit 3
-    if (output.summary.scanComplete === false && (opts.failOnIncomplete || opts.strictExitCodes)) {
-      if (exitCode === 0) exitCode = 3
-    }
+    const dynamicIncomplete = output.analysisLayers?.dynamic?.requested === true
+      && output.analysisLayers.dynamic.complete !== true
+    // 不完整扫描或请求的深度扫描未完成:严格模式 → exit 3。
+    if ((opts.failOnIncomplete || opts.strictExitCodes)
+      && (output.summary.scanComplete === false || dynamicIncomplete)) return 3
     return exitCode
   } catch (error) {
     stderr.write(`dsh-sentinel: ${error?.message ?? String(error)}\n`)

@@ -68,6 +68,18 @@ test('dynamic report contract exposes independent defaults', () => {
   assert.equal(report.summary.scanComplete, true)
 })
 
+test('professional report keeps static completion independent from an incomplete dynamic request', () => {
+  const report = buildReport(minimalParts({
+    scanComplete: true,
+    analysisLayers: { dynamic: { status: 'unavailable' } },
+  }))
+
+  assert.equal(report.summary.scanComplete, true)
+  assert.equal(report.summary.dynamicRequested, true)
+  assert.equal(report.summary.dynamicComplete, false)
+  assert.equal(report.summary.dynamicStatus, 'unavailable')
+})
+
 test('dynamic report contract normalizes malformed values to safe defaults', () => {
   const report = buildReport(minimalParts({
     analysisLayers: {

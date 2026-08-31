@@ -14,6 +14,7 @@ import {
 } from '../engine/dynamic/orchestrator.js'
 import { FakeDynamicBackend } from './helpers/fake-dynamic-backend.js'
 import { loadConfig } from '../engine/config.js'
+import { scan } from '../engine/index.js'
 import { main } from '../bin/sentinel.mjs'
 
 const capture = () => {
@@ -21,6 +22,16 @@ const capture = () => {
   const stdout = { isTTY: false, write(value) { buf.out += value } }
   const stderr = { isTTY: false, write(value) { buf.err += value } }
   return { stdout, stderr, buf }
+}
+
+function writeDynamicScanFixture(root, { extraFile = false } = {}) {
+  writeFileSync(join(root, 'package.json'), JSON.stringify({
+    name: 'dynamic-scan', version: '1.0.0', license: 'MIT', description: 'safe dynamic scan fixture',
+    main: './index.js', dsh: { bundle: { patch: './cordis.patch.yml' } },
+  }))
+  writeFileSync(join(root, 'cordis.patch.yml'), "- insert:\n    - id: dynamic-scan\n      name: 'dynamic-scan'\n")
+  writeFileSync(join(root, 'index.js'), "export const name = 'dynamic-scan'\nexport function apply() {}\n")
+  if (extraFile) writeFileSync(join(root, 'extra.js'), 'export const extra = true\n')
 }
 
 test('dynamic options normalize defaults and bounded accepted values', () => {
@@ -129,6 +140,88 @@ test('dynamic CLI sends invalid or missing option values through usage errors', 
     const code = await main(['.', ...args], io)
     assert.equal(code, 2, `expected usage error for ${args.join(' ')}`)
     assert.match(io.buf.err, /dynamic[- ](backend|profile|timeout)/i)
+  }
+})
+
+test('dynamic scan preserves static completeness when no deep scan is requested or available', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dynamic-scan-'))
+  try {
+    writeDynamicScanFixture(root)
+
+    const staticOnly = await scan(root)
+    const unavailable = await scan(root, { dynamic: true })
+
+    assert.equal(staticOnly.analysisLayers.dynamic.status, 'not-requested')
+    assert.equal(staticOnly.summary.scanComplete, true)
+    assert.equal(unavailable.analysisLayers.dynamic.status, 'unavailable')
+    assert.equal(unavailable.summary.dynamicRequested, true)
+    assert.equal(unavailable.summary.dynamicComplete, false)
+    assert.equal(unavailable.summary.scanComplete, true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('dynamic scan attaches normalized injected evidence without creating findings', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dynamic-scan-evidence-'))
+  try {
+    writeDynamicScanFixture(root)
+    const backend = new FakeDynamicBackend({
+      evidence: { networkAttempts: [{ destination: 'https://example.invalid', method: 'POST', ignored: true }] },
+    })
+
+    const report = await scan(root, { dynamic: true, dynamicBackendAdapter: backend })
+
+    assert.equal(report.summary.scanComplete, true)
+    assert.equal(report.analysisLayers.dynamic.status, 'complete')
+    assert.deepEqual(report.analysisLayers.dynamic.networkAttempts, [{
+      destination: 'http[HOST_PATH]', method: 'POST',
+    }])
+    assert.equal(report.summary.findingsTotal, 0)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('dynamic scan refuses an incomplete static traversal before backend availability', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dynamic-scan-incomplete-'))
+  try {
+    writeDynamicScanFixture(root, { extraFile: true })
+
+    const report = await scan(root, { dynamic: true, maxFiles: 1 })
+
+    assert.equal(report.summary.scanComplete, false)
+    assert.equal(report.analysisLayers.dynamic.status, 'refused')
+    assert.deepEqual(report.analysisLayers.dynamic.failures, [
+      { reason: 'preflight-refused', code: 'static-scan-incomplete' },
+    ])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('dynamic CLI reports an unavailable deep scan and applies deep-scan exit gating', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dynamic-cli-gating-'))
+  try {
+    writeDynamicScanFixture(root)
+
+    const staticIo = capture()
+    const dynamicIo = capture()
+    const incompleteIo = capture()
+    const strictIo = capture()
+
+    assert.equal(await main([root, '--json'], staticIo), 0)
+    assert.equal(await main([root, '--dynamic', '--json'], dynamicIo), 0)
+    assert.equal(await main([root, '--dynamic', '--fail-on-incomplete'], incompleteIo), 3)
+    assert.equal(await main([root, '--dynamic', '--strict-exit-codes'], strictIo), 3)
+    assert.equal(JSON.parse(dynamicIo.buf.out).analysisLayers.dynamic.status, 'unavailable')
+
+    const textIo = capture()
+    assert.equal(await main([root, '--dynamic'], textIo), 0)
+    assert.match(textIo.buf.out, /dynamic analysis.*unavailable/i)
+    assert.match(textIo.buf.out, /not a successful deep verdict/i)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })
 
