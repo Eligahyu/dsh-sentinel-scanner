@@ -63,7 +63,8 @@ function isHighRiskBlocker(blocker) {
   const risk = ownValue(blocker, 'risk')
   const severity = ownValue(blocker, 'severity')
   const code = ownValue(blocker, 'code')
-  return highRisk === true || risk === 'high' || severity === 'high'
+  return highRisk === true || risk === 'high' || risk === 'critical'
+    || severity === 'high' || severity === 'critical'
     || (typeof code === 'string' && code.startsWith('high-risk-'))
 }
 

@@ -19,7 +19,8 @@
 import { scan, scanProfile, RULES, VERSION } from '../engine/index.js'
 import { SEVERITY_ORDER } from '../engine/rules.js'
 import { normalizeDynamicOptions } from '../engine/dynamic/policy.js'
-import { relative as pathRelative, isAbsolute as pathIsAbsolute } from 'node:path'
+import { statSync } from 'node:fs'
+import { dirname as pathDirname, relative as pathRelative, isAbsolute as pathIsAbsolute } from 'node:path'
 
 const VERDICT_EMOJI = { safe: '✅', review: '👀', risky: '⚠️', dangerous: '🚨' }
 const SEV_LABEL = { critical: 'CRITICAL', high: 'HIGH', medium: 'MEDIUM', low: 'low', info: 'info' }
@@ -254,9 +255,17 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
     // 配置:默认 ← sentinel.config.json(优先从目标目录检测)← CLI 覆盖(CLI 优先)
     const { loadConfig, mergeOverrides } = await import('../engine/config.js')
     const targetLike = positional[0] && !['audit-install', 'diff'].includes(positional[0]) && !positional[0].startsWith('npm:')
+    let configCwd = targetLike && opts.profile === undefined ? positional[0] : process.cwd()
+    if (!opts.configPath && targetLike && opts.profile === undefined) {
+      try {
+        if (statSync(positional[0]).isFile()) configCwd = pathDirname(positional[0])
+      } catch {
+        // Keep the existing target-path lookup for inaccessible targets.
+      }
+    }
     const { config } = loadConfig({
       configPath: opts.configPath,
-      cwd: targetLike && opts.profile === undefined ? positional[0] : process.cwd(),
+      cwd: configCwd,
     })
     if (config.redactSecrets === false) {
       stderr.write('dsh-sentinel: 警告 — config 中 redactSecrets=false 被忽略:secret 脱敏永远开启(不可关闭)\n')

@@ -110,6 +110,70 @@ export function computeRuntimeEntries(bundleRoot) {
 }
 
 /**
+ * Resolve the dynamic runner's entrypoints without changing static reachability
+ * semantics. Every manifest or patch entry must be an existing regular file
+ * contained by the scanned directory; one unresolved entry refuses the run.
+ */
+function deriveDynamicDirectoryEntrypoints(scanRoot, bundleRoot) {
+  const out = new Set()
+  const pkg = readJsonSafe(join(bundleRoot, 'package.json'))
+  if (!pkg) return []
+  let unresolved = false
+  const add = (rel) => {
+    if (typeof rel !== 'string' || rel.length === 0) return
+    try {
+      const entry = resolveInside(bundleRoot, rel, { mustExist: true })
+      const scoped = relative(scanRoot, entry)
+      if (scoped.startsWith('..') || isAbsolute(scoped) || !statSync(entry).isFile()) throw new Error('entrypoint outside scan scope')
+      out.add(entry)
+    } catch {
+      unresolved = true
+    }
+  }
+  if (typeof pkg.main === 'string') add(pkg.main)
+  if (pkg.exports && typeof pkg.exports === 'object' && !Array.isArray(pkg.exports)) {
+    for (const value of Object.values(pkg.exports)) {
+      const target = typeof value === 'string' ? value : value?.default
+      if (typeof target === 'string' && target.startsWith('.')) add(target)
+    }
+  }
+  if (pkg.bin) {
+    const bins = typeof pkg.bin === 'string' ? { [pkg.name ?? 'bin']: pkg.bin } : pkg.bin
+    for (const value of Object.values(bins ?? {})) if (typeof value === 'string') add(value)
+  }
+  if (pkg.dsh?.bundle?.patch && typeof pkg.dsh.bundle.patch === 'string') {
+    let patchPath
+    try {
+      patchPath = resolveInside(bundleRoot, pkg.dsh.bundle.patch, { mustExist: true })
+    } catch {
+      unresolved = true
+    }
+    if (patchPath) {
+      for (const row of parsePatchRows(readMaybe(patchPath) ?? '')) {
+        if (!row.name || row.name.startsWith('cordis:') || row.name.startsWith('@deepseek-ai/')) continue
+        try {
+          const entry = resolvePatchEntry(bundleRoot, row.name, pkg.name ?? '')
+          if (!entry) throw new Error('entrypoint unresolved')
+          add(relative(bundleRoot, entry))
+        } catch {
+          unresolved = true
+        }
+      }
+    }
+  }
+  return unresolved ? [] : [...out]
+}
+
+function deriveDynamicSingleFileEntrypoint(target) {
+  try {
+    const entry = resolveInside(dirname(target), basename(target), { mustExist: true })
+    return statSync(entry).isFile() ? [target] : []
+  } catch {
+    return []
+  }
+}
+
+/**
  * Scan a directory or a single file for security & health issues.
  * @param {string} target - path to a plugin repo/directory (or a file).
  * @param {object} opts - {mode, maxFiles, maxBytesPerFile, maxFindings, ignore, includeBuildArtifacts}
@@ -137,9 +201,10 @@ export async function scan(target, opts = {}) {
   let coverageSkips = []
   let dependencyGraph = null
   let runtimeEntrypoints = []
+  const targetIsFile = existsSync(abs) && statSync(abs).isFile()
 
-  if (existsSync(abs) && statSync(abs).isFile()) {
-    runtimeEntrypoints = [...computeRuntimeEntries(findBundleRoot(dirname(abs)))]
+  if (targetIsFile) {
+    runtimeEntrypoints = deriveDynamicSingleFileEntrypoint(abs)
     const size = statSync(abs).size
     // 单文件超过 hardMax:只做 metadata 记录并强制 incomplete(绝不 silent skip)。
     if (size > limits.hardMaxBytesPerFile) {
@@ -201,7 +266,7 @@ export async function scan(target, opts = {}) {
     const bundleRoot = findBundleRoot(abs)
     const bundle = inspectBundle(bundleRoot)
     const runtimeEntries = computeRuntimeEntries(bundleRoot)
-    runtimeEntrypoints = [...runtimeEntries]
+    runtimeEntrypoints = deriveDynamicDirectoryEntrypoints(abs, bundleRoot)
     const testReachableFiles = new Set()
     for (const rel of runtimeEntries) {
       const relToTarget = relative(abs, join(bundleRoot, rel)).replace(/\\/g, '/')

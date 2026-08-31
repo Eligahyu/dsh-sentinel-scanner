@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DYNAMIC_HARD_LIMITS, normalizeDynamicOptions } from '../engine/dynamic/policy.js'
@@ -67,6 +67,15 @@ test('dynamic options reject unsupported values and non-finite timeouts', () => 
       () => normalizeDynamicOptions({ dynamicTimeoutMs: value }),
       /dynamic timeout/i,
       `rejects non-numeric timeout value ${JSON.stringify(value)}`,
+    )
+  }
+})
+
+test('dynamic preflight treats critical severity and risk blockers as high risk', () => {
+  for (const blockers of [[{ severity: 'critical' }], [{ risk: 'critical' }]]) {
+    assert.deepEqual(
+      evaluateDynamicPreflight({ scanComplete: true, entrypoints: ['index.js'], blockers }),
+      { allowed: false, code: 'high-risk-blocker' },
     )
   }
 })
@@ -200,6 +209,90 @@ test('dynamic scan refuses an incomplete static traversal before backend availab
   }
 })
 
+test('dynamic scan refuses a real critical static finding before injected backend access', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dynamic-scan-critical-'))
+  try {
+    writeDynamicScanFixture(root)
+    writeFileSync(join(root, 'index.js'), "export const name = 'dynamic-scan'\nexport function apply() {}\nexec('rm -rf $HOME')\n")
+    const backend = new FakeDynamicBackend()
+
+    const report = await scan(root, { dynamic: true, dynamicBackendAdapter: backend })
+
+    assert.equal(report.findings.some(finding => finding.severity === 'critical'), true)
+    assert.equal(report.analysisLayers.dynamic.status, 'refused')
+    assert.deepEqual(report.analysisLayers.dynamic.failures, [
+      { reason: 'preflight-refused', code: 'high-risk-blocker' },
+    ])
+    assert.deepEqual(backend.calls, [])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('dynamic scan refuses a manifest entrypoint that does not exist before injected backend access', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dynamic-scan-missing-entry-'))
+  try {
+    writeDynamicScanFixture(root)
+    writeFileSync(join(root, 'package.json'), JSON.stringify({
+      name: 'dynamic-scan', version: '1.0.0', license: 'MIT', description: 'missing runtime entry fixture',
+      main: './missing.js', dsh: { bundle: { patch: './cordis.patch.yml' } },
+    }))
+    writeFileSync(join(root, 'cordis.patch.yml'), '[]\n')
+    const backend = new FakeDynamicBackend()
+
+    const report = await scan(root, { dynamic: true, dynamicBackendAdapter: backend })
+
+    assert.equal(report.summary.scanComplete, true)
+    assert.equal(report.analysisLayers.dynamic.status, 'refused')
+    assert.deepEqual(report.analysisLayers.dynamic.failures, [
+      { reason: 'preflight-refused', code: 'entrypoint-unresolved' },
+    ])
+    assert.deepEqual(backend.calls, [])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('dynamic directory scan refuses manifest entrypoints outside the selected target scope', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dynamic-scan-entry-scope-'))
+  try {
+    writeDynamicScanFixture(root)
+    const nestedTarget = join(root, 'nested')
+    mkdirSync(nestedTarget)
+    const backend = new FakeDynamicBackend()
+
+    const report = await scan(nestedTarget, { dynamic: true, dynamicBackendAdapter: backend })
+
+    assert.equal(report.summary.scanComplete, true)
+    assert.equal(report.analysisLayers.dynamic.status, 'refused')
+    assert.deepEqual(report.analysisLayers.dynamic.failures, [
+      { reason: 'preflight-refused', code: 'entrypoint-unresolved' },
+    ])
+    assert.deepEqual(backend.calls, [])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('dynamic single-file scan uses only the selected file as its target and entrypoint', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dynamic-single-file-'))
+  try {
+    writeDynamicScanFixture(root)
+    const selectedFile = join(root, 'selected.js')
+    writeFileSync(selectedFile, 'export const selected = true\n')
+    const backend = new FakeDynamicBackend()
+
+    const report = await scan(selectedFile, { dynamic: true, dynamicBackendAdapter: backend })
+
+    assert.equal(report.analysisLayers.dynamic.status, 'complete')
+    assert.equal(backend.prepareCalls.length, 1)
+    assert.equal(backend.prepareCalls[0].target, selectedFile)
+    assert.deepEqual(backend.prepareCalls[0].entrypoints, [selectedFile])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('dynamic CLI reports an unavailable deep scan and applies deep-scan exit gating', async () => {
   const root = mkdtempSync(join(tmpdir(), 'dynamic-cli-gating-'))
   try {
@@ -220,6 +313,23 @@ test('dynamic CLI reports an unavailable deep scan and applies deep-scan exit ga
     assert.equal(await main([root, '--dynamic'], textIo), 0)
     assert.match(textIo.buf.out, /dynamic analysis.*unavailable/i)
     assert.match(textIo.buf.out, /not a successful deep verdict/i)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('dynamic CLI discovers adjacent config for a single-file target', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dynamic-cli-single-file-config-'))
+  try {
+    const file = join(root, 'safe.js')
+    writeFileSync(file, 'export const safe = true\n')
+    writeFileSync(join(root, 'sentinel.config.json'), JSON.stringify({ dynamic: true }))
+    const io = capture()
+
+    assert.equal(await main([file, '--json'], io), 0)
+    const report = JSON.parse(io.buf.out)
+    assert.equal(report.summary.dynamicRequested, true)
+    assert.equal(report.analysisLayers.dynamic.status, 'unavailable')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
