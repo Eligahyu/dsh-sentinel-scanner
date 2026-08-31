@@ -68,3 +68,28 @@ work. This task does not advance or authorize Phase B execution.
 ## Commit
 
 This report is included in the `docs: document dynamic analysis phase a` commit.
+
+## Fix round 1: documentation gate correction
+
+**Date:** 2026-08-31
+
+- Removed the legacy embedded Chinese document from `README.md`; the English
+  README now ends after its English license and its selector links only to the
+  separate secondary `README.zh-CN.md`.
+- Updated the English verified automated-test claim from 212 to 324. The
+  standalone Chinese README had no stale test-count claim.
+- Content search found no remaining `# 中文说明` heading or stale 212 test-count
+  claim. The only current count claim is `README.md:449` with 324, matching
+  `.final-test.txt` (`ℹ tests 324`).
+- Inspected `README.zh-CN.md`: it retains the Phase A opt-in/unavailable
+  boundary, no plugin/container/production-backend execution, no host fallback,
+  1000–30000 ms timeout bounds, separate completeness, strict exit-3 gating,
+  and the Phase B independent-audit gate.
+- Searched release-contract tests for README readers. No test reads either
+  README; the only result is `package.json` package-file metadata. Per the task
+  condition, the full npm test suite was not rerun for this documentation-only
+  correction.
+- Final `git diff --check` passed. The focused content inspection confirms the
+  English selector, no embedded Chinese heading, 324-test claim, Chinese Phase A
+  guarantees, and `.final-test.txt` results of 324 tests with 0 failures and 0
+  skipped tests.
