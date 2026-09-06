@@ -1,17 +1,52 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import fs, { existsSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
+import { basename, dirname } from 'node:path'
+import test, { after } from 'node:test'
 import {
   CONTAINER_PHASE_B_LIMITS,
   REQUIRED_IMAGE_DIGEST,
   SUPPORTED_CONTAINER_ENGINES,
   createStagingCapability,
+  disposeStagingCapability,
   normalizeContainerPolicy,
 } from '../engine/dynamic/container-policy.js'
 import { buildEngineArgs, validateEngineName } from '../engine/dynamic/container-command.js'
 
 const DIGEST = 'a'.repeat(64)
 const IMAGE = `registry.example/dsh-runner@sha256:${DIGEST}`
-const STAGING_CAPABILITY = createStagingCapability()
+const TEST_STAGING_CAPABILITIES = new Set()
+
+function createTestStagingCapability() {
+  const capability = createStagingCapability()
+  TEST_STAGING_CAPABILITIES.add(capability)
+  return capability
+}
+
+function disposeTestStagingCapability(capability) {
+  try {
+    disposeStagingCapability(capability)
+  } finally {
+    TEST_STAGING_CAPABILITIES.delete(capability)
+  }
+}
+
+after(() => {
+  const errors = []
+  for (const capability of [...TEST_STAGING_CAPABILITIES]) {
+    try {
+      disposeStagingCapability(capability)
+    } catch (error) {
+      errors.push(error)
+    } finally {
+      TEST_STAGING_CAPABILITIES.delete(capability)
+    }
+  }
+  if (errors.length === 1) throw errors[0]
+  if (errors.length > 1) throw new AggregateError(errors, 'staging capability cleanup failed')
+})
+
+const STAGING_CAPABILITY = createTestStagingCapability()
 const STAGING_ROOT = STAGING_CAPABILITY.root
 const STAGED_ROOT = STAGING_CAPABILITY.snapshot
 
@@ -67,7 +102,7 @@ test('container policy accepts only immutable sha256 image references', () => {
 })
 
 test('container policy requires a trusted staging capability for the snapshot mount', () => {
-  assert.doesNotThrow(() => createStagingCapability())
+  assert.doesNotThrow(() => createTestStagingCapability())
   assert.throws(
     () => createStagingCapability({
       root: 'C:\\Users\\Administrator\\.ssh',
@@ -106,6 +141,10 @@ test('container policy requires a trusted staging capability for the snapshot mo
       engine: 'docker', image: IMAGE,
       stagingCapability: copiedCapability,
     }),
+    (error) => error?.code === 'invalid-staging-capability',
+  )
+  assert.throws(
+    () => disposeStagingCapability(copiedCapability),
     (error) => error?.code === 'invalid-staging-capability',
   )
 
@@ -147,7 +186,7 @@ test('container policy requires a trusted staging capability for the snapshot mo
     (error) => error?.code === 'invalid-staging-capability',
   )
 
-  const ownedCapability = createStagingCapability()
+  const ownedCapability = createTestStagingCapability()
   assert.equal(Object.isFrozen(ownedCapability), true)
   assert.equal(ownedCapability.root.startsWith('C:\\Users\\Administrator\\.ssh'), false)
   assert.equal(ownedCapability.snapshot.startsWith('C:\\Users\\Administrator\\.ssh'), false)
@@ -175,6 +214,63 @@ test('container policy requires a trusted staging capability for the snapshot mo
       () => createStagingCapability(candidate),
       (error) => error?.code === 'staging-capability-factory-arguments',
     )
+  }
+})
+
+test('staging capability cleanup removes its complete factory-owned workspace', () => {
+  const capability = createTestStagingCapability()
+  try {
+    assert.equal(existsSync(capability.root), true)
+    assert.equal(existsSync(capability.snapshot), true)
+
+    disposeStagingCapability(capability)
+
+    assert.equal(existsSync(capability.root), false)
+    assert.equal(existsSync(capability.snapshot), false)
+  } finally {
+    disposeTestStagingCapability(capability)
+  }
+})
+
+test('staging capability cleanup is safe to repeat', () => {
+  const capability = createTestStagingCapability()
+  try {
+    disposeStagingCapability(capability)
+    assert.equal(existsSync(capability.root), false)
+
+    assert.doesNotThrow(() => disposeStagingCapability(capability))
+    assert.equal(existsSync(capability.root), false)
+  } finally {
+    disposeTestStagingCapability(capability)
+  }
+})
+
+test('staging capability factory rolls back its owner root when snapshot creation fails', () => {
+  const originalMkdirSync = fs.mkdirSync
+  let failedRoot
+  fs.mkdirSync = (...args) => {
+    const [candidate] = args
+    if (basename(candidate).startsWith('snapshot-')) {
+      failedRoot = dirname(candidate)
+      const error = new Error('simulated snapshot creation failure')
+      error.code = 'EACCES'
+      throw error
+    }
+    return originalMkdirSync(...args)
+  }
+  syncBuiltinESMExports()
+
+  try {
+    assert.throws(
+      () => createStagingCapability(),
+      (error) => error?.code === 'staging-capability-factory-failed',
+    )
+    assert.equal(typeof failedRoot, 'string')
+    assert.equal(existsSync(failedRoot), false)
+  } finally {
+    fs.mkdirSync = originalMkdirSync
+    syncBuiltinESMExports()
+    if (failedRoot !== undefined) fs.rmSync(failedRoot, { recursive: true, force: true })
   }
 })
 

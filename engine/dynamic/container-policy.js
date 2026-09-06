@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { posix, win32 } from 'node:path'
@@ -22,6 +22,8 @@ const FORBIDDEN_OPTIONS = Object.freeze([
   'socket', 'volumes',
 ])
 const TRUSTED_STAGING_CAPABILITIES = new WeakSet()
+const STAGING_CAPABILITY_OWNERS = new WeakMap()
+const DISPOSED_STAGING_CAPABILITIES = new WeakSet()
 
 function policyError(code) {
   const error = new Error(code)
@@ -94,10 +96,22 @@ function createOwnedStagingWorkspace() {
   const api = pathApi(temporaryDirectory)
   const base = api.resolve(temporaryDirectory)
   validatePath(base, 'invalid-staging-root')
-  const root = mkdtempSync(api.join(base, 'dsh-sentinel-staging-'))
-  const snapshot = api.join(root, `snapshot-${randomUUID().replaceAll('-', '')}`)
-  mkdirSync(snapshot)
-  return validateSnapshotPair(root, snapshot)
+  let root
+  try {
+    root = mkdtempSync(api.join(base, 'dsh-sentinel-staging-'))
+    const snapshot = api.join(root, `snapshot-${randomUUID().replaceAll('-', '')}`)
+    mkdirSync(snapshot)
+    return validateSnapshotPair(root, snapshot)
+  } catch {
+    if (root !== undefined) {
+      try {
+        rmSync(root, { recursive: true, force: true })
+      } catch {
+        // Preserve the fixed factory failure contract when best-effort rollback also fails.
+      }
+    }
+    throw policyError('staging-capability-factory-failed')
+  }
 }
 
 function isTrustedStagingCapability(value) {
@@ -105,14 +119,12 @@ function isTrustedStagingCapability(value) {
 }
 
 function readCapability(value) {
-  if (!isTrustedStagingCapability(value)) throw policyError('invalid-staging-capability')
-  const root = Object.getOwnPropertyDescriptor(value, 'root')
-  const snapshot = Object.getOwnPropertyDescriptor(value, 'snapshot')
-  if (!root || !Object.hasOwn(root, 'value')
-    || !snapshot || !Object.hasOwn(snapshot, 'value')) {
+  if (!isTrustedStagingCapability(value) || DISPOSED_STAGING_CAPABILITIES.has(value)) {
     throw policyError('invalid-staging-capability')
   }
-  return validateSnapshotPair(root.value, snapshot.value)
+  const owner = STAGING_CAPABILITY_OWNERS.get(value)
+  if (owner === undefined) throw policyError('invalid-staging-capability')
+  return owner
 }
 
 export function createStagingCapability(...args) {
@@ -121,7 +133,17 @@ export function createStagingCapability(...args) {
   const capability = { root: pair.root, snapshot: pair.snapshot }
   Object.freeze(capability)
   TRUSTED_STAGING_CAPABILITIES.add(capability)
+  STAGING_CAPABILITY_OWNERS.set(capability, Object.freeze(pair))
   return capability
+}
+
+export function disposeStagingCapability(capability) {
+  if (!isTrustedStagingCapability(capability)) throw policyError('invalid-staging-capability')
+  if (DISPOSED_STAGING_CAPABILITIES.has(capability)) return
+  const owner = STAGING_CAPABILITY_OWNERS.get(capability)
+  if (owner === undefined) throw policyError('invalid-staging-capability')
+  rmSync(owner.root, { recursive: true, force: true })
+  DISPOSED_STAGING_CAPABILITIES.add(capability)
 }
 
 function resolveStaging(input) {

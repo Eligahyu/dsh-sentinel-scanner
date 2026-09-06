@@ -227,3 +227,38 @@ The capability API still does not claim realpath/symlink safety; Task 2 must cre
 
 - The factory now owns the staging directories, but Task 2 remains responsible for writing only verified snapshot content and for realpath/symlink/hardlink containment checks during staging.
 - Factory-created temporary workspaces are intentionally represented by the frozen capability paths so Task 2 can use the owned workspace without reintroducing a raw-path registration API.
+
+## Review Round 4
+
+### Findings addressed
+
+1. **Explicit factory-owned capability lifecycle**
+   - Added `disposeStagingCapability(capability)` and re-exported it from `engine/dynamic/policy.js`.
+   - The public disposal entry point accepts only the exact object registered by the module-private `TRUSTED_STAGING_CAPABILITIES` WeakSet. A copied descriptor object remains rejected with `invalid-staging-capability`.
+   - A module-private `STAGING_CAPABILITY_OWNERS` WeakMap records the factory-created `{ root, snapshot }` pair. Disposal reads the owner root from that private map, rather than rebuilding authority from the public path strings, and recursively removes the whole factory-owned parent root.
+   - A separate private WeakSet records disposed identities. Repeated disposal is a no-op, and a disposed capability is no longer accepted for policy normalization or mounting.
+
+2. **Factory failure rollback**
+   - `createOwnedStagingWorkspace()` now creates the root inside a guarded block. If snapshot creation or post-creation validation fails, it best-effort removes the freshly created root before returning the fixed `staging-capability-factory-failed` code.
+   - The capability is added to the trust WeakSet and private owner map only after the complete workspace has been created successfully.
+
+3. **Regression coverage and temporary-directory hygiene**
+   - Removed six known pre-Round-4 `dsh-sentinel-staging-*` test leftovers from the OS temporary directory before adding the tests.
+   - The test file now tracks every factory capability, has an `after` safety net, and uses `finally` cleanup in each new lifecycle test.
+   - Added behavior tests that verify: cleanup removes both the snapshot and its owner root; repeated cleanup does not throw and leaves the root absent; a forced real snapshot-creation failure leaves its newly created root absent. The failure-path test temporarily replaces only the `node:fs` snapshot `mkdirSync` call, while retaining the real `mkdtempSync`, `rmSync`, and filesystem assertions.
+
+### TDD evidence
+
+- Added the lifecycle import and behavior tests before production code.
+- The first focused run failed as expected because `container-policy.js` did not export `disposeStagingCapability` (`SyntaxError: ... does not provide an export named 'disposeStagingCapability'`; 0 pass, 1 fail).
+- Added the minimal private owner-map lifecycle implementation and factory rollback only after that red run. The focused suite then passed 12/12.
+
+### Round 4 verification
+
+- `node --test test/container-backend.test.js`: **12 passed, 0 failed**.
+- `node --test test/dynamic-analysis.test.js`: **67 passed, 0 failed**.
+- `npm.cmd test`: **339 passed, 0 failed**.
+- `git diff --check`: passed with no whitespace errors; Git emitted only the existing LF-to-CRLF normalization warnings.
+- A post-test OS temporary-directory check found no remaining `dsh-sentinel-staging-*` directories.
+
+No Docker or Podman engine was invoked. No merge or push was performed.

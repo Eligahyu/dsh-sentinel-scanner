@@ -11,6 +11,7 @@ export const DYNAMIC_HARD_LIMITS = Object.freeze({
 export {
   CONTAINER_HARD_LIMITS,
   CONTAINER_PHASE_B_LIMITS,
+  disposeStagingCapability,
   IMAGE_DIGEST_PATTERN,
   PHASE_B_LIMITS,
   REQUIRED_IMAGE_DIGEST,
