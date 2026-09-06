@@ -11,9 +11,9 @@ import { buildEngineArgs, validateEngineName } from '../engine/dynamic/container
 
 const DIGEST = 'a'.repeat(64)
 const IMAGE = `registry.example/dsh-runner@sha256:${DIGEST}`
-const STAGING_ROOT = 'C:\\dsh\\dsh-sentinel-staging'
-const STAGED_ROOT = `${STAGING_ROOT}\\snapshot-0123456789abcdef`
-const STAGING_CAPABILITY = createStagingCapability({ root: STAGING_ROOT, snapshot: STAGED_ROOT })
+const STAGING_CAPABILITY = createStagingCapability()
+const STAGING_ROOT = STAGING_CAPABILITY.root
+const STAGED_ROOT = STAGING_CAPABILITY.snapshot
 
 function request(overrides = {}) {
   return {
@@ -67,6 +67,19 @@ test('container policy accepts only immutable sha256 image references', () => {
 })
 
 test('container policy requires a trusted staging capability for the snapshot mount', () => {
+  assert.doesNotThrow(() => createStagingCapability())
+  assert.throws(
+    () => createStagingCapability({
+      root: 'C:\\Users\\Administrator\\.ssh',
+      snapshot: 'C:\\Users\\Administrator\\.ssh\\snapshot-0123456789abcdef',
+    }),
+    (error) => error?.code === 'staging-capability-factory-arguments',
+  )
+  assert.throws(
+    () => createStagingCapability(STAGING_ROOT, STAGED_ROOT),
+    (error) => error?.code === 'staging-capability-factory-arguments',
+  )
+
   assert.throws(
     () => normalizeContainerPolicy({ engine: 'docker', image: IMAGE }),
     (error) => error?.code === 'staging-capability-required',
@@ -111,12 +124,42 @@ test('container policy requires a trusted staging capability for the snapshot mo
     }),
     (error) => error?.code === 'raw-staging-root-not-allowed',
   )
+  for (const key of ['stagedRoot', 'stagingRoot']) {
+    const code = key === 'stagedRoot'
+      ? 'raw-staged-root-not-allowed'
+      : 'raw-staging-root-not-allowed'
+    assert.throws(
+      () => normalizeContainerPolicy({
+        engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, [key]: undefined,
+      }),
+      (error) => error?.code === code,
+    )
+    assert.throws(
+      () => buildEngineArgs(request({ [key]: undefined })),
+      (error) => error?.code === code,
+    )
+  }
+  const proxiedCapability = new Proxy(STAGING_CAPABILITY, {})
+  assert.throws(
+    () => normalizeContainerPolicy({
+      engine: 'docker', image: IMAGE, stagingCapability: proxiedCapability,
+    }),
+    (error) => error?.code === 'invalid-staging-capability',
+  )
+
+  const ownedCapability = createStagingCapability()
+  assert.equal(Object.isFrozen(ownedCapability), true)
+  assert.equal(ownedCapability.root.startsWith('C:\\Users\\Administrator\\.ssh'), false)
+  assert.equal(ownedCapability.snapshot.startsWith('C:\\Users\\Administrator\\.ssh'), false)
+  const ownedArgv = buildEngineArgs(request({ stagingCapability: ownedCapability }))
+  assert.equal(ownedArgv.some((value) => value.includes(ownedCapability.snapshot)), true)
+  assert.equal(ownedArgv.some((value) => value.includes('\\.ssh')), false)
   assert.throws(
     () => createStagingCapability({
       root: STAGING_ROOT,
       snapshot: `${STAGED_ROOT},readonly=false`,
     }),
-    (error) => error?.code === 'invalid-staged-root',
+    (error) => error?.code === 'staging-capability-factory-arguments',
   )
 
   const invalidCapabilities = [
@@ -130,7 +173,7 @@ test('container policy requires a trusted staging capability for the snapshot mo
   for (const candidate of invalidCapabilities) {
     assert.throws(
       () => createStagingCapability(candidate),
-      (error) => ['invalid-staging-root', 'invalid-staged-root', 'staging-capability-mismatch'].includes(error?.code),
+      (error) => error?.code === 'staging-capability-factory-arguments',
     )
   }
 })

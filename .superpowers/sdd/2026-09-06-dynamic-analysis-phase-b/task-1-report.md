@@ -188,3 +188,42 @@ The capability API still does not claim realpath/symlink safety; Task 2 must cre
 - Post-commit `git diff --check HEAD^ HEAD`: passed with no whitespace errors.
 - Post-commit `git status --short --branch`: clean worktree on `codex/dynamic-analysis-phase-b`.
 - No merge and no push were performed.
+
+## Review Round 3
+
+### Findings addressed
+
+1. **Factory no longer registers caller-selected paths**
+   - `createStagingCapability` is now a zero-argument factory. Any argument, including `{ root, snapshot }`, positional paths, `.ssh`, commas, or other raw path data, is rejected with the fixed `staging-capability-factory-arguments` code.
+   - The factory validates the OS temporary directory, creates a unique `dsh-sentinel-staging-*` root, creates a unique `snapshot-*` child directory, freezes the capability, and registers only that exact object in the module-private WeakSet.
+   - Task 2 can write a verified snapshot into the owned `capability.snapshot` workspace and use the same capability for policy normalization; there is no public raw-path registration entry point.
+
+2. **Capability identity remains non-forgeable**
+   - WeakSet identity remains the only trust decision. Plain objects, copied property descriptors, proxies, and forged fields are rejected.
+   - The returned capability is frozen. The command argv remains frozen and rejects both index assignment and property replacement attempts without changing its contents.
+
+3. **Raw path attributes are rejected by presence**
+   - `normalizeContainerPolicy` rejects own `stagedRoot` and `stagingRoot` properties even when their values are `undefined`.
+   - `buildEngineArgs` applies the same own-property rejection before policy normalization and never forwards raw paths.
+
+4. **Sensitive-path regression coverage**
+   - Tests verify that the public factory cannot register `.ssh` or arbitrary caller paths, forged capabilities cannot authorize a mount, and emitted argv contains only the factory-owned snapshot and no `.ssh` path.
+
+### TDD evidence
+
+- Added the zero-argument factory, raw-argument rejection, forged/proxy capability, sensitive-path, and own-undefined property assertions before the production changes.
+- The first focused run failed as intended: **8 passed, 1 failed**. The failure was the old factory throwing `invalid-staging-root` for `createStagingCapability()` instead of creating an owned workspace.
+- Implemented the factory and own-property checks only after that red run. The focused container suite then passed **9/9**.
+
+### Round 3 verification
+
+- `node --test test/container-backend.test.js`: **9 passed, 0 failed** after the production change.
+- `node --test test/dynamic-analysis.test.js`: **67 passed, 0 failed**.
+- `npm.cmd test`: **336 passed, 0 failed**.
+- `git diff --check`: passed with no whitespace errors; Git emitted only LF-to-CRLF normalization warnings.
+- No Docker or Podman engine was run; all command behavior remains runner-injected/test-only.
+
+### Round 3 risk
+
+- The factory now owns the staging directories, but Task 2 remains responsible for writing only verified snapshot content and for realpath/symlink/hardlink containment checks during staging.
+- Factory-created temporary workspaces are intentionally represented by the frozen capability paths so Task 2 can use the owned workspace without reintroducing a raw-path registration API.

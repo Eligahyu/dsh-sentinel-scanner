@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { tmpdir } from 'node:os'
 import { posix, win32 } from 'node:path'
 
 export const CONTAINER_PHASE_B_LIMITS = Object.freeze({
@@ -86,6 +89,17 @@ function validateSnapshotPair(root, snapshot) {
   return { root: normalizedRoot, snapshot: normalizedSnapshot }
 }
 
+function createOwnedStagingWorkspace() {
+  const temporaryDirectory = tmpdir()
+  const api = pathApi(temporaryDirectory)
+  const base = api.resolve(temporaryDirectory)
+  validatePath(base, 'invalid-staging-root')
+  const root = mkdtempSync(api.join(base, 'dsh-sentinel-staging-'))
+  const snapshot = api.join(root, `snapshot-${randomUUID().replaceAll('-', '')}`)
+  mkdirSync(snapshot)
+  return validateSnapshotPair(root, snapshot)
+}
+
 function isTrustedStagingCapability(value) {
   return isRecord(value) && TRUSTED_STAGING_CAPABILITIES.has(value)
 }
@@ -101,8 +115,9 @@ function readCapability(value) {
   return validateSnapshotPair(root.value, snapshot.value)
 }
 
-export function createStagingCapability({ root, snapshot } = {}) {
-  const pair = validateSnapshotPair(root, snapshot)
+export function createStagingCapability(...args) {
+  if (args.length !== 0) throw policyError('staging-capability-factory-arguments')
+  const pair = createOwnedStagingWorkspace()
   const capability = { root: pair.root, snapshot: pair.snapshot }
   Object.freeze(capability)
   TRUSTED_STAGING_CAPABILITIES.add(capability)
@@ -110,9 +125,11 @@ export function createStagingCapability({ root, snapshot } = {}) {
 }
 
 function resolveStaging(input) {
-  if (input.stagedRoot !== undefined) throw policyError('raw-staged-root-not-allowed')
-  if (input.stagingRoot !== undefined) throw policyError('raw-staging-root-not-allowed')
-  if (input.stagingCapability === undefined) throw policyError('staging-capability-required')
+  if (Object.hasOwn(input, 'stagedRoot')) throw policyError('raw-staged-root-not-allowed')
+  if (Object.hasOwn(input, 'stagingRoot')) throw policyError('raw-staging-root-not-allowed')
+  if (!Object.hasOwn(input, 'stagingCapability') || input.stagingCapability === undefined) {
+    throw policyError('staging-capability-required')
+  }
   const capability = readCapability(input.stagingCapability)
   return capability
 }
