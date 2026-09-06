@@ -33,6 +33,8 @@ function validateLabel(value) {
 }
 
 function rejectUnsafeOptions(input) {
+  if (Object.hasOwn(input, 'stagedRoot')) throw commandError('raw-staged-root-not-allowed')
+  if (Object.hasOwn(input, 'stagingRoot')) throw commandError('raw-staging-root-not-allowed')
   for (const key of DISALLOWED_KEYS) {
     if (Object.hasOwn(input, key)) throw commandError('user-container-arguments')
   }
@@ -52,8 +54,6 @@ export function buildEngineArgs(input = {}) {
   const policy = normalizeContainerPolicy({
     engine,
     image: input.image,
-    stagedRoot: input.stagedRoot,
-    stagingRoot: input.stagingRoot,
     stagingCapability: input.stagingCapability,
     network: input.network,
     networkMode: input.networkMode,

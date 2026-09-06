@@ -21,7 +21,6 @@ function request(overrides = {}) {
     action: 'run',
     label: 'dsh-run-123',
     image: IMAGE,
-    stagedRoot: STAGED_ROOT,
     stagingCapability: STAGING_CAPABILITY,
     ...overrides,
   }
@@ -35,7 +34,6 @@ test('container policy accepts only immutable sha256 image references', () => {
   const normalized = normalizeContainerPolicy({
     engine: 'docker',
     image: IMAGE,
-    stagedRoot: STAGED_ROOT,
     stagingCapability: STAGING_CAPABILITY,
   })
 
@@ -45,14 +43,24 @@ test('container policy accepts only immutable sha256 image references', () => {
   assert.equal(Object.isFrozen(normalized), true)
   assert.equal(Object.isFrozen(normalized.limits), true)
 
-  const controlledRootPolicy = normalizeContainerPolicy({
-    engine: 'docker', image: IMAGE, stagedRoot: STAGED_ROOT, stagingRoot: STAGING_ROOT,
-  })
-  assert.equal(controlledRootPolicy.stagedRoot, STAGED_ROOT)
+  assert.throws(
+    () => normalizeContainerPolicy({
+      engine: 'docker', image: IMAGE, stagedRoot: STAGED_ROOT,
+      stagingCapability: STAGING_CAPABILITY,
+    }),
+    (error) => error?.code === 'raw-staged-root-not-allowed',
+  )
+  assert.throws(
+    () => normalizeContainerPolicy({
+      engine: 'docker', image: IMAGE, stagingRoot: STAGING_ROOT,
+      stagingCapability: STAGING_CAPABILITY,
+    }),
+    (error) => error?.code === 'raw-staging-root-not-allowed',
+  )
 
   for (const image of ['registry.example/dsh-runner:latest', 'registry.example/dsh-runner', 'dsh-runner@sha256:short']) {
     assert.throws(
-      () => normalizeContainerPolicy({ engine: 'docker', image, stagedRoot: STAGED_ROOT }),
+      () => normalizeContainerPolicy({ engine: 'docker', image }),
       /immutable|digest|image/i,
     )
   }
@@ -60,16 +68,71 @@ test('container policy accepts only immutable sha256 image references', () => {
 
 test('container policy requires a trusted staging capability for the snapshot mount', () => {
   assert.throws(
-    () => normalizeContainerPolicy({ engine: 'docker', image: IMAGE, stagedRoot: STAGED_ROOT }),
+    () => normalizeContainerPolicy({ engine: 'docker', image: IMAGE }),
     (error) => error?.code === 'staging-capability-required',
   )
   assert.throws(
+    () => normalizeContainerPolicy({ engine: 'docker', image: IMAGE, stagedRoot: STAGED_ROOT }),
+    (error) => error?.code === 'raw-staged-root-not-allowed',
+  )
+  assert.throws(
     () => normalizeContainerPolicy({
-      engine: 'docker', image: IMAGE, stagedRoot: STAGED_ROOT,
+      engine: 'docker', image: IMAGE,
       stagingCapability: { root: STAGING_ROOT, snapshot: STAGED_ROOT },
     }),
     (error) => error?.code === 'invalid-staging-capability',
   )
+
+  const copiedCapability = Object.create(
+    Object.getPrototypeOf(STAGING_CAPABILITY),
+    Object.getOwnPropertyDescriptors(STAGING_CAPABILITY),
+  )
+  assert.notEqual(copiedCapability, STAGING_CAPABILITY)
+  assert.throws(
+    () => normalizeContainerPolicy({
+      engine: 'docker', image: IMAGE,
+      stagingCapability: copiedCapability,
+    }),
+    (error) => error?.code === 'invalid-staging-capability',
+  )
+
+  const symlinkShapedSnapshot = `${STAGING_ROOT}\\link-to-host\\snapshot-0123456789abcdef`
+  assert.throws(
+    () => normalizeContainerPolicy({
+      engine: 'docker', image: IMAGE, stagedRoot: symlinkShapedSnapshot,
+      stagingCapability: STAGING_CAPABILITY,
+    }),
+    (error) => error?.code === 'raw-staged-root-not-allowed',
+  )
+  assert.throws(
+    () => normalizeContainerPolicy({
+      engine: 'docker', image: IMAGE, stagingRoot: STAGING_ROOT,
+      stagingCapability: STAGING_CAPABILITY,
+    }),
+    (error) => error?.code === 'raw-staging-root-not-allowed',
+  )
+  assert.throws(
+    () => createStagingCapability({
+      root: STAGING_ROOT,
+      snapshot: `${STAGED_ROOT},readonly=false`,
+    }),
+    (error) => error?.code === 'invalid-staged-root',
+  )
+
+  const invalidCapabilities = [
+    { root: 42, snapshot: STAGED_ROOT },
+    { root: STAGING_ROOT, snapshot: 42 },
+    { root: `${STAGING_ROOT},extra`, snapshot: STAGED_ROOT },
+    { root: STAGING_ROOT, snapshot: `${STAGED_ROOT};extra` },
+    { root: `${STAGING_ROOT}\\..\\outside`, snapshot: STAGED_ROOT },
+    { root: `${STAGING_ROOT}${'r'.repeat(520)}`, snapshot: STAGED_ROOT },
+  ]
+  for (const candidate of invalidCapabilities) {
+    assert.throws(
+      () => createStagingCapability(candidate),
+      (error) => ['invalid-staging-root', 'invalid-staged-root', 'staging-capability-mismatch'].includes(error?.code),
+    )
+  }
 })
 
 test('staging validation rejects host paths, non-canonical paths, mount separators, and sockets', () => {
@@ -87,7 +150,7 @@ test('staging validation rejects host paths, non-canonical paths, mount separato
   for (const stagedRoot of hostileRoots) {
     assert.throws(
       () => buildEngineArgs(request({ stagedRoot })),
-      (error) => ['invalid-staged-root', 'staging-capability-mismatch', 'engine-socket-path'].includes(error?.code),
+      (error) => error?.code === 'raw-staged-root-not-allowed',
       `rejects unsafe staged root ${JSON.stringify(stagedRoot)}`,
     )
   }
@@ -96,7 +159,7 @@ test('staging validation rejects host paths, non-canonical paths, mount separato
 test('container policy rejects contradictory network fields instead of applying precedence', () => {
   assert.throws(
     () => normalizeContainerPolicy({
-      engine: 'docker', image: IMAGE, stagedRoot: STAGED_ROOT,
+      engine: 'docker', image: IMAGE,
       stagingCapability: STAGING_CAPABILITY, network: 'none', networkMode: 'host',
     }),
     (error) => error?.code === 'conflicting-network-policy',
@@ -108,14 +171,14 @@ test('container inputs are bounded and invalid enum errors never stringify attac
   const oversizedRoot = `${STAGING_ROOT}\\${'s'.repeat(500)}`
   assert.throws(
     () => normalizeContainerPolicy({
-      engine: 'docker', image: oversizedImage, stagedRoot: STAGED_ROOT,
+      engine: 'docker', image: oversizedImage,
       stagingCapability: STAGING_CAPABILITY,
     }),
     (error) => error?.code === 'invalid-image',
   )
   assert.throws(
     () => buildEngineArgs(request({ stagedRoot: oversizedRoot })),
-    (error) => error?.code === 'invalid-staged-root',
+    (error) => error?.code === 'raw-staged-root-not-allowed',
   )
   assert.throws(
     () => buildEngineArgs(request({ label: `dsh-${'x'.repeat(70)}` })),
@@ -133,7 +196,6 @@ test('container policy clamps requests to fixed Phase B limits', () => {
   const normalized = normalizeContainerPolicy({
     engine: 'podman',
     image: IMAGE,
-    stagedRoot: STAGED_ROOT,
     stagingCapability: STAGING_CAPABILITY,
     timeoutMs: Number.MAX_SAFE_INTEGER,
     memoryBytes: Number.MAX_SAFE_INTEGER,
@@ -161,6 +223,12 @@ test('Docker and Podman produce the same hardened argv contract', () => {
   assert.equal(docker.includes('--ipc=host'), false)
   assert.equal(docker.some((value) => value.includes('docker.sock')), false)
   assert.equal(docker.at(-1), IMAGE)
+  const argv = buildEngineArgs(request())
+  assert.equal(Object.isFrozen(argv), true)
+  const originalFirst = argv[0]
+  assert.throws(() => { argv[0] = 'evil' }, TypeError)
+  assert.throws(() => Object.defineProperty(argv, '0', { value: 'evil' }), TypeError)
+  assert.equal(argv[0], originalFirst)
 })
 
 test('engine validation and command construction reject shell strings and user flags', () => {

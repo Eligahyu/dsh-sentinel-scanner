@@ -14,13 +14,11 @@ export const REQUIRED_IMAGE_DIGEST = Object.freeze(/^[a-z0-9](?:[a-z0-9._/-]{0,2
 const MAX_IMAGE_LENGTH = 512
 const MAX_PATH_LENGTH = 512
 const STAGING_SNAPSHOT_NAME = /^(?:snapshot|run)-[a-z0-9][a-z0-9._-]{7,95}$/i
-const CONTROLLED_STAGING_ROOT_NAME = /^dsh-[a-z0-9._-]*staging(?:-[a-z0-9._-]+)?$/i
 const FORBIDDEN_OPTIONS = Object.freeze([
   'args', 'command', 'engineSocket', 'extraArgs', 'flags', 'ipcSocket', 'mounts',
   'socket', 'volumes',
 ])
-const STAGING_CAPABILITY_BRAND = Symbol('dsh-staging-capability')
-const STAGING_CAPABILITY_VALUE = Object.freeze({})
+const TRUSTED_STAGING_CAPABILITIES = new WeakSet()
 
 function policyError(code) {
   const error = new Error(code)
@@ -80,24 +78,23 @@ function isDescendant(root, snapshot) {
     && !relative.startsWith(`..${api.sep}`) && !api.isAbsolute(relative)
 }
 
-function validateSnapshotPair(root, snapshot, { requireControlledRoot = false } = {}) {
+function validateSnapshotPair(root, snapshot) {
   const normalizedRoot = validatePath(root, 'invalid-staging-root')
   const normalizedSnapshot = validatePath(snapshot)
-  if (requireControlledRoot && !CONTROLLED_STAGING_ROOT_NAME.test(pathApi(normalizedRoot).basename(normalizedRoot))) {
-    throw policyError('invalid-staging-root')
-  }
   if (!isDescendant(normalizedRoot, normalizedSnapshot)) throw policyError('staging-capability-mismatch')
   validateSnapshotName(normalizedSnapshot)
   return { root: normalizedRoot, snapshot: normalizedSnapshot }
 }
 
+function isTrustedStagingCapability(value) {
+  return isRecord(value) && TRUSTED_STAGING_CAPABILITIES.has(value)
+}
+
 function readCapability(value) {
-  if (!isRecord(value)) throw policyError('invalid-staging-capability')
-  const brand = Object.getOwnPropertyDescriptor(value, STAGING_CAPABILITY_BRAND)
+  if (!isTrustedStagingCapability(value)) throw policyError('invalid-staging-capability')
   const root = Object.getOwnPropertyDescriptor(value, 'root')
   const snapshot = Object.getOwnPropertyDescriptor(value, 'snapshot')
-  if (!brand || brand.value !== STAGING_CAPABILITY_VALUE
-    || !root || !Object.hasOwn(root, 'value')
+  if (!root || !Object.hasOwn(root, 'value')
     || !snapshot || !Object.hasOwn(snapshot, 'value')) {
     throw policyError('invalid-staging-capability')
   }
@@ -105,27 +102,19 @@ function readCapability(value) {
 }
 
 export function createStagingCapability({ root, snapshot } = {}) {
-  const pair = validateSnapshotPair(root, snapshot, { requireControlledRoot: true })
+  const pair = validateSnapshotPair(root, snapshot)
   const capability = { root: pair.root, snapshot: pair.snapshot }
-  Object.defineProperty(capability, STAGING_CAPABILITY_BRAND, {
-    value: STAGING_CAPABILITY_VALUE,
-    enumerable: false,
-    writable: false,
-    configurable: false,
-  })
-  return Object.freeze(capability)
+  Object.freeze(capability)
+  TRUSTED_STAGING_CAPABILITIES.add(capability)
+  return capability
 }
 
-function resolveStaging(input, stagedRoot) {
-  if (input.stagingCapability !== undefined) {
-    const capability = readCapability(input.stagingCapability)
-    if (capability.snapshot !== stagedRoot) throw policyError('staging-capability-mismatch')
-    return capability
-  }
-  if (input.stagingRoot !== undefined) {
-    return validateSnapshotPair(input.stagingRoot, stagedRoot, { requireControlledRoot: true })
-  }
-  throw policyError('staging-capability-required')
+function resolveStaging(input) {
+  if (input.stagedRoot !== undefined) throw policyError('raw-staged-root-not-allowed')
+  if (input.stagingRoot !== undefined) throw policyError('raw-staging-root-not-allowed')
+  if (input.stagingCapability === undefined) throw policyError('staging-capability-required')
+  const capability = readCapability(input.stagingCapability)
+  return capability
 }
 
 function boundedLimit(value, name, maximum) {
@@ -156,8 +145,8 @@ export function normalizeContainerPolicy(input = {}) {
   const engine = input.engine ?? 'docker'
   if (!SUPPORTED_CONTAINER_ENGINES.includes(engine)) throw policyError('invalid-engine')
   const image = validateImage(input.image)
-  const stagedRoot = validatePath(input.stagedRoot)
-  const staging = resolveStaging(input, stagedRoot)
+  const staging = resolveStaging(input)
+  const stagedRoot = staging.snapshot
 
   const hasNetwork = input.network !== undefined
   const hasNetworkMode = input.networkMode !== undefined

@@ -117,3 +117,74 @@ Final commit: `feat: define hardened container command contracts` (the report is
 
 - The capability brand is intentionally private to the policy module; later staging code must use `createStagingCapability` or the explicit controlled-root contract rather than passing raw host paths.
 - The full-suite success depends on installing declared dependencies in the worktree; `node_modules` is ignored and was not committed.
+
+## Review Round 2
+
+### Findings addressed
+
+1. **Private capability trust root**
+   - Removed the exported/copyable Symbol branding and all controlled-root basename heuristics.
+   - Added module-private `TRUSTED_STAGING_CAPABILITIES = new WeakSet()`.
+   - `createStagingCapability({ root, snapshot })` validates bounded canonical fields, freezes the capability, registers that exact object in the private WeakSet, and returns it.
+   - `isTrustedStagingCapability` accepts only object identity present in that WeakSet. A copied object, including one created with all own property descriptors, is rejected.
+
+2. **No raw staging fallback**
+   - `normalizeContainerPolicy` now requires the trusted capability and rejects any raw `stagingRoot` field with `raw-staging-root-not-allowed`.
+   - `stagedRoot`, when supplied alongside a capability, is only a consistency check; the normalized mount source always comes from `capability.snapshot`.
+   - Lexical root/snapshot checks remain only capability-field consistency checks. Realpath/symlink resolution is intentionally deferred to the Task 2 staging layer; no raw path is treated as safe by this task.
+
+3. **Regression coverage**
+   - Added assertions for malicious raw staging roots, symlink-shaped escape paths, complete capability descriptor copying, malformed capability root/snapshot fields, and structural path injection.
+   - Added `Object.isFrozen(argv)` plus strict write and property-replacement attempts; both fail and the original argv remains unchanged.
+
+### TDD evidence
+
+- Added the Round 2 regression assertions before changing production code.
+- The first focused run failed in exactly the two relevant ways: controlled `stagingRoot` fallback was accepted, and a capability cloned with `Object.getOwnPropertyDescriptors` was accepted.
+- The argv freeze assertion already passed because the prior implementation froze the returned array; it remains in the regression contract.
+- After the WeakSet-only implementation and raw fallback removal, container tests passed.
+
+### Round 2 verification
+
+- `node --test test/container-backend.test.js`: **9 passed, 0 failed**.
+- `node --test test/dynamic-analysis.test.js`: **67 passed, 0 failed**.
+- `node --test test/container-backend.test.js test/dynamic-analysis.test.js`: **76 passed, 0 failed**.
+- `npm.cmd test`: **336 passed, 0 failed**.
+- `git diff --check`: to be run immediately before the Round 2 commit.
+
+### Round 2 risk
+
+- The Task 1 capability checks cannot prove filesystem realpath safety; the capability creator validates only bounded canonical strings and lexical containment. Task 2 staging must create the capability only after descriptor-based traversal and symlink/hardlink containment checks.
+- The ignored local `node_modules` installation remains an environment prerequisite for the plugin-load smoke test and is not part of the commit.
+
+### Round 2 final tightening: raw `stagedRoot` is not an input contract
+
+The review wording requires the capability to be the only staging input, not merely the source of the final mount after comparing a caller-supplied path. I therefore tightened the contract again:
+
+- `normalizeContainerPolicy` rejects any supplied `stagedRoot` with `raw-staged-root-not-allowed`, even when a valid capability is also present.
+- `normalizeContainerPolicy` and `buildEngineArgs` reject raw `stagingRoot`; the command builder no longer forwards either raw path into policy normalization.
+- The normalized `stagedRoot` and emitted `--mount` source are derived only from the exact WeakSet-registered capability's `snapshot`.
+- Regression coverage now includes raw host paths, symlink-shaped escape paths, comma/semicolon/equals/newline/socket-shaped paths, and a valid capability combined with a raw path. These are rejected before any raw path can be used as a mount source.
+
+TDD evidence for this final tightening:
+
+- Updated the regression assertions first and ran the focused container suite. It failed with the old implementation still accepting a raw `stagedRoot`; the first test edit also exposed a test-local undefined fixture reference, which was corrected before production changes were evaluated.
+- Changed policy and command handling only after that failing run. The focused container suite then passed **9/9**.
+
+Final verification for this report revision:
+
+- `node --test test/container-backend.test.js`: **9 passed, 0 failed**.
+- `node --test test/dynamic-analysis.test.js`: **67 passed, 0 failed**.
+- `node --test test/container-backend.test.js test/dynamic-analysis.test.js`: **76 passed, 0 failed**.
+- `npm.cmd test`: **336 passed, 0 failed**.
+- `git diff --check`: pending final pre-commit run.
+
+The capability API still does not claim realpath/symlink safety; Task 2 must create capabilities only after filesystem containment verification. No Docker/Podman engine was invoked.
+
+### Final commit verification
+
+- `git diff --check` before commit: passed with no whitespace errors; Git emitted only the existing LF-to-CRLF normalization warnings.
+- Commit created and amended in this worktree only: `fix: require private staging capabilities`.
+- Post-commit `git diff --check HEAD^ HEAD`: passed with no whitespace errors.
+- Post-commit `git status --short --branch`: clean worktree on `codex/dynamic-analysis-phase-b`.
+- No merge and no push were performed.
