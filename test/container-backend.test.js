@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs, { existsSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import test, { after } from 'node:test'
 import {
   CONTAINER_PHASE_B_LIMITS,
@@ -13,7 +13,7 @@ import {
   normalizeContainerPolicy,
 } from '../engine/dynamic/container-policy.js'
 import { buildEngineArgs, validateEngineName } from '../engine/dynamic/container-command.js'
-import { createStagingSnapshot } from '../engine/dynamic/staging.js'
+import { createStagingSnapshot, isVcsMetadataName } from '../engine/dynamic/staging.js'
 import { resolveLexicallyInside } from '../engine/path-safety.js'
 
 const DIGEST = 'a'.repeat(64)
@@ -70,19 +70,62 @@ function createSnapshotSource(t) {
   return root
 }
 
-function stagingWorkspaceNames() {
-  return new Set(fs.readdirSync(tmpdir()).filter(name => name.startsWith('dsh-sentinel-staging-')))
+const HAS_DESCRIPTOR_RELATIVE_STAGING = process.platform === 'linux'
+
+function linuxStagingTest(name, fn) {
+  return test(name, {
+    skip: HAS_DESCRIPTOR_RELATIVE_STAGING ? false : 'requires Linux descriptor-relative traversal',
+  }, fn)
 }
 
-function assertRejectedWithoutNewWorkspace(before, callback, code) {
-  assert.throws(
-    callback,
-    error => error?.code === code && error.message === code,
-  )
-  assert.deepEqual(stagingWorkspaceNames(), before)
+function assertRejectedAndOwnerDisposed(callback, code) {
+  const originalMkdtemp = fs.mkdtempSync
+  let ownerRoot
+  fs.mkdtempSync = (prefix, ...args) => {
+    const created = originalMkdtemp(prefix, ...args)
+    if (typeof prefix === 'string' && prefix.includes('dsh-sentinel-staging-')) ownerRoot = created
+    return created
+  }
+  syncBuiltinESMExports()
+  try {
+    assert.throws(callback, error => error?.code === code && error.message === code)
+  } finally {
+    fs.mkdtempSync = originalMkdtemp
+    syncBuiltinESMExports()
+  }
+  assert.equal(typeof ownerRoot, 'string')
+  assert.equal(existsSync(ownerRoot), false)
 }
 
-test('staging snapshot copies nested regular files into a factory-owned capability', t => {
+test('staging snapshot fails closed before capability allocation without descriptor-relative traversal', t => {
+  if (HAS_DESCRIPTOR_RELATIVE_STAGING) {
+    t.skip('Linux has the required descriptor-relative traversal primitive')
+    return
+  }
+  const source = createSnapshotSource(t)
+  fs.writeFileSync(join(source, 'safe.txt'), 'safe')
+  const originalMkdtemp = fs.mkdtempSync
+  let stagingFactoryCalls = 0
+  let unexpectedSnapshot
+  fs.mkdtempSync = (prefix, ...args) => {
+    if (typeof prefix === 'string' && prefix.includes('dsh-sentinel-staging-')) stagingFactoryCalls += 1
+    return originalMkdtemp(prefix, ...args)
+  }
+  syncBuiltinESMExports()
+  try {
+    assert.throws(
+      () => { unexpectedSnapshot = createStagingSnapshot(source) },
+      error => error?.code === 'staging-descriptor-unavailable' && error.message === 'staging-descriptor-unavailable',
+    )
+    assert.equal(stagingFactoryCalls, 0)
+  } finally {
+    unexpectedSnapshot?.cleanup()
+    fs.mkdtempSync = originalMkdtemp
+    syncBuiltinESMExports()
+  }
+})
+
+linuxStagingTest('staging snapshot copies nested regular files into a factory-owned capability', t => {
   const source = createSnapshotSource(t)
   fs.mkdirSync(join(source, 'lib', 'nested'), { recursive: true })
   fs.writeFileSync(join(source, 'index.js'), 'export const value = 1\n')
@@ -107,45 +150,25 @@ test('staging snapshot copies nested regular files into a factory-owned capabili
   assert.equal(fs.readFileSync(join(source, 'index.js'), 'utf8'), 'export const value = 1\n')
 })
 
-test('staging snapshot rejects a symlink escape without retaining a workspace', t => {
+linuxStagingTest('staging snapshot rejects a real symlink escape and disposes its owner root', t => {
   const source = createSnapshotSource(t)
   const escape = join(source, 'escape.txt')
-  fs.writeFileSync(escape, 'the lstat boundary must reject this before open')
-  const originalLstat = fs.lstatSync
-  fs.lstatSync = (candidate, ...args) => {
-    const stat = originalLstat(candidate, ...args)
-    if (resolve(candidate) !== escape) return stat
-    return Object.assign(Object.create(stat), {
-      isFile: () => false,
-      isSymbolicLink: () => true,
-      isDirectory: () => false,
-    })
-  }
-  try {
-    assertRejectedWithoutNewWorkspace(
-      stagingWorkspaceNames(),
-      () => createStagingSnapshot(source),
-      'staging-symlink',
-    )
-  } finally {
-    fs.lstatSync = originalLstat
-  }
+  fs.writeFileSync(join(source, 'outside.txt'), 'outside')
+  fs.symlinkSync(join(source, 'outside.txt'), escape, 'file')
+
+  assertRejectedAndOwnerDisposed(() => createStagingSnapshot(source), 'staging-symlink')
 })
 
-test('staging snapshot rejects hardlinked regular files without retaining a workspace', t => {
+linuxStagingTest('staging snapshot rejects real hardlinked regular files and disposes its owner root', t => {
   const source = createSnapshotSource(t)
   const original = join(source, 'original.txt')
   fs.writeFileSync(original, 'duplicate inode')
   fs.linkSync(original, join(source, 'hardlink.txt'))
 
-  assertRejectedWithoutNewWorkspace(
-    stagingWorkspaceNames(),
-    () => createStagingSnapshot(source),
-    'staging-hardlink',
-  )
+  assertRejectedAndOwnerDisposed(() => createStagingSnapshot(source), 'staging-hardlink')
 })
 
-test('staging snapshot rejects socket and device-shaped entries before opening them', t => {
+linuxStagingTest('staging snapshot rejects socket and device-shaped entries before opening them', t => {
   const source = createSnapshotSource(t)
   const special = join(source, 'special')
   fs.writeFileSync(special, 'not read')
@@ -157,7 +180,7 @@ test('staging snapshot rejects socket and device-shaped entries before opening t
     const originalLstat = fs.lstatSync
     fs.lstatSync = (candidate, ...args) => {
       const stat = originalLstat(candidate, ...args)
-      if (resolve(candidate) !== special) return stat
+      if (typeof candidate !== 'string' || !candidate.endsWith('/special')) return stat
       return Object.assign(Object.create(stat), {
         isFile: () => false,
         isSymbolicLink: () => false,
@@ -169,56 +192,60 @@ test('staging snapshot rejects socket and device-shaped entries before opening t
       })
     }
     try {
-      assertRejectedWithoutNewWorkspace(
-        stagingWorkspaceNames(),
-        () => createStagingSnapshot(source),
-        'staging-special-file',
-      )
+      assertRejectedAndOwnerDisposed(() => createStagingSnapshot(source), 'staging-special-file')
     } finally {
       fs.lstatSync = originalLstat
     }
   }
 })
 
-test('staging snapshot excludes VCS metadata and nested worktrees', t => {
+test('VCS metadata policy is case-insensitive', () => {
+  for (const name of ['.git', '.GIT', '.GiT']) assert.equal(isVcsMetadataName(name), true)
+  assert.equal(isVcsMetadataName('.gits'), false)
+})
+
+linuxStagingTest('staging snapshot excludes case-insensitive VCS metadata and nested worktrees', t => {
   const source = createSnapshotSource(t)
-  fs.mkdirSync(join(source, '.git'), { recursive: true })
-  fs.writeFileSync(join(source, '.git', 'config'), '[core]')
+  fs.mkdirSync(join(source, '.GIT'), { recursive: true })
+  fs.writeFileSync(join(source, '.GIT', 'config'), '[core]')
   fs.mkdirSync(join(source, 'nested-worktree'), { recursive: true })
-  fs.writeFileSync(join(source, 'nested-worktree', '.git'), 'gitdir: /private/worktrees/nested')
+  fs.writeFileSync(join(source, 'nested-worktree', '.GiT'), 'gitdir: /private/worktrees/nested')
   fs.writeFileSync(join(source, 'nested-worktree', 'ignored.js'), 'ignored')
   fs.writeFileSync(join(source, 'kept.js'), 'kept')
 
   const staged = createStagingSnapshot(source)
   t.after(staged.cleanup)
 
-  assert.equal(existsSync(join(staged.snapshot, '.git')), false)
+  assert.equal(existsSync(join(staged.snapshot, '.GIT')), false)
   assert.equal(existsSync(join(staged.snapshot, 'nested-worktree')), false)
   assert.equal(fs.readFileSync(join(staged.snapshot, 'kept.js'), 'utf8'), 'kept')
   assert.deepEqual(staged.manifest.excluded, { git: 1, worktrees: 1 })
 })
 
-test('staging snapshot enforces containment and every caller-tightened resource limit', t => {
+test('lexical containment rejects a source-relative escape', t => {
   const source = createSnapshotSource(t)
-  fs.writeFileSync(join(source, 'one.txt'), 'abcdef')
-  fs.writeFileSync(join(source, 'two.txt'), 'ghijkl')
-  fs.writeFileSync(join(source, 'long-name.txt'), 'x')
-
   assert.throws(
     () => resolveLexicallyInside(source, '../outside'),
     error => error?.name === 'PathEscapeError',
   )
+})
+
+linuxStagingTest('staging snapshot enforces every caller-tightened resource limit incrementally', t => {
+  const source = createSnapshotSource(t)
+  fs.writeFileSync(join(source, 'one.txt'), 'abcdef')
+  fs.writeFileSync(join(source, 'two.txt'), 'ghijkl')
+  fs.writeFileSync(join(source, 'long-name.txt'), 'x')
   for (const [options, code] of [
     [{ maxFiles: 1 }, 'staging-file-count-limit'],
     [{ maxTotalBytes: 5 }, 'staging-total-bytes-limit'],
     [{ maxFileBytes: 5 }, 'staging-file-bytes-limit'],
     [{ maxPathLength: 4 }, 'staging-path-length-limit'],
   ]) {
-    assertRejectedWithoutNewWorkspace(stagingWorkspaceNames(), () => createStagingSnapshot(source, options), code)
+    assertRejectedAndOwnerDisposed(() => createStagingSnapshot(source, options), code)
   }
 })
 
-test('staging snapshot cleanup delegates factory disposal and is idempotent', t => {
+linuxStagingTest('staging snapshot cleanup delegates factory disposal and is idempotent', t => {
   const source = createSnapshotSource(t)
   fs.writeFileSync(join(source, 'safe.txt'), 'safe')
   const staged = createStagingSnapshot(source)
@@ -229,6 +256,54 @@ test('staging snapshot cleanup delegates factory disposal and is idempotent', t 
   assert.equal(existsSync(staged.root), false)
   assert.doesNotThrow(() => staged.cleanup())
   assert.equal(existsSync(staged.snapshot), false)
+})
+
+linuxStagingTest('staging snapshot retains the already-open source root across a pathname replacement race', t => {
+  const source = createSnapshotSource(t)
+  const replacement = createSnapshotSource(t)
+  const displaced = fs.mkdtempSync(join(tmpdir(), 'dsh-staging-displaced-'))
+  fs.rmSync(displaced, { recursive: true, force: true })
+  t.after(() => fs.rmSync(displaced, { recursive: true, force: true }))
+  fs.writeFileSync(join(source, 'safe.txt'), 'safe source content')
+  fs.writeFileSync(join(replacement, 'secret.txt'), 'outside replacement content')
+  const originalOpen = fs.openSync
+  let replaced = false
+  fs.openSync = (candidate, ...args) => {
+    const fd = originalOpen(candidate, ...args)
+    if (!replaced && typeof candidate === 'string' && basename(candidate).startsWith('snapshot-')) {
+      fs.renameSync(source, displaced)
+      fs.renameSync(replacement, source)
+      replaced = true
+    }
+    return fd
+  }
+  let staged
+  try {
+    staged = createStagingSnapshot(source)
+  } finally {
+    fs.openSync = originalOpen
+  }
+  t.after(staged.cleanup)
+
+  assert.equal(replaced, true)
+  assert.equal(fs.readFileSync(join(staged.snapshot, 'safe.txt'), 'utf8'), 'safe source content')
+  assert.equal(existsSync(join(staged.snapshot, 'secret.txt')), false)
+})
+
+linuxStagingTest('staging snapshot rolls back its tracked owner root after a full I/O failure', t => {
+  const source = createSnapshotSource(t)
+  fs.writeFileSync(join(source, 'safe.txt'), 'safe')
+  const originalRead = fs.readSync
+  fs.readSync = () => {
+    const error = new Error('simulated I/O failure')
+    error.code = 'EIO'
+    throw error
+  }
+  try {
+    assertRejectedAndOwnerDisposed(() => createStagingSnapshot(source), 'staging-copy-failed')
+  } finally {
+    fs.readSync = originalRead
+  }
 })
 
 test('container policy accepts only immutable sha256 image references', () => {

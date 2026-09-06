@@ -43,3 +43,32 @@ This Windows host denies ordinary test-process symlink creation with `EPERM`; th
 ## Commit
 
 `feat: add sanitized dynamic staging snapshots`
+
+## Round 1: descriptor-relative traversal correction
+
+### Blocker resolution
+
+The initial traversal checked a child with `lstat` and then reopened it by source pathname. A concurrent directory replacement could therefore retarget that later pathname lookup outside the originally opened source root. This round removes that path from the trust boundary.
+
+- Snapshot creation now fails before Task 1 capability allocation with the fixed `staging-descriptor-unavailable` error unless it runs on Linux with `O_DIRECTORY`, `O_NOFOLLOW`, and usable `/proc/self/fd` access.
+- The Windows behavior is intentionally fail-closed: no snapshot is allocated or copied. The test tracks Task 1's factory call rather than scanning the shared temporary directory.
+- On Linux, the source root is opened from `/` as a chain of verified directory descriptors. Each subsequent child directory, metadata lookup, file open, and directory iterator uses `/proc/self/fd/<parent-fd>/<name>`; no untrusted source pathname is reopened after that root descriptor is established.
+- Directory reads use `opendirSync(...).readSync()` and increment the traversal budget as each entry is received. File descriptors, directory descriptors, and `fs.Dir` objects are closed on success and error paths.
+- VCS matching is ASCII case-insensitive (`.git`, `.GIT`, `.GiT`), manifests are sorted with a locale-independent code-point comparator, and the copied manifest remains relative-only.
+
+### Additional regression coverage
+
+- Windows validates the explicit pre-factory fail-closed contract.
+- Linux-only tests cover real symlink and hardlink rejection, case-insensitive VCS/worktree exclusion, controlled source-root pathname replacement after the descriptor is open, incremental limits, idempotent cleanup, and an injected full read I/O failure whose real factory-owned root is verified removed.
+- The previous process-wide temporary-directory residue assertion was removed; each failure test captures the owner root created by that individual invocation.
+
+### Round 1 verification
+
+| Command | Result |
+| --- | --- |
+| `node --test test/container-backend.test.js` | 15 passed, 0 failed, 9 Linux-only tests skipped on Windows |
+| `node --test test/container-backend.test.js test/hardening.test.js test/dynamic-analysis.test.js` | 148 passed, 0 failed, 9 Linux-only tests skipped on Windows |
+| `npm test` | Exit code 0 on this Windows host |
+| `git diff --check` | Exit code 0; no whitespace errors |
+
+This host has no installed WSL distribution, so the Linux-only tests could not be executed locally. They are deliberately not represented as Windows coverage. Linux CI must execute the nine descriptor-relative tests before claiming Linux runtime verification.
