@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import fs, { existsSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
-import { basename, dirname } from 'node:path'
+import { tmpdir } from 'node:os'
+import { basename, dirname, join, resolve } from 'node:path'
 import test, { after } from 'node:test'
 import {
   CONTAINER_PHASE_B_LIMITS,
@@ -12,6 +13,8 @@ import {
   normalizeContainerPolicy,
 } from '../engine/dynamic/container-policy.js'
 import { buildEngineArgs, validateEngineName } from '../engine/dynamic/container-command.js'
+import { createStagingSnapshot } from '../engine/dynamic/staging.js'
+import { resolveLexicallyInside } from '../engine/path-safety.js'
 
 const DIGEST = 'a'.repeat(64)
 const IMAGE = `registry.example/dsh-runner@sha256:${DIGEST}`
@@ -60,6 +63,173 @@ function request(overrides = {}) {
     ...overrides,
   }
 }
+
+function createSnapshotSource(t) {
+  const root = fs.mkdtempSync(join(tmpdir(), 'dsh-staging-source-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  return root
+}
+
+function stagingWorkspaceNames() {
+  return new Set(fs.readdirSync(tmpdir()).filter(name => name.startsWith('dsh-sentinel-staging-')))
+}
+
+function assertRejectedWithoutNewWorkspace(before, callback, code) {
+  assert.throws(
+    callback,
+    error => error?.code === code && error.message === code,
+  )
+  assert.deepEqual(stagingWorkspaceNames(), before)
+}
+
+test('staging snapshot copies nested regular files into a factory-owned capability', t => {
+  const source = createSnapshotSource(t)
+  fs.mkdirSync(join(source, 'lib', 'nested'), { recursive: true })
+  fs.writeFileSync(join(source, 'index.js'), 'export const value = 1\n')
+  fs.writeFileSync(join(source, 'lib', 'nested', 'value.txt'), 'nested value\n')
+
+  const staged = createStagingSnapshot(source)
+  t.after(staged.cleanup)
+
+  assert.notEqual(staged.snapshot, source)
+  assert.equal(staged.root, staged.capability.root)
+  assert.equal(staged.snapshot, staged.capability.snapshot)
+  assert.equal(fs.readFileSync(join(staged.snapshot, 'index.js'), 'utf8'), 'export const value = 1\n')
+  assert.equal(fs.readFileSync(join(staged.snapshot, 'lib', 'nested', 'value.txt'), 'utf8'), 'nested value\n')
+  assert.deepEqual(staged.manifest.files.map(file => file.path), ['index.js', 'lib/nested/value.txt'])
+  assert.equal(staged.manifest.files.every(file => !file.path.includes(source)), true)
+  assert.equal(Object.isFrozen(staged.manifest), true)
+  assert.equal(Object.isFrozen(staged.manifest.files), true)
+
+  const argv = buildEngineArgs(request({ stagingCapability: staged.capability }))
+  assert.equal(argv.some(value => value.includes(staged.snapshot)), true)
+  assert.equal(argv.some(value => value.includes(source)), false)
+  assert.equal(fs.readFileSync(join(source, 'index.js'), 'utf8'), 'export const value = 1\n')
+})
+
+test('staging snapshot rejects a symlink escape without retaining a workspace', t => {
+  const source = createSnapshotSource(t)
+  const escape = join(source, 'escape.txt')
+  fs.writeFileSync(escape, 'the lstat boundary must reject this before open')
+  const originalLstat = fs.lstatSync
+  fs.lstatSync = (candidate, ...args) => {
+    const stat = originalLstat(candidate, ...args)
+    if (resolve(candidate) !== escape) return stat
+    return Object.assign(Object.create(stat), {
+      isFile: () => false,
+      isSymbolicLink: () => true,
+      isDirectory: () => false,
+    })
+  }
+  try {
+    assertRejectedWithoutNewWorkspace(
+      stagingWorkspaceNames(),
+      () => createStagingSnapshot(source),
+      'staging-symlink',
+    )
+  } finally {
+    fs.lstatSync = originalLstat
+  }
+})
+
+test('staging snapshot rejects hardlinked regular files without retaining a workspace', t => {
+  const source = createSnapshotSource(t)
+  const original = join(source, 'original.txt')
+  fs.writeFileSync(original, 'duplicate inode')
+  fs.linkSync(original, join(source, 'hardlink.txt'))
+
+  assertRejectedWithoutNewWorkspace(
+    stagingWorkspaceNames(),
+    () => createStagingSnapshot(source),
+    'staging-hardlink',
+  )
+})
+
+test('staging snapshot rejects socket and device-shaped entries before opening them', t => {
+  const source = createSnapshotSource(t)
+  const special = join(source, 'special')
+  fs.writeFileSync(special, 'not read')
+
+  for (const [kind, predicate] of [
+    ['socket', () => true],
+    ['device', () => false],
+  ]) {
+    const originalLstat = fs.lstatSync
+    fs.lstatSync = (candidate, ...args) => {
+      const stat = originalLstat(candidate, ...args)
+      if (resolve(candidate) !== special) return stat
+      return Object.assign(Object.create(stat), {
+        isFile: () => false,
+        isSymbolicLink: () => false,
+        isDirectory: () => false,
+        isSocket: predicate,
+        isCharacterDevice: () => kind === 'device',
+        isBlockDevice: () => false,
+        isFIFO: () => false,
+      })
+    }
+    try {
+      assertRejectedWithoutNewWorkspace(
+        stagingWorkspaceNames(),
+        () => createStagingSnapshot(source),
+        'staging-special-file',
+      )
+    } finally {
+      fs.lstatSync = originalLstat
+    }
+  }
+})
+
+test('staging snapshot excludes VCS metadata and nested worktrees', t => {
+  const source = createSnapshotSource(t)
+  fs.mkdirSync(join(source, '.git'), { recursive: true })
+  fs.writeFileSync(join(source, '.git', 'config'), '[core]')
+  fs.mkdirSync(join(source, 'nested-worktree'), { recursive: true })
+  fs.writeFileSync(join(source, 'nested-worktree', '.git'), 'gitdir: /private/worktrees/nested')
+  fs.writeFileSync(join(source, 'nested-worktree', 'ignored.js'), 'ignored')
+  fs.writeFileSync(join(source, 'kept.js'), 'kept')
+
+  const staged = createStagingSnapshot(source)
+  t.after(staged.cleanup)
+
+  assert.equal(existsSync(join(staged.snapshot, '.git')), false)
+  assert.equal(existsSync(join(staged.snapshot, 'nested-worktree')), false)
+  assert.equal(fs.readFileSync(join(staged.snapshot, 'kept.js'), 'utf8'), 'kept')
+  assert.deepEqual(staged.manifest.excluded, { git: 1, worktrees: 1 })
+})
+
+test('staging snapshot enforces containment and every caller-tightened resource limit', t => {
+  const source = createSnapshotSource(t)
+  fs.writeFileSync(join(source, 'one.txt'), 'abcdef')
+  fs.writeFileSync(join(source, 'two.txt'), 'ghijkl')
+  fs.writeFileSync(join(source, 'long-name.txt'), 'x')
+
+  assert.throws(
+    () => resolveLexicallyInside(source, '../outside'),
+    error => error?.name === 'PathEscapeError',
+  )
+  for (const [options, code] of [
+    [{ maxFiles: 1 }, 'staging-file-count-limit'],
+    [{ maxTotalBytes: 5 }, 'staging-total-bytes-limit'],
+    [{ maxFileBytes: 5 }, 'staging-file-bytes-limit'],
+    [{ maxPathLength: 4 }, 'staging-path-length-limit'],
+  ]) {
+    assertRejectedWithoutNewWorkspace(stagingWorkspaceNames(), () => createStagingSnapshot(source, options), code)
+  }
+})
+
+test('staging snapshot cleanup delegates factory disposal and is idempotent', t => {
+  const source = createSnapshotSource(t)
+  fs.writeFileSync(join(source, 'safe.txt'), 'safe')
+  const staged = createStagingSnapshot(source)
+  t.after(staged.cleanup)
+
+  assert.equal(existsSync(staged.root), true)
+  staged.cleanup()
+  assert.equal(existsSync(staged.root), false)
+  assert.doesNotThrow(() => staged.cleanup())
+  assert.equal(existsSync(staged.snapshot), false)
+})
 
 test('container policy accepts only immutable sha256 image references', () => {
   assert.equal(Object.isFrozen(REQUIRED_IMAGE_DIGEST), true)

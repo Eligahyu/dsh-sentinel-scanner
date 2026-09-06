@@ -36,6 +36,19 @@ export function isInsideRoot(root, candidate) {
 }
 
 /**
+ * 仅作词法 containment，不对 candidate 调用 realpath。
+ *
+ * 适用于先 lstat、再以描述符验证的遍历：对不可信子项调用 realpath 会在
+ * 链接替换窗口中跟随攻击者的目标。调用方仍须负责打开后的 inode 校验。
+ */
+export function resolveLexicallyInside(root, candidate) {
+  const rootPath = normalize(resolve(root))
+  const candidatePath = normalize(resolve(rootPath, candidate))
+  if (!isInsideRoot(rootPath, candidatePath)) throw new PathEscapeError(candidate)
+  return candidatePath
+}
+
+/**
  * filesystem-real containment:双方 realpath 后,用 path.relative 判定。
  * 目标不存在/无权限时退回词法校验(不因缺 realpath 而拒绝合法路径)。
  */
