@@ -72,3 +72,30 @@ The initial traversal checked a child with `lstat` and then reopened it by sourc
 | `git diff --check` | Exit code 0; no whitespace errors |
 
 This host has no installed WSL distribution, so the Linux-only tests could not be executed locally. They are deliberately not represented as Windows coverage. Linux CI must execute the nine descriptor-relative tests before claiming Linux runtime verification.
+
+## Round 2: traversal-entry budget and capability-gated Linux tests
+
+### TDD evidence
+
+1. Added an independent `maxEntries` hard-cap assertion and a Linux-only integration test that creates five directory entries with caller-supplied `maxEntries: 4`.
+2. The new focused test run failed before the implementation change: `STAGING_SNAPSHOT_LIMITS.maxEntries` was `undefined` rather than `4096` (15 passed, 1 failed, 10 skipped).
+3. Added the non-expandable 4,096-entry hard cap, preserves a caller-tightened `maxEntries`, and changes over-budget traversal to the fixed `staging-entry-budget-limit` error.
+
+### Regression coverage
+
+- The entry-budget test records the Task 1 factory-owned root for this invocation and verifies rollback after the fixed error. It creates directories rather than files, so it exercises traversal entries rather than file, byte, or path-length limits.
+- The test replaces `fs.readdirSync` with a throwing stub for the snapshot attempt. The snapshot still must reach `staging-entry-budget-limit`, which proves the code uses the incremental `opendirSync`/`Dir.readSync()` path and stops before collecting an over-budget directory with whole-directory `readdirSync`.
+- Linux staging tests now use a one-time, side-effect-free capability probe: Linux platform, numeric `O_DIRECTORY` and `O_NOFOLLOW`, plus opening, `fstat`-checking, and closing `/proc/self/fd`. If the probe is unavailable, they explicitly skip rather than treating `process.platform` alone as proof of safety.
+- Product behavior remains fail-closed whenever the same descriptor conditions are unavailable: no Task 1 capability is allocated and no source file is copied. The existing Windows test continues to verify this condition.
+- The existing real Linux symlink, hardlink, descriptor pathname-replacement, VCS/worktree, cleanup, and injected full-I/O rollback tests remain in place.
+
+### Round 2 verification
+
+| Command | Result |
+| --- | --- |
+| `node --test test/container-backend.test.js` | 16 passed, 0 failed, 10 explicitly capability-gated Linux tests skipped on this Windows host |
+| `node --test test/container-backend.test.js test/hardening.test.js test/dynamic-analysis.test.js` | 149 passed, 0 failed, 10 explicitly capability-gated Linux tests skipped |
+| `npm test` | Exit code 0 on this Windows host |
+| `git diff --check` | Exit code 0; line-ending conversion warnings only, no whitespace errors |
+
+The host still has no installed WSL distribution, so the new real traversal-entry test and the other descriptor tests have not run locally. Linux CI must run the ten capability-gated tests before claiming Linux runtime verification; Windows is covered only for the intentional fail-closed behavior.

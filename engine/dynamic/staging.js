@@ -5,13 +5,13 @@ import { createStagingCapability, disposeStagingCapability } from './container-p
 
 export const STAGING_SNAPSHOT_LIMITS = Object.freeze({
   maxFiles: 1024,
+  maxEntries: 4096,
   maxTotalBytes: 32 * 1024 * 1024,
   maxFileBytes: 8 * 1024 * 1024,
   maxPathLength: 240,
 })
 
 const COPY_BUFFER_BYTES = 64 * 1024
-const MAX_ENTRY_MULTIPLIER = 4
 const O_DIRECTORY = fs.constants.O_DIRECTORY
 const O_NOFOLLOW = fs.constants.O_NOFOLLOW
 
@@ -192,11 +192,12 @@ function normalizeOptions(input) {
   try {
     const limits = {
       maxFiles: boundedOption(input, 'maxFiles', STAGING_SNAPSHOT_LIMITS.maxFiles),
+      maxEntries: boundedOption(input, 'maxEntries', STAGING_SNAPSHOT_LIMITS.maxEntries),
       maxTotalBytes: boundedOption(input, 'maxTotalBytes', STAGING_SNAPSHOT_LIMITS.maxTotalBytes),
       maxFileBytes: boundedOption(input, 'maxFileBytes', STAGING_SNAPSHOT_LIMITS.maxFileBytes),
       maxPathLength: boundedOption(input, 'maxPathLength', STAGING_SNAPSHOT_LIMITS.maxPathLength),
     }
-    return Object.freeze({ ...limits, maxEntries: limits.maxFiles * MAX_ENTRY_MULTIPLIER })
+    return Object.freeze(limits)
   } catch (error) {
     if (error instanceof StagingSnapshotError) throw error
     throw stagingError('invalid-staging-options')
@@ -253,7 +254,7 @@ function readDirectoryEntries(directory, state) {
       if (entry === null) break
       assertSafeName(entry.name)
       state.entryCount += 1
-      if (state.entryCount > state.limits.maxEntries) throw stagingError('staging-file-count-limit')
+      if (state.entryCount > state.limits.maxEntries) throw stagingError('staging-entry-budget-limit')
       entries.push(entry.name)
     }
     return entries

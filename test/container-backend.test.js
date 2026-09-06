@@ -13,7 +13,11 @@ import {
   normalizeContainerPolicy,
 } from '../engine/dynamic/container-policy.js'
 import { buildEngineArgs, validateEngineName } from '../engine/dynamic/container-command.js'
-import { createStagingSnapshot, isVcsMetadataName } from '../engine/dynamic/staging.js'
+import {
+  STAGING_SNAPSHOT_LIMITS,
+  createStagingSnapshot,
+  isVcsMetadataName,
+} from '../engine/dynamic/staging.js'
 import { resolveLexicallyInside } from '../engine/path-safety.js'
 
 const DIGEST = 'a'.repeat(64)
@@ -70,11 +74,28 @@ function createSnapshotSource(t) {
   return root
 }
 
-const HAS_DESCRIPTOR_RELATIVE_STAGING = process.platform === 'linux'
+function hasDescriptorRelativeStagingSupport() {
+  if (process.platform !== 'linux') return false
+  const { O_DIRECTORY, O_NOFOLLOW, O_RDONLY } = fs.constants
+  if (!Number.isInteger(O_DIRECTORY) || !Number.isInteger(O_NOFOLLOW)) return false
+  let fd
+  try {
+    fd = fs.openSync('/proc/self/fd', O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    return fs.fstatSync(fd).isDirectory()
+  } catch {
+    return false
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd)
+  }
+}
+
+const HAS_DESCRIPTOR_RELATIVE_STAGING = hasDescriptorRelativeStagingSupport()
 
 function linuxStagingTest(name, fn) {
   return test(name, {
-    skip: HAS_DESCRIPTOR_RELATIVE_STAGING ? false : 'requires Linux descriptor-relative traversal',
+    skip: HAS_DESCRIPTOR_RELATIVE_STAGING
+      ? false
+      : 'requires usable Linux O_DIRECTORY/O_NOFOLLOW /proc/self/fd traversal',
   }, fn)
 }
 
@@ -98,8 +119,8 @@ function assertRejectedAndOwnerDisposed(callback, code) {
 }
 
 test('staging snapshot fails closed before capability allocation without descriptor-relative traversal', t => {
-  if (HAS_DESCRIPTOR_RELATIVE_STAGING) {
-    t.skip('Linux has the required descriptor-relative traversal primitive')
+  if (process.platform === 'linux' && HAS_DESCRIPTOR_RELATIVE_STAGING) {
+    t.skip('Linux has usable descriptor-relative traversal support')
     return
   }
   const source = createSnapshotSource(t)
@@ -123,6 +144,10 @@ test('staging snapshot fails closed before capability allocation without descrip
     fs.mkdtempSync = originalMkdtemp
     syncBuiltinESMExports()
   }
+})
+
+test('staging snapshot defines an independent capped traversal-entry budget', () => {
+  assert.equal(STAGING_SNAPSHOT_LIMITS.maxEntries, 4096)
 })
 
 linuxStagingTest('staging snapshot copies nested regular files into a factory-owned capability', t => {
@@ -242,6 +267,27 @@ linuxStagingTest('staging snapshot enforces every caller-tightened resource limi
     [{ maxPathLength: 4 }, 'staging-path-length-limit'],
   ]) {
     assertRejectedAndOwnerDisposed(() => createStagingSnapshot(source, options), code)
+  }
+})
+
+linuxStagingTest('staging snapshot stops at a caller-tightened traversal-entry budget without whole-directory readdir', t => {
+  const source = createSnapshotSource(t)
+  const maxEntries = 4
+  for (let index = 0; index <= maxEntries; index += 1) {
+    fs.mkdirSync(join(source, `entry-${index}`))
+  }
+
+  const originalReaddir = fs.readdirSync
+  fs.readdirSync = () => {
+    throw new Error('whole-directory readdir is forbidden during staging traversal')
+  }
+  try {
+    assertRejectedAndOwnerDisposed(
+      () => createStagingSnapshot(source, { maxEntries }),
+      'staging-entry-budget-limit',
+    )
+  } finally {
+    fs.readdirSync = originalReaddir
   }
 })
 
