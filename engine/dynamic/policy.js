@@ -8,6 +8,17 @@ export const DYNAMIC_HARD_LIMITS = Object.freeze({
   maxEvidenceDepth: 8,
 })
 
+export {
+  CONTAINER_HARD_LIMITS,
+  CONTAINER_PHASE_B_LIMITS,
+  IMAGE_DIGEST_PATTERN,
+  PHASE_B_LIMITS,
+  REQUIRED_IMAGE_DIGEST,
+  SUPPORTED_CONTAINER_ENGINES,
+  SUPPORTED_ENGINES,
+  normalizeContainerPolicy,
+} from './container-policy.js'
+
 const DYNAMIC_BACKENDS = Object.freeze(['auto', 'docker', 'podman'])
 const DYNAMIC_PROFILES = Object.freeze(['observe'])
 
