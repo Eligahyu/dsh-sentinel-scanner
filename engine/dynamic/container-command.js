@@ -1,4 +1,3 @@
-import { isAbsolute } from 'node:path'
 import {
   CONTAINER_PHASE_B_LIMITS,
   REQUIRED_IMAGE_DIGEST,
@@ -18,58 +17,44 @@ function isRecord(value) {
 }
 
 export function validateEngineName(value) {
-  if (!SUPPORTED_CONTAINER_ENGINES.includes(value)) {
-    throw new Error(`invalid container engine: ${String(value)}`)
-  }
+  if (!SUPPORTED_CONTAINER_ENGINES.includes(value)) throw commandError('invalid-engine')
   return value
 }
 
+function commandError(code) {
+  const error = new Error(code)
+  error.code = code
+  return error
+}
+
 function validateLabel(value) {
-  if (typeof value !== 'string' || !SAFE_LABEL.test(value)) {
-    throw new Error('invalid container label')
-  }
+  if (typeof value !== 'string' || value.length > 64 || !SAFE_LABEL.test(value)) throw commandError('invalid-label')
   return value
 }
 
 function rejectUnsafeOptions(input) {
   for (const key of DISALLOWED_KEYS) {
-    if (Object.hasOwn(input, key)) throw new Error(`container ${key} arguments are not allowed`)
-  }
-  if (input.network !== undefined && input.network !== 'none') {
-    throw new Error('host or custom container network is not allowed')
-  }
-  if (input.networkMode !== undefined && input.networkMode !== 'none') {
-    throw new Error('host or custom container network is not allowed')
-  }
-  if (input.privileged !== undefined && input.privileged !== false) {
-    throw new Error('privileged containers are not allowed')
-  }
-  if (input.pid !== undefined && input.pid !== 'private') {
-    throw new Error('host or custom pid namespace is not allowed')
-  }
-  if (input.ipc !== undefined && input.ipc !== 'private') {
-    throw new Error('host or custom ipc namespace is not allowed')
+    if (Object.hasOwn(input, key)) throw commandError('user-container-arguments')
   }
   for (const key of ['engineSocket', 'socket', 'ipcSocket']) {
-    if (Object.hasOwn(input, key)) throw new Error('container engine socket path is not allowed')
+    if (Object.hasOwn(input, key)) throw commandError('engine-socket-path')
   }
 }
 
 export function buildEngineArgs(input = {}) {
-  if (!isRecord(input)) throw new Error('invalid container command')
+  if (!isRecord(input)) throw commandError('invalid-container-command')
   rejectUnsafeOptions(input)
 
   const engine = validateEngineName(input.engine)
   const action = input.action
-  if (!ACTIONS.has(action)) throw new Error(`unsupported container action: ${String(action)}`)
+  if (!ACTIONS.has(action)) throw commandError('invalid-action')
   const label = validateLabel(input.label)
-  if (typeof input.stagedRoot !== 'string' || !isAbsolute(input.stagedRoot)) {
-    throw new Error('container staged root must be absolute')
-  }
   const policy = normalizeContainerPolicy({
     engine,
     image: input.image,
     stagedRoot: input.stagedRoot,
+    stagingRoot: input.stagingRoot,
+    stagingCapability: input.stagingCapability,
     network: input.network,
     networkMode: input.networkMode,
     privileged: input.privileged,
@@ -83,7 +68,7 @@ export function buildEngineArgs(input = {}) {
     },
   })
 
-  if (!REQUIRED_IMAGE_DIGEST.test(policy.image)) throw new Error('container image must be digest-pinned')
+  if (!REQUIRED_IMAGE_DIGEST.test(policy.image)) throw commandError('invalid-image')
   const limits = policy.limits
   const args = [
     'run',
@@ -106,7 +91,7 @@ export function buildEngineArgs(input = {}) {
     policy.image,
   ]
 
-  if (args.some((value) => typeof value !== 'string')) throw new Error('container argv must contain strings')
+  if (args.some((value) => typeof value !== 'string')) throw commandError('invalid-container-argv')
   return Object.freeze(args)
 }
 

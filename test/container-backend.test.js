@@ -4,13 +4,16 @@ import {
   CONTAINER_PHASE_B_LIMITS,
   REQUIRED_IMAGE_DIGEST,
   SUPPORTED_CONTAINER_ENGINES,
+  createStagingCapability,
   normalizeContainerPolicy,
 } from '../engine/dynamic/container-policy.js'
 import { buildEngineArgs, validateEngineName } from '../engine/dynamic/container-command.js'
 
 const DIGEST = 'a'.repeat(64)
 const IMAGE = `registry.example/dsh-runner@sha256:${DIGEST}`
-const STAGED_ROOT = 'C:\\dsh\\staged\\run-123'
+const STAGING_ROOT = 'C:\\dsh\\dsh-sentinel-staging'
+const STAGED_ROOT = `${STAGING_ROOT}\\snapshot-0123456789abcdef`
+const STAGING_CAPABILITY = createStagingCapability({ root: STAGING_ROOT, snapshot: STAGED_ROOT })
 
 function request(overrides = {}) {
   return {
@@ -19,6 +22,7 @@ function request(overrides = {}) {
     label: 'dsh-run-123',
     image: IMAGE,
     stagedRoot: STAGED_ROOT,
+    stagingCapability: STAGING_CAPABILITY,
     ...overrides,
   }
 }
@@ -32,6 +36,7 @@ test('container policy accepts only immutable sha256 image references', () => {
     engine: 'docker',
     image: IMAGE,
     stagedRoot: STAGED_ROOT,
+    stagingCapability: STAGING_CAPABILITY,
   })
 
   assert.equal(normalized.engine, 'docker')
@@ -39,6 +44,11 @@ test('container policy accepts only immutable sha256 image references', () => {
   assert.equal(normalized.stagedRoot, STAGED_ROOT)
   assert.equal(Object.isFrozen(normalized), true)
   assert.equal(Object.isFrozen(normalized.limits), true)
+
+  const controlledRootPolicy = normalizeContainerPolicy({
+    engine: 'docker', image: IMAGE, stagedRoot: STAGED_ROOT, stagingRoot: STAGING_ROOT,
+  })
+  assert.equal(controlledRootPolicy.stagedRoot, STAGED_ROOT)
 
   for (const image of ['registry.example/dsh-runner:latest', 'registry.example/dsh-runner', 'dsh-runner@sha256:short']) {
     assert.throws(
@@ -48,11 +58,83 @@ test('container policy accepts only immutable sha256 image references', () => {
   }
 })
 
+test('container policy requires a trusted staging capability for the snapshot mount', () => {
+  assert.throws(
+    () => normalizeContainerPolicy({ engine: 'docker', image: IMAGE, stagedRoot: STAGED_ROOT }),
+    (error) => error?.code === 'staging-capability-required',
+  )
+  assert.throws(
+    () => normalizeContainerPolicy({
+      engine: 'docker', image: IMAGE, stagedRoot: STAGED_ROOT,
+      stagingCapability: { root: STAGING_ROOT, snapshot: STAGED_ROOT },
+    }),
+    (error) => error?.code === 'invalid-staging-capability',
+  )
+})
+
+test('staging validation rejects host paths, non-canonical paths, mount separators, and sockets', () => {
+  const hostileRoots = [
+    'C:\\Users\\Administrator\\.ssh',
+    'C:\\Users\\Administrator\\Desktop\\code\\dsh-sentinel',
+    `${STAGING_ROOT}\\..\\.ssh`,
+    `${STAGED_ROOT},readonly=false`,
+    `${STAGED_ROOT};--mount=type=bind`,
+    `${STAGED_ROOT}=host`,
+    `${STAGED_ROOT}\r\n--network=host`,
+    `${STAGING_ROOT}\\snapshot-0123456789abcdef\\docker.sock`,
+  ]
+
+  for (const stagedRoot of hostileRoots) {
+    assert.throws(
+      () => buildEngineArgs(request({ stagedRoot })),
+      (error) => ['invalid-staged-root', 'staging-capability-mismatch', 'engine-socket-path'].includes(error?.code),
+      `rejects unsafe staged root ${JSON.stringify(stagedRoot)}`,
+    )
+  }
+})
+
+test('container policy rejects contradictory network fields instead of applying precedence', () => {
+  assert.throws(
+    () => normalizeContainerPolicy({
+      engine: 'docker', image: IMAGE, stagedRoot: STAGED_ROOT,
+      stagingCapability: STAGING_CAPABILITY, network: 'none', networkMode: 'host',
+    }),
+    (error) => error?.code === 'conflicting-network-policy',
+  )
+})
+
+test('container inputs are bounded and invalid enum errors never stringify attacker values', () => {
+  const oversizedImage = `${'r'.repeat(300)}@sha256:${DIGEST}`
+  const oversizedRoot = `${STAGING_ROOT}\\${'s'.repeat(500)}`
+  assert.throws(
+    () => normalizeContainerPolicy({
+      engine: 'docker', image: oversizedImage, stagedRoot: STAGED_ROOT,
+      stagingCapability: STAGING_CAPABILITY,
+    }),
+    (error) => error?.code === 'invalid-image',
+  )
+  assert.throws(
+    () => buildEngineArgs(request({ stagedRoot: oversizedRoot })),
+    (error) => error?.code === 'invalid-staged-root',
+  )
+  assert.throws(
+    () => buildEngineArgs(request({ label: `dsh-${'x'.repeat(70)}` })),
+    (error) => error?.code === 'invalid-label',
+  )
+
+  let stringifyCalls = 0
+  const hostile = { toString() { stringifyCalls += 1; throw new Error('attacker toString') } }
+  assert.throws(() => validateEngineName(hostile), (error) => error?.code === 'invalid-engine')
+  assert.throws(() => buildEngineArgs(request({ action: hostile })), (error) => error?.code === 'invalid-action')
+  assert.equal(stringifyCalls, 0)
+})
+
 test('container policy clamps requests to fixed Phase B limits', () => {
   const normalized = normalizeContainerPolicy({
     engine: 'podman',
     image: IMAGE,
     stagedRoot: STAGED_ROOT,
+    stagingCapability: STAGING_CAPABILITY,
     timeoutMs: Number.MAX_SAFE_INTEGER,
     memoryBytes: Number.MAX_SAFE_INTEGER,
     pidsLimit: Number.MAX_SAFE_INTEGER,
@@ -85,9 +167,9 @@ test('engine validation and command construction reject shell strings and user f
   assert.equal(validateEngineName('docker'), 'docker')
   assert.equal(validateEngineName('podman'), 'podman')
   assert.throws(() => validateEngineName('docker --privileged'), /engine/i)
-  assert.throws(() => buildEngineArgs(request({ flags: ['--privileged'] })), /flag/i)
-  assert.throws(() => buildEngineArgs(request({ args: ['--network=host'] })), /argument|flag/i)
-  assert.throws(() => buildEngineArgs(request({ label: 'dsh-run-123 --privileged' })), /label/i)
+  assert.throws(() => buildEngineArgs(request({ flags: ['--privileged'] })), (error) => error?.code === 'user-container-arguments')
+  assert.throws(() => buildEngineArgs(request({ args: ['--network=host'] })), (error) => error?.code === 'user-container-arguments')
+  assert.throws(() => buildEngineArgs(request({ label: 'dsh-run-123 --privileged' })), (error) => error?.code === 'invalid-label')
 })
 
 test('command construction rejects host networking, namespaces, sockets, and unsafe mounts', () => {
@@ -100,6 +182,10 @@ test('command construction rejects host networking, namespaces, sockets, and uns
     { mounts: [{ source: 'C:\\var\\run\\docker.sock', destination: '/run/docker.sock' }] },
     { mounts: [{ source: 'C:\\dsh\\outside', destination: '/workspace' }] },
   ]) {
-    assert.throws(() => buildEngineArgs(request(overrides)), /network|privileged|namespace|mount|socket|host/i)
+    assert.throws(
+      () => buildEngineArgs(request(overrides)),
+      (error) => ['host-network-not-allowed', 'privileged-not-allowed', 'host-pid-not-allowed',
+        'host-ipc-not-allowed', 'user-container-arguments'].includes(error?.code),
+    )
   }
 })
