@@ -30,6 +30,8 @@ const CONFIG_SELECTOR_ENVIRONMENT = Object.freeze([
   'DOCKER_CONFIG', 'CONTAINERS_CONF', 'CONTAINERS_STORAGE_CONF',
   'PODMAN_CONNECTIONS_CONF', 'XDG_CONFIG_HOME',
 ])
+const REMOTE_ENGINE_ENVIRONMENT_SET = new Set(REMOTE_ENGINE_ENVIRONMENT)
+const CONFIG_SELECTOR_ENVIRONMENT_SET = new Set(CONFIG_SELECTOR_ENVIRONMENT)
 const TRUSTED_ENGINE_PATHS = Object.freeze({
   docker: Object.freeze(process.platform === 'win32'
     ? ['C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe']
@@ -229,19 +231,33 @@ async function productionCommandRunner(file, args, options) {
   return execFileAsync(file, args, options)
 }
 
-function sanitizedEnvironment(environment, executablePath = null) {
+function environmentEntries(environment) {
   if (environment === null || (typeof environment !== 'object' && typeof environment !== 'function')) {
     return null
   }
-  const safe = {}
+  const entries = []
   try {
     for (const key of Reflect.ownKeys(environment)) {
-      if (typeof key !== 'string' || CONFIG_SELECTOR_ENVIRONMENT.includes(key)) continue
-      if (executablePath !== null && key.toUpperCase() === 'PATH') continue
+      if (typeof key !== 'string') continue
       const descriptor = Object.getOwnPropertyDescriptor(environment, key)
       if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) return null
       if (typeof descriptor.value !== 'string') return null
-      safe[key] = descriptor.value
+      entries.push(Object.freeze({ key, canonicalKey: key.toUpperCase(), value: descriptor.value }))
+    }
+    return Object.freeze(entries)
+  } catch {
+    return null
+  }
+}
+
+function sanitizedEnvironment(entries, executablePath = null) {
+  if (!Array.isArray(entries)) return null
+  const safe = {}
+  try {
+    for (const entry of entries) {
+      if (CONFIG_SELECTOR_ENVIRONMENT_SET.has(entry.canonicalKey)) continue
+      if (executablePath !== null && entry.canonicalKey === 'PATH') continue
+      safe[entry.key] = entry.value
     }
     if (executablePath !== null) safe.PATH = dirname(executablePath)
     return Object.freeze(safe)
@@ -250,13 +266,9 @@ function sanitizedEnvironment(environment, executablePath = null) {
   }
 }
 
-function hasRemoteEnvironment(environment) {
-  for (const key of REMOTE_ENGINE_ENVIRONMENT) {
-    const entry = ownData(environment, key)
-    if (!entry.safe) return true
-    if (entry.found && (typeof entry.value !== 'string' || entry.value.length > 0)) return true
-  }
-  return false
+function hasRemoteEnvironment(entries) {
+  if (!Array.isArray(entries)) return true
+  return entries.some(entry => REMOTE_ENGINE_ENVIRONMENT_SET.has(entry.canonicalKey) && entry.value.length > 0)
 }
 
 function trustedEnginePath(engine, configuredPath) {
@@ -423,7 +435,8 @@ export function createContainerBackend(options = {}) {
   let verifiedBinding = null
 
   const bindingForUse = () => {
-    if (lastAvailability?.available !== true || verifiedBinding === null || hasRemoteEnvironment(environment)) {
+    const currentEnvironment = environmentEntries(environment)
+    if (lastAvailability?.available !== true || verifiedBinding === null || hasRemoteEnvironment(currentEnvironment)) {
       return null
     }
     return verifiedBinding
@@ -470,7 +483,12 @@ export function createContainerBackend(options = {}) {
       lastAvailability = fixedAvailability(engine, 'container-image-invalid')
       return lastAvailability
     }
-    if (hasRemoteEnvironment(environment)) {
+    const initialEnvironment = environmentEntries(environment)
+    if (initialEnvironment === null) {
+      lastAvailability = fixedAvailability(engine, 'container-environment-invalid')
+      return lastAvailability
+    }
+    if (hasRemoteEnvironment(initialEnvironment)) {
       lastAvailability = fixedAvailability(engine, 'container-remote-context')
       return lastAvailability
     }
@@ -478,7 +496,7 @@ export function createContainerBackend(options = {}) {
       lastAvailability = fixedAvailability(engine, 'container-executable-unavailable')
       return lastAvailability
     }
-    const env = sanitizedEnvironment(environment, executablePath)
+    const env = sanitizedEnvironment(initialEnvironment, executablePath)
     if (env === null) {
       lastAvailability = fixedAvailability(engine, 'container-environment-invalid')
       return lastAvailability
@@ -515,7 +533,12 @@ export function createContainerBackend(options = {}) {
       lastAvailability = fixedAvailability(engine, 'container-probe-invalid')
       return lastAvailability
     }
-    if (hasRemoteEnvironment(environment)) {
+    const verifiedEnvironment = environmentEntries(environment)
+    if (verifiedEnvironment === null) {
+      lastAvailability = fixedAvailability(engine, 'container-environment-invalid')
+      return lastAvailability
+    }
+    if (hasRemoteEnvironment(verifiedEnvironment)) {
       lastAvailability = fixedAvailability(engine, 'container-remote-context')
       return lastAvailability
     }

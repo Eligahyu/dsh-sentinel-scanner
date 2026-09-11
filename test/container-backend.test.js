@@ -950,6 +950,63 @@ test('container backend refuses every configured remote context override before 
   }
 })
 
+test('container backend rejects lowercase and mixed-case remote selector variants before probing', async () => {
+  for (const selector of ['DOCKER_HOST', 'CONTAINER_HOST', 'DOCKER_CONTEXT', 'CONTAINER_CONNECTION']) {
+    for (const key of [selector.toLowerCase(), `${selector[0].toLowerCase()}${selector.slice(1)}`]) {
+      const command = createCommandRunner([])
+      const backend = createContainerBackend({
+        engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY,
+        commandRunner: command.runner, environment: { [key]: 'ssh://remote.example' },
+      })
+
+      assert.deepEqual(await backend.available(), {
+        available: false, backend: 'docker', code: 'container-remote-context', capabilities: null,
+      })
+      assert.equal(command.calls.length, 0)
+    }
+  }
+})
+
+test('container backend removes case variants of config selectors from the production environment', async () => {
+  const calls = []
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY,
+    environment: {
+      PATH: 'C:\\safe-bin',
+      pAtH: 'C:\\fake-bin',
+      docker_config: 'C:\\lower-docker-config',
+      DoCkEr_CoNfIg: 'C:\\mixed-docker-config',
+      containers_conf: 'C:\\lower-containers.conf',
+      CoNtAiNeRs_CoNf: 'C:\\mixed-containers.conf',
+      containers_storage_conf: 'C:\\lower-storage.conf',
+      podman_connections_conf: 'C:\\lower-connections.conf',
+      xdg_config_home: 'C:\\lower-config-home',
+      dOcKeR_HoSt: '',
+      cOnTaInEr_HoSt: '',
+      dOcKeR_CoNtExT: '',
+      cOnTaInEr_CoNnEcTiOn: '',
+    },
+    execFile: async (file, args, options) => {
+      calls.push({ file, args: [...args], options })
+      return localProbeFor('docker')
+    },
+  })
+
+  assert.equal((await backend.available()).available, true)
+  assert.equal(calls.length, 1)
+  const childEnvironment = calls[0].options.env
+  const configSelectors = [
+    'DOCKER_HOST', 'CONTAINER_HOST', 'DOCKER_CONTEXT', 'CONTAINER_CONNECTION',
+    'DOCKER_CONFIG', 'CONTAINERS_CONF', 'CONTAINERS_STORAGE_CONF',
+    'PODMAN_CONNECTIONS_CONF', 'XDG_CONFIG_HOME',
+  ]
+  for (const key of Object.keys(childEnvironment)) {
+    assert.equal(configSelectors.includes(key.toUpperCase()), false, `unexpected config selector ${key}`)
+  }
+  assert.deepEqual(Object.keys(childEnvironment).filter(key => key.toUpperCase() === 'PATH'), ['PATH'])
+  assert.equal(childEnvironment.PATH.toLowerCase().includes(process.cwd().toLowerCase()), false)
+})
+
 test('container backend refuses a remote engine context returned by the bounded probe', async () => {
   const command = createCommandRunner([{
     stdout: `${JSON.stringify({ Name: 'remote', Current: true, DockerEndpoint: 'ssh://remote.example' })}\n`,

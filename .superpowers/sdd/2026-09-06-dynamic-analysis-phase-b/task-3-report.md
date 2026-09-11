@@ -100,3 +100,25 @@
 - Full: `C:\nvm4w\nodejs\npm.cmd test` — 382 tests total; 372 passed, 0 failed, 10 expected skips.
 - `node --check engine/dynamic/container-backend.js` — clean.
 - `git diff --check` — clean apart from Git's normal Windows line-ending conversion notices.
+
+## Fix round 4 — case-insensitive environment selector binding
+
+### Security and correctness fixes
+
+- Added a safe environment snapshot that enumerates own string properties once per policy check, requires enumerable data descriptors with string values, and stores each property with an uppercase canonical name for selector decisions.
+- Remote selector policy now rejects every non-empty casing variant of `DOCKER_HOST`, `CONTAINER_HOST`, `DOCKER_CONTEXT`, and `CONTAINER_CONNECTION` before probing. The same canonical snapshot is used when rechecking the environment after the probe and before later commands.
+- Child-environment sanitization removes every casing variant of all remote and config selectors, including `DOCKER_CONFIG`, `CONTAINERS_CONF`, `CONTAINERS_STORAGE_CONF`, `PODMAN_CONNECTIONS_CONF`, and `XDG_CONFIG_HOME`. Production sanitization also discards every casing variant of `PATH` before adding exactly one controlled trusted `PATH` entry.
+- Preserved the previously verified endpoint and executable binding, controlled production cwd, no-pull policy, private ownership handles, rollback orphan accounting, cleanup single-flight, and static executable defaults.
+
+### Regression coverage and TDD evidence
+
+- Added lowercase and mixed-case regressions for every remote selector; each non-empty variant is rejected without a probe.
+- Added production `execFile` environment coverage for lowercase/mixed-case remote and config selectors, including mixed-case `PATH`, asserting that no selector variants survive and exactly one controlled `PATH` is emitted.
+- The first focused run with the new regressions was intentionally red: 57 tests total, 45 passed, 2 failed, and 10 expected skips. The failures showed that case variants were not classified as remote and leaked into the child environment. After the canonical snapshot implementation, the focused suite was green.
+
+### Verification
+
+- Focused: `node --test test/container-backend.test.js` — 57 tests total; 47 passed, 0 failed, 10 expected skips.
+- Full: `C:\nvm4w\nodejs\npm.cmd test` — 384 tests total; 374 passed, 0 failed, 10 expected skips.
+- `node --check engine/dynamic/container-backend.js` — clean.
+- `git diff --check` — clean apart from Git's normal Windows line-ending conversion notices.
