@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { dirname, isAbsolute, normalize } from 'node:path'
 import { promisify } from 'node:util'
 import { buildEngineArgs } from './container-command.js'
 import {
@@ -29,6 +30,15 @@ const CONFIG_SELECTOR_ENVIRONMENT = Object.freeze([
   'DOCKER_CONFIG', 'CONTAINERS_CONF', 'CONTAINERS_STORAGE_CONF',
   'PODMAN_CONNECTIONS_CONF', 'XDG_CONFIG_HOME',
 ])
+const TRUSTED_ENGINE_PATHS = Object.freeze({
+  docker: Object.freeze(process.platform === 'win32'
+    ? ['C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe']
+    : ['/usr/bin/docker', '/usr/local/bin/docker']),
+  podman: Object.freeze(process.platform === 'win32'
+    ? ['C:\\Program Files\\RedHat\\Podman\\podman.exe', 'C:\\Program Files\\Podman\\podman.exe']
+    : ['/usr/bin/podman', '/usr/local/bin/podman']),
+})
+const CONTROLLED_ENGINE_CWD = dirname(process.execPath)
 const DOCKER_CONTEXT_FIELDS = Object.freeze(new Set([
   'Name', 'Description', 'DockerEndpoint', 'KubernetesEndpoint', 'Current', 'StackOrchestrator',
 ]))
@@ -197,16 +207,18 @@ function isOutputLimitError(error) {
   }
 }
 
-async function runCommand(commandRunner, engine, args, { timeout, outputBytes, env }) {
-  const options = Object.freeze({
+async function runCommand(commandRunner, binding, args, { timeout, outputBytes }) {
+  const options = {
     shell: false,
     timeout,
     maxBuffer: outputBytes,
     windowsHide: true,
-    env,
-  })
+    env: binding.env,
+  }
+  if (binding.cwd !== undefined) options.cwd = binding.cwd
+  Object.freeze(options)
   try {
-    const result = await commandRunner(engine, Object.freeze([...args]), options)
+    const result = await commandRunner(binding.commandFile, Object.freeze([...args]), options)
     return commandOutput(result, outputBytes)
   } catch (error) {
     return { kind: isOutputLimitError(error) ? 'too-large' : 'failed' }
@@ -217,7 +229,7 @@ async function productionCommandRunner(file, args, options) {
   return execFileAsync(file, args, options)
 }
 
-function sanitizedEnvironment(environment) {
+function sanitizedEnvironment(environment, executablePath = null) {
   if (environment === null || (typeof environment !== 'object' && typeof environment !== 'function')) {
     return null
   }
@@ -225,11 +237,13 @@ function sanitizedEnvironment(environment) {
   try {
     for (const key of Reflect.ownKeys(environment)) {
       if (typeof key !== 'string' || CONFIG_SELECTOR_ENVIRONMENT.includes(key)) continue
+      if (executablePath !== null && key.toUpperCase() === 'PATH') continue
       const descriptor = Object.getOwnPropertyDescriptor(environment, key)
       if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) return null
       if (typeof descriptor.value !== 'string') return null
       safe[key] = descriptor.value
     }
+    if (executablePath !== null) safe.PATH = dirname(executablePath)
     return Object.freeze(safe)
   } catch {
     return null
@@ -243,6 +257,19 @@ function hasRemoteEnvironment(environment) {
     if (entry.found && (typeof entry.value !== 'string' || entry.value.length > 0)) return true
   }
   return false
+}
+
+function trustedEnginePath(engine, configuredPath) {
+  const candidates = TRUSTED_ENGINE_PATHS[engine] ?? []
+  if (configuredPath === undefined) return candidates[0] ?? null
+  if (typeof configuredPath !== 'string' || !isAbsolute(configuredPath) || normalize(configuredPath) !== configuredPath) {
+    return null
+  }
+  const normalized = process.platform === 'win32' ? configuredPath.toLowerCase() : configuredPath
+  return candidates.find(candidate => {
+    const comparable = process.platform === 'win32' ? candidate.toLowerCase() : candidate
+    return comparable === normalized
+  }) ?? null
 }
 
 function frozenJson(value, seen = new Set(), depth = 0) {
@@ -374,10 +401,19 @@ export function createContainerBackend(options = {}) {
   const image = optionValue(options, 'image')
   const stagingCapability = optionValue(options, 'stagingCapability')
   const limits = optionValue(options, 'limits')
-  const commandRunner = typeof optionValue(options, 'commandRunner') === 'function'
-    ? optionValue(options, 'commandRunner')
-    : typeof optionValue(options, 'execFile') === 'function'
-      ? async (file, args, commandOptions) => optionValue(options, 'execFile')(file, args, commandOptions)
+  const injectedCommandRunner = optionValue(options, 'commandRunner')
+  const injectedExecFile = optionValue(options, 'execFile')
+  const usesInjectedRunner = typeof injectedCommandRunner === 'function'
+  const executablePath = usesInjectedRunner
+    ? null
+    : trustedEnginePath(engine, optionValue(options, 'trustedEnginePath'))
+  const commandFile = usesInjectedRunner
+    ? engine
+    : executablePath
+  const commandRunner = usesInjectedRunner
+    ? injectedCommandRunner
+    : typeof injectedExecFile === 'function'
+      ? async (file, args, commandOptions) => injectedExecFile(file, args, commandOptions)
       : productionCommandRunner
   const environment = optionValue(options, 'environment') ?? process.env
   const handles = new WeakMap()
@@ -394,14 +430,13 @@ export function createContainerBackend(options = {}) {
   }
 
   const cleanupCreatedResource = async (binding, resourceId, policy) => {
-    const result = await runCommand(commandRunner, policy.engine, boundEngineArgs(
+    const result = await runCommand(commandRunner, binding, boundEngineArgs(
       binding.engine,
       binding.endpoint,
       ['rm', '--force', resourceId],
     ), {
       timeout: policy.limits.timeoutMs,
       outputBytes: policy.limits.outputBytes,
-      env: binding.env,
     })
     return fixedCleanupResult(result.kind === 'success')
   }
@@ -439,7 +474,11 @@ export function createContainerBackend(options = {}) {
       lastAvailability = fixedAvailability(engine, 'container-remote-context')
       return lastAvailability
     }
-    const env = sanitizedEnvironment(environment)
+    if (commandFile === null) {
+      lastAvailability = fixedAvailability(engine, 'container-executable-unavailable')
+      return lastAvailability
+    }
+    const env = sanitizedEnvironment(environment, executablePath)
     if (env === null) {
       lastAvailability = fixedAvailability(engine, 'container-environment-invalid')
       return lastAvailability
@@ -448,10 +487,16 @@ export function createContainerBackend(options = {}) {
     const args = engine === 'docker'
       ? ['context', 'ls', '--format', '{{json .}}']
       : ['system', 'connection', 'list', '--format', 'json']
-    const result = await runCommand(commandRunner, engine, args, {
+    const probeBinding = Object.freeze({
+      engine,
+      executablePath,
+      commandFile,
+      cwd: usesInjectedRunner ? undefined : CONTROLLED_ENGINE_CWD,
+      env,
+    })
+    const result = await runCommand(commandRunner, probeBinding, args, {
       timeout: CONTAINER_BACKEND_LIMITS.probeTimeoutMs,
       outputBytes: CONTAINER_BACKEND_LIMITS.probeOutputBytes,
-      env,
     })
     if (result.kind === 'too-large') {
       lastAvailability = fixedAvailability(engine, 'container-probe-output-too-large')
@@ -474,7 +519,7 @@ export function createContainerBackend(options = {}) {
       lastAvailability = fixedAvailability(engine, 'container-remote-context')
       return lastAvailability
     }
-    verifiedBinding = Object.freeze({ engine, endpoint: local, env })
+    verifiedBinding = Object.freeze({ ...probeBinding, endpoint: local })
     lastAvailability = availableResult(engine)
     return lastAvailability
   }
@@ -502,14 +547,13 @@ export function createContainerBackend(options = {}) {
       labels.delete(label)
       throw backendError('container-prepare-refused')
     }
-    const created = await runCommand(commandRunner, policy.engine, boundEngineArgs(
+    const created = await runCommand(commandRunner, binding, boundEngineArgs(
       binding.engine,
       binding.endpoint,
       args,
     ), {
       timeout: policy.limits.timeoutMs,
       outputBytes: policy.limits.outputBytes,
-      env: binding.env,
     })
     if (created.kind === 'too-large') {
       labels.delete(label)
@@ -531,14 +575,13 @@ export function createContainerBackend(options = {}) {
       throw backendError('container-not-available')
     }
 
-    const inspected = await runCommand(commandRunner, policy.engine, boundEngineArgs(
+    const inspected = await runCommand(commandRunner, inspectBinding, boundEngineArgs(
       inspectBinding.engine,
       inspectBinding.endpoint,
       ['container', 'inspect', '--format', '{{json .Config.Labels}}', resourceId],
     ), {
       timeout: policy.limits.timeoutMs,
       outputBytes: policy.limits.outputBytes,
-      env: inspectBinding.env,
     })
     if (inspected.kind === 'too-large' || inspected.kind !== 'success' || !verifiedOwnership(inspected.stdout, label)) {
       await retainFailedRollback(binding, resourceId, label, policy)
@@ -548,11 +591,11 @@ export function createContainerBackend(options = {}) {
     const ownership = Object.freeze({ runId: spec.runId, label, resourceId })
     const handle = Object.freeze({ ownership })
     handles.set(handle, {
+      binding,
       engine: policy.engine,
       endpoint: binding.endpoint,
       resourceId,
       limits: policy.limits,
-      env: binding.env,
       label,
       cleaned: false,
       cleanupPromise: null,
@@ -577,14 +620,13 @@ export function createContainerBackend(options = {}) {
     if (state.cleanupPromise !== null) return state.cleanupPromise
 
     state.cleanupPromise = (async () => {
-      const result = await runCommand(commandRunner, state.engine, boundEngineArgs(
+      const result = await runCommand(commandRunner, state.binding, boundEngineArgs(
         state.engine,
         state.endpoint,
         ['rm', '--force', state.resourceId],
       ), {
         timeout: state.limits.timeoutMs,
         outputBytes: state.limits.outputBytes,
-        env: state.env,
       })
       if (result.kind !== 'success') return fixedCleanupResult(false)
       state.cleaned = true

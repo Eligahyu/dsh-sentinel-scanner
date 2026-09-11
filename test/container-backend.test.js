@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs, { existsSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 import test, { after } from 'node:test'
 import {
   CONTAINER_PHASE_B_LIMITS,
@@ -871,12 +871,55 @@ test('container backend production execFile path receives a frozen sanitized env
 
   assert.equal((await backend.available()).available, true)
   assert.equal(calls.length, 1)
-  assert.equal(calls[0].file, 'docker')
+  assert.equal(isAbsolute(calls[0].file), true)
+  assert.equal(calls[0].file.toLowerCase().includes(process.cwd().toLowerCase()), false)
+  assert.equal(isAbsolute(calls[0].options.cwd), true)
+  assert.notEqual(calls[0].options.cwd, process.cwd())
   assert.equal(Object.isFrozen(calls[0].options.env), true)
-  assert.equal(calls[0].options.env.PATH, 'C:\\safe-bin')
+  assert.equal(calls[0].options.env.PATH.toLowerCase().includes(process.cwd().toLowerCase()), false)
   for (const key of ['DOCKER_HOST', 'CONTAINER_HOST', 'DOCKER_CONTEXT', 'CONTAINER_CONNECTION']) {
     assert.equal(Object.hasOwn(calls[0].options.env, key), false)
   }
+})
+
+test('container backend production execFile binds trusted absolute engine paths for Docker and Podman', async () => {
+  for (const engine of ['docker', 'podman']) {
+    const calls = []
+    const backend = createContainerBackend({
+      engine, image: IMAGE, stagingCapability: STAGING_CAPABILITY,
+      environment: { PATH: `${process.cwd()};C:\\fake-bin` },
+      execFile: async (file, args, options) => {
+        calls.push({ file, args: [...args], options })
+        return localProbeFor(engine)
+      },
+    })
+
+    assert.equal((await backend.available()).available, true)
+    assert.equal(calls.length, 1)
+    assert.equal(isAbsolute(calls[0].file), true)
+    assert.notEqual(calls[0].file, engine)
+    assert.equal(calls[0].file.toLowerCase().includes(process.cwd().toLowerCase()), false)
+    assert.equal(isAbsolute(calls[0].options.cwd), true)
+    assert.notEqual(calls[0].options.cwd, process.cwd())
+    assert.equal(calls[0].options.env.PATH.toLowerCase().includes(process.cwd().toLowerCase()), false)
+  }
+})
+
+test('container backend fails closed for an untrusted executable path without probing', async () => {
+  const calls = []
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY,
+    trustedEnginePath: `${process.cwd()}\\fake-docker.exe`,
+    execFile: async (...args) => {
+      calls.push(args)
+      return localProbeFor('docker')
+    },
+  })
+
+  assert.deepEqual(await backend.available(), {
+    available: false, backend: 'docker', code: 'container-executable-unavailable', capabilities: null,
+  })
+  assert.equal(calls.length, 0)
 })
 
 test('container backend refuses Docker host overrides before probing an engine', async () => {

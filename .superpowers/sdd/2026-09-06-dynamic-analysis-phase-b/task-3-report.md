@@ -80,3 +80,23 @@
 
 - Focused: `node --test test/container-backend.test.js` — 53 tests total; 43 passed, 0 failed, 10 expected skips.
 - Full: `C:\nvm4w\nodejs\npm.cmd test` — 380 tests total; 370 passed, 0 failed, 10 expected skips.
+
+## Fix round 3 — trusted absolute engine executable binding
+
+### Security and correctness fixes
+
+- Separated logical engine identity from the executable used by production commands. The verified binding now retains a canonical absolute executable path selected only from fixed trusted Docker/Podman installation paths; an explicitly supplied path must match that fixed allowlist exactly. Invalid, workspace-relative, and otherwise untrusted paths fail closed before probing.
+- Passed the bound absolute executable path through probe, create, inspect, failed-prepare rollback, and normal cleanup. The injected `commandRunner` seam remains logical-engine based for deterministic tests, while the production `execFile` seam receives only the trusted absolute path.
+- Added a controlled production working directory and a sanitized frozen child environment. Production `PATH` contains only the trusted executable directory, and engine/config selector variables remain removed, so current-directory and mutable-PATH executable hijacking cannot redirect engine execution.
+
+### Regression coverage and TDD evidence
+
+- Added Docker and Podman production-seam regressions that place fake executables in the workspace/PATH and assert the invoked file is absolute, outside the workspace, and paired with a controlled cwd and PATH. Added a fail-closed regression for an untrusted executable path with no probe invocation.
+- The focused test was intentionally red before implementation: the production seam received the bare logical name (`docker`/`podman`) instead of an absolute path. After implementation and assertion updates, it was green.
+
+### Verification
+
+- Focused: `node --test test/container-backend.test.js` — 55 tests total; 45 passed, 0 failed, 10 expected skips.
+- Full: `C:\nvm4w\nodejs\npm.cmd test` — 382 tests total; 372 passed, 0 failed, 10 expected skips.
+- `node --check engine/dynamic/container-backend.js` — clean.
+- `git diff --check` — clean apart from Git's normal Windows line-ending conversion notices.
