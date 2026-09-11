@@ -6,12 +6,8 @@ import { tmpdir } from 'node:os'
 import { DYNAMIC_HARD_LIMITS, normalizeDynamicOptions } from '../engine/dynamic/policy.js'
 import { createCanarySet } from '../engine/dynamic/canaries.js'
 import { evidenceDigest, normalizeDynamicEvidence } from '../engine/dynamic/evidence.js'
-import {
-  TRUSTED_DYNAMIC_IMAGE,
-  createTrustedDynamicImageForTests,
-  resolveDynamicBackend,
-} from '../engine/dynamic/backend-resolver.js'
-import { createStagingCapability, disposeStagingCapability } from '../engine/dynamic/container-policy.js'
+import * as backendResolver from '../engine/dynamic/backend-resolver.js'
+import { resolveDynamicBackend } from '../engine/dynamic/backend-resolver.js'
 import {
   DYNAMIC_STAGES,
   evaluateDynamicPreflight,
@@ -40,23 +36,6 @@ function writeDynamicScanFixture(root, { extraFile = false } = {}) {
 }
 
 const TRUSTED_IMAGE = `registry.invalid/dsh-sentinel-runner@sha256:${'a'.repeat(64)}`
-
-function testStagingFactory(calls) {
-  return () => {
-    calls.created += 1
-    const capability = createStagingCapability()
-    let disposed = false
-    return {
-      capability,
-      cleanup() {
-        if (disposed) return
-        disposed = true
-        calls.disposed += 1
-        disposeStagingCapability(capability)
-      },
-    }
-  }
-}
 
 test('dynamic options normalize defaults and bounded accepted values', () => {
   assert.deepEqual(normalizeDynamicOptions({}), {
@@ -213,14 +192,20 @@ test('dynamic scan attaches normalized injected evidence without creating findin
       evidence: { networkAttempts: [{ destination: 'https://example.invalid', method: 'POST', ignored: true }] },
     })
 
-    const report = await scan(root, { dynamic: true, dynamicBackendAdapter: backend })
+    const staticReport = await scan(root)
+    const dynamic = await runDynamicAnalysis({
+      target: root,
+      options: { dynamic: true },
+      backend,
+      preflight: { scanComplete: true, entrypoints: ['index.js'], blockers: [] },
+    })
 
-    assert.equal(report.summary.scanComplete, true)
-    assert.equal(report.analysisLayers.dynamic.status, 'complete')
-    assert.deepEqual(report.analysisLayers.dynamic.networkAttempts, [{
+    assert.equal(staticReport.summary.scanComplete, true)
+    assert.equal(dynamic.status, 'complete')
+    assert.deepEqual(dynamic.networkAttempts, [{
       destination: 'http[HOST_PATH]', method: 'POST',
     }])
-    assert.equal(report.summary.findingsTotal, 0)
+    assert.equal(staticReport.summary.findingsTotal, 0)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -316,9 +301,14 @@ test('dynamic single-file scan uses only the selected file as its target and ent
     writeFileSync(selectedFile, 'export const selected = true\n')
     const backend = new FakeDynamicBackend()
 
-    const report = await scan(selectedFile, { dynamic: true, dynamicBackendAdapter: backend })
+    const dynamic = await runDynamicAnalysis({
+      target: selectedFile,
+      options: { dynamic: true },
+      backend,
+      preflight: { scanComplete: true, entrypoints: [selectedFile], blockers: [] },
+    })
 
-    assert.equal(report.analysisLayers.dynamic.status, 'complete')
+    assert.equal(dynamic.status, 'complete')
     assert.equal(backend.prepareCalls.length, 1)
     assert.equal(backend.prepareCalls[0].target, selectedFile)
     assert.deepEqual(backend.prepareCalls[0].entrypoints, [selectedFile])
@@ -932,26 +922,30 @@ test('dynamic orchestrator retains normalized stage evidence returned by the bac
   )
 })
 
-test('ordinary static scan never touches the production dynamic seam', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'dynamic-static-default-'))
-  const staging = { created: 0, disposed: 0 }
-  let engineCalls = 0
+test('production scan ignores arbitrary backend injection and performs no engine calls', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dynamic-scan-hostile-backend-'))
   try {
     writeDynamicScanFixture(root)
-    const trustedImage = createTrustedDynamicImageForTests(TRUSTED_IMAGE, {
-      commandRunner: async () => {
-        engineCalls += 1
-        throw new Error('engine probe must not run')
-      },
-      stagingFactory: testStagingFactory(staging),
-    })
+    const backend = new FakeDynamicBackend()
+    const report = await scan(root, { dynamic: true, dynamicBackendAdapter: backend })
 
-    const report = await scan(root, { [TRUSTED_DYNAMIC_IMAGE]: trustedImage })
+    assert.equal(report.analysisLayers.dynamic.status, 'unavailable')
+    assert.deepEqual(report.analysisLayers.dynamic.failures, [{
+      reason: 'backend-unavailable', code: 'trusted-image-unavailable',
+    }])
+    assert.deepEqual(backend.calls, [])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('ordinary static scan never touches the production dynamic seam', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dynamic-static-default-'))
+  try {
+    writeDynamicScanFixture(root)
+    const report = await scan(root)
 
     assert.equal(report.analysisLayers.dynamic.status, 'not-requested')
-    assert.equal(engineCalls, 0)
-    assert.equal(staging.created, 0)
-    assert.equal(staging.disposed, 0)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -959,130 +953,65 @@ test('ordinary static scan never touches the production dynamic seam', async () 
 
 test('explicit dynamic without a trusted immutable image is unavailable without staging or engine probes', async () => {
   const root = mkdtempSync(join(tmpdir(), 'dynamic-no-trusted-image-'))
-  const staging = { created: 0, disposed: 0 }
   try {
     writeDynamicScanFixture(root)
-    const report = await scan(root, {
-      dynamic: true,
-      [TRUSTED_DYNAMIC_IMAGE]: undefined,
-    })
+    const report = await scan(root, { dynamic: true })
 
     assert.equal(report.analysisLayers.dynamic.status, 'unavailable')
     assert.deepEqual(report.analysisLayers.dynamic.failures, [{
       reason: 'backend-unavailable', code: 'trusted-image-unavailable',
     }])
-    assert.equal(staging.created, 0)
-    assert.equal(staging.disposed, 0)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
 })
 
-test('production resolver accepts only the scanner-owned immutable image seam and bounds engine selection', async () => {
-  const staging = { created: 0, disposed: 0 }
-  const command = {
-    calls: [],
-    async run(file, args, options) {
-      this.calls.push({ file, args: [...args], options })
-      if (args.includes('context')) {
-        return { stdout: JSON.stringify({ Current: true, DockerEndpoint: 'unix:///var/run/docker.sock' }), stderr: '' }
-      }
-      if (args.includes('image')) return { stdout: 'sha256:local-image', stderr: '' }
-      throw new Error('unexpected engine command')
-    },
-  }
-  const trustedImage = createTrustedDynamicImageForTests(TRUSTED_IMAGE, {
-    commandRunner: command.run.bind(command),
-    stagingFactory: testStagingFactory(staging),
-  })
-  const staged = createStagingCapability()
-  try {
-    const resolved = resolveDynamicBackend({
-      backendName: 'docker', trustedImage, stagingCapability: staged,
-    })
+test('public resolver surface cannot mint production trust from arbitrary image or injected options', () => {
+  assert.equal(backendResolver.TRUSTED_DYNAMIC_IMAGE, undefined)
+  assert.equal(backendResolver.createTrustedDynamicImage, undefined)
+  assert.equal(backendResolver.createTrustedDynamicImageForTests, undefined)
 
-    assert.equal(resolved.available, true)
-    assert.equal(resolved.backendName, 'docker')
-    assert.equal(typeof resolved.backend.available, 'function')
-    assert.equal((await resolved.backend.available()).available, true)
-    assert.equal(command.calls.some(call => call.args.includes('--pull=always')), false)
-    assert.equal(command.calls.some(call => call.args.includes('ssh://')), false)
-  } finally {
-    disposeStagingCapability(staged)
-  }
+  const forged = Object.freeze({ image: TRUSTED_IMAGE })
+  const resolved = resolveDynamicBackend({ backendName: 'docker', trustedImage: forged })
+  assert.deepEqual(resolved, {
+    available: false,
+    backend: null,
+    code: 'trusted-image-unavailable',
+  })
 })
 
-test('auto production selection tries only local Docker or Podman and refuses remote context output', async () => {
-  const staged = createStagingCapability()
-  const calls = []
-  const trustedImage = createTrustedDynamicImageForTests(TRUSTED_IMAGE, {
-    commandRunner: async (file, args) => {
-      calls.push({ file, args: [...args] })
-      if (args.includes('context')) {
-        return { stdout: JSON.stringify({ Current: true, DockerEndpoint: 'ssh://remote.invalid' }), stderr: '' }
-      }
-      if (args.includes('connection')) {
-        return { stdout: JSON.stringify([{ Default: true, URI: 'unix:///run/podman/podman.sock' }]), stderr: '' }
-      }
-      if (args.includes('image')) return { stdout: 'sha256:local-image', stderr: '' }
-      throw new Error('unexpected engine command')
-    },
+test('production resolver refuses forged staging capabilities before backend creation', () => {
+  const forged = Object.freeze({ root: 'C:/tmp/root', snapshot: 'C:/tmp/root/snapshot-01234567' })
+  const resolved = resolveDynamicBackend({ backendName: 'docker', stagingCapability: forged })
+
+  assert.deepEqual(resolved, {
+    available: false,
+    backend: null,
+    code: 'backend-selection-refused',
   })
-  try {
-    const resolved = resolveDynamicBackend({ backendName: 'auto', trustedImage, stagingCapability: staged })
-    assert.equal((await resolved.backend.available()).available, true)
-    assert.equal(calls.some(call => call.args.includes('context')), true)
-    assert.equal(calls.some(call => call.args.includes('connection')), true)
-    assert.equal(calls.some(call => call.args.includes('ssh://remote.invalid')), false)
-  } finally {
-    disposeStagingCapability(staged)
-  }
 })
 
 test('dynamic preflight refuses before production staging or backend construction', async () => {
-  const counters = { created: 0, disposed: 0, engine: 0 }
-  const trustedImage = createTrustedDynamicImageForTests(TRUSTED_IMAGE, {
-    commandRunner: async () => {
-      counters.engine += 1
-      throw new Error('engine probe must not run')
-    },
-    stagingFactory: testStagingFactory(counters),
-  })
-
   const result = await runDynamicAnalysis({
     target: 'fixture',
     options: { dynamic: true, dynamicBackend: 'docker' },
-    trustedImage,
     preflight: { scanComplete: false, entrypoints: ['index.js'], blockers: [] },
   })
 
   assert.equal(result.status, 'refused')
-  assert.equal(counters.created, 0)
-  assert.equal(counters.disposed, 0)
-  assert.equal(counters.engine, 0)
 })
 
-test('dynamic production staging is disposed when local engine availability fails', async () => {
-  const counters = { created: 0, disposed: 0, engine: 0 }
-  const trustedImage = createTrustedDynamicImageForTests(TRUSTED_IMAGE, {
-    commandRunner: async () => {
-      counters.engine += 1
-      throw new Error('local engine unavailable')
-    },
-    stagingFactory: testStagingFactory(counters),
-  })
-
+test('dynamic production path remains unavailable without an internal approved image asset', async () => {
   const result = await runDynamicAnalysis({
     target: 'fixture',
     options: { dynamic: true, dynamicBackend: 'docker' },
-    trustedImage,
     preflight: { scanComplete: true, entrypoints: ['index.js'], blockers: [] },
   })
 
   assert.equal(result.status, 'unavailable')
-  assert.equal(counters.created, 1)
-  assert.equal(counters.disposed, 1)
-  assert.equal(counters.engine, 1)
+  assert.deepEqual(result.failures, [{
+    reason: 'backend-unavailable', code: 'trusted-image-unavailable',
+  }])
 })
 
 test('dynamic orchestrator sends only the immutable allowlisted stage name to the backend', async () => {
@@ -1184,12 +1113,9 @@ test('dynamic orchestrator replaces backend diagnostics with fixed bounded codes
   assert.equal(JSON.stringify(completed).includes('backend stack trace'), false)
 })
 
-test('dynamic orchestrator resolver exposes only injected backends in Phase A', async () => {
-  const injectedBackend = new FakeDynamicBackend()
-  const injected = await resolveDynamicBackend({ backendName: 'docker', injectedBackend })
+test('dynamic production resolver remains unavailable without a built-in approved image', async () => {
   const unavailable = await resolveDynamicBackend({ backendName: 'docker' })
 
-  assert.equal(injected.backend, injectedBackend)
   assert.equal(unavailable.available, false)
   assert.equal(unavailable.code, 'trusted-image-unavailable')
   assert.equal(Object.isFrozen(unavailable), true)

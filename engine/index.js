@@ -27,7 +27,6 @@ import { analyzeCrossFileTaint } from './semantic/cross-file-taint.js'
 import { buildDependencyGraph } from './supplychain/dependency-graph.js'
 import { buildCapabilityGraph, evaluateCapabilityPolicy } from './semantic/capability-graph.js'
 import { runDynamicAnalysis } from './dynamic/orchestrator.js'
-import { TRUSTED_DYNAMIC_IMAGE } from './dynamic/backend-resolver.js'
 import { emptyDynamicLayer, normalizeDynamicLayer } from './dynamic/contracts.js'
 import { normalizeDynamicOptions } from './dynamic/policy.js'
 
@@ -343,8 +342,6 @@ export async function scan(target, opts = {}) {
   const dynamic = await runDynamicAnalysis({
     target: abs,
     options: opts,
-    backend: opts.dynamicBackendAdapter,
-    trustedImage: opts[TRUSTED_DYNAMIC_IMAGE],
     preflight: {
       scanComplete,
       entrypoints: runtimeEntrypoints,

@@ -3,10 +3,7 @@ import { createCanarySet } from './canaries.js'
 import { DYNAMIC_STAGES, emptyDynamicLayer, normalizeDynamicLayer } from './contracts.js'
 import { evidenceDigest, normalizeDynamicEvidence } from './evidence.js'
 import { DYNAMIC_HARD_LIMITS, normalizeDynamicOptions } from './policy.js'
-import {
-  resolveDynamicBackend,
-  stagingFactoryForTrustedImage,
-} from './backend-resolver.js'
+import { resolveDynamicBackend } from './backend-resolver.js'
 import { createStagingSnapshot } from './staging.js'
 
 export { DYNAMIC_STAGES }
@@ -485,21 +482,18 @@ export async function runDynamicAnalysis(args = {}) {
 
   const configured = resolveDynamicBackend({
     backendName: normalizedOptions.backendName,
-    trustedImage: args.trustedImage,
   })
   if (!configured.available) return unavailableLayer(normalizedOptions, configured.code)
 
   let staged = null
   let result
   try {
-    const stagingFactory = stagingFactoryForTrustedImage(args.trustedImage) ?? createStagingSnapshot
-    staged = await stagingFactory(args.target)
+    staged = await createStagingSnapshot(args.target)
     if (!staged || typeof staged !== 'object' || !staged.capability || typeof staged.cleanup !== 'function') {
       result = unavailableLayer(normalizedOptions, 'staging-unavailable')
     } else {
       const resolved = resolveDynamicBackend({
         backendName: normalizedOptions.backendName,
-        trustedImage: args.trustedImage,
         stagingCapability: staged.capability,
       })
       if (!resolved.available || !resolved.backend) {
