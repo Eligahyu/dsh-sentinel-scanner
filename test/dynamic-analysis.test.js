@@ -37,6 +37,31 @@ function writeDynamicScanFixture(root, { extraFile = false } = {}) {
 
 const TRUSTED_IMAGE = `registry.invalid/dsh-sentinel-runner@sha256:${'a'.repeat(64)}`
 
+function packagePathNotExported(error) {
+  return error?.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED'
+    || /not exported|subpath .* is not defined/i.test(error?.message ?? '')
+}
+
+test('package self-reference exposes only supported public entrypoints', async () => {
+  const publicApi = await import('deepseek-harness-sentinel')
+  const packageMetadata = await import('deepseek-harness-sentinel/package.json', {
+    with: { type: 'json' },
+  })
+
+  assert.equal(typeof publicApi.scan, 'function')
+  assert.equal(packageMetadata.default.name, 'deepseek-harness-sentinel')
+  assert.match(import.meta.resolve('deepseek-harness-sentinel/plugin'), /[\\/]plugin[\\/]index\.js$/)
+
+  for (const deepImport of [
+    'deepseek-harness-sentinel/engine/index',
+    'deepseek-harness-sentinel/engine/dynamic/container-policy',
+    'deepseek-harness-sentinel/engine/dynamic/container-backend',
+    'deepseek-harness-sentinel/engine/dynamic/backend-resolver',
+  ]) {
+    await assert.rejects(() => import(deepImport), packagePathNotExported, deepImport)
+  }
+})
+
 test('dynamic options normalize defaults and bounded accepted values', () => {
   assert.deepEqual(normalizeDynamicOptions({}), {
     requested: false,

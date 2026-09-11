@@ -19,7 +19,6 @@
   "exports": {
     ".": "./engine/index.js",
     "./plugin": "./plugin/index.js",
-    "./engine/*": "./engine/*.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },

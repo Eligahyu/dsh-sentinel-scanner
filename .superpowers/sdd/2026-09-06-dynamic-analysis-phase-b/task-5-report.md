@@ -136,3 +136,73 @@ code=trusted-image-unavailable
 ```
 
 No Docker or Podman daemon was contacted during verification.
+
+## Fix round 2/5 — package export boundary
+
+### RED
+
+Added a package self-reference regression test covering the supported root API,
+package metadata, plugin export resolution, and the sensitive engine subpaths.
+Before the package change, the wildcard export allowed the first deep import:
+
+```text
+node --test --test-name-pattern="package self-reference" test/dynamic-analysis.test.js
+1 test, 0 passed, 1 failed
+AssertionError: Missing expected rejection: deepseek-harness-sentinel/engine/index
+```
+
+The failure demonstrated that a package consumer could still reach the internal
+engine tree despite the closed resolver surface.
+
+### GREEN
+
+Replaced the broad `./engine/*` package export with the explicit supported
+allowlist already intended by the package:
+
+- `.`, the scanner public API;
+- `./plugin`, the plugin entrypoint;
+- `./package.json`, package metadata; and
+- `./cordis.patch.yml`, the bundle patch asset.
+
+The internal container policy, staging capability factory, container backend,
+execution seams, resolver assembly, and orchestrator internals remain available
+to repository-relative production and test imports but are no longer package
+subpaths. The regression now proves all of these fail with package path export
+errors:
+
+- `deepseek-harness-sentinel/engine/index`;
+- `deepseek-harness-sentinel/engine/dynamic/container-policy`;
+- `deepseek-harness-sentinel/engine/dynamic/container-backend`; and
+- `deepseek-harness-sentinel/engine/dynamic/backend-resolver`.
+
+Focused verification:
+
+```text
+node --test --test-name-pattern="package self-reference" test/dynamic-analysis.test.js
+1 test, 1 passed, 0 failed
+
+node --test test/dynamic-analysis.test.js test/professional-contract.test.js
+85 tests, 85 passed, 0 failed
+```
+
+`npm pack --dry-run --json` completed successfully and reported the expected
+package contents, including `package.json` with the explicit exports map. Syntax
+checks and `git diff --check` also passed.
+
+### Full verification
+
+```text
+C:\nvm4w\nodejs\npm.cmd test
+404 tests, 394 passed, 10 skipped by the existing Linux staging capability guard, 0 failed
+```
+
+```text
+node bin/sentinel.mjs test/fixtures/clean-plugin --dynamic --strict-exit-codes --json
+NO_ENGINE_SMOKE_EXIT=3
+dynamicStatus=unavailable
+code=trusted-image-unavailable
+```
+
+The static default, closed image registry, forged staging rejection, Task 3/4
+hardening, and strict exit behavior remain green. No Docker or Podman daemon was
+contacted.
