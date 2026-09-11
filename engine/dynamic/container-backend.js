@@ -16,6 +16,11 @@ const SAFE_LABEL = /^dsh-[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const MAX_PROBE_RECORDS = 32
 const MAX_RUN_SPEC_DEPTH = 8
 const MAX_RUN_SPEC_ITEMS = 500
+const MAX_ACTIVE_LABELS = 256
+const MAX_OWNERSHIP_LABELS = 32
+const MAX_OWNERSHIP_LABEL_KEY_BYTES = 128
+const MAX_OWNERSHIP_LABEL_VALUE_BYTES = 512
+const MAX_OWNERSHIP_LABEL_BYTES = 4096
 const REMOTE_ENGINE_ENVIRONMENT = Object.freeze([
   'DOCKER_HOST', 'CONTAINER_HOST', 'DOCKER_CONTEXT', 'CONTAINER_CONNECTION',
 ])
@@ -186,12 +191,13 @@ function isOutputLimitError(error) {
   }
 }
 
-async function runCommand(commandRunner, engine, args, { timeout, outputBytes }) {
+async function runCommand(commandRunner, engine, args, { timeout, outputBytes, env }) {
   const options = Object.freeze({
     shell: false,
     timeout,
     maxBuffer: outputBytes,
     windowsHide: true,
+    env,
   })
   try {
     const result = await commandRunner(engine, Object.freeze([...args]), options)
@@ -203,6 +209,25 @@ async function runCommand(commandRunner, engine, args, { timeout, outputBytes })
 
 async function productionCommandRunner(file, args, options) {
   return execFileAsync(file, args, options)
+}
+
+function sanitizedEnvironment(environment) {
+  if (environment === null || (typeof environment !== 'object' && typeof environment !== 'function')) {
+    return null
+  }
+  const safe = {}
+  try {
+    for (const key of Reflect.ownKeys(environment)) {
+      if (typeof key !== 'string' || REMOTE_ENGINE_ENVIRONMENT.includes(key)) continue
+      const descriptor = Object.getOwnPropertyDescriptor(environment, key)
+      if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) return null
+      if (typeof descriptor.value !== 'string') return null
+      safe[key] = descriptor.value
+    }
+    return Object.freeze(safe)
+  } catch {
+    return null
+  }
 }
 
 function hasRemoteEnvironment(environment) {
@@ -250,6 +275,8 @@ function frozenJson(value, seen = new Set(), depth = 0) {
   }
 }
 
+// The backend contract validates shape and immutability only. It deliberately
+// does not claim that an object-shaped run spec carries caller provenance.
 function validRunSpec(runSpec) {
   try {
     if (!isRecord(runSpec) || Object.getPrototypeOf(runSpec) !== Object.prototype || !Object.isFrozen(runSpec)) {
@@ -278,14 +305,33 @@ function resourceIdFromOutput(stdout) {
   return match ? match[1] : null
 }
 
+function boundedOwnershipLabels(value) {
+  if (!isRecord(value) || Object.getPrototypeOf(value) !== Object.prototype) return null
+  let totalBytes = 0
+  const keys = Reflect.ownKeys(value)
+  if (keys.length === 0 || keys.length > MAX_OWNERSHIP_LABELS) return null
+  for (const key of keys) {
+    if (typeof key !== 'string') return null
+    const entry = ownData(value, key)
+    if (!entry.safe || !entry.found || typeof entry.value !== 'string') return null
+    const keyBytes = Buffer.byteLength(key, 'utf8')
+    const valueBytes = Buffer.byteLength(entry.value, 'utf8')
+    if (keyBytes > MAX_OWNERSHIP_LABEL_KEY_BYTES || valueBytes > MAX_OWNERSHIP_LABEL_VALUE_BYTES) return null
+    totalBytes += keyBytes + valueBytes
+    if (totalBytes > MAX_OWNERSHIP_LABEL_BYTES) return null
+  }
+  return value
+}
+
 function verifiedOwnership(stdout, label) {
   const labels = parseJson(stdout)
-  if (!allowedJsonRecord(labels, new Set(['dsh.sentinel.run']))) return false
+  if (!boundedOwnershipLabels(labels)) return false
   return jsonValue(labels, 'dsh.sentinel.run') === label
 }
 
 function createLabel(labels) {
   try {
+    if (labels.size >= MAX_ACTIVE_LABELS) throw backendError('container-label-generation-failed')
     const label = `dsh-run-${randomUUID().replaceAll('-', '')}`
     if (!SAFE_LABEL.test(label) || labels.has(label)) throw backendError('container-label-generation-failed')
     labels.add(label)
@@ -315,13 +361,33 @@ export function createContainerBackend(options = {}) {
   const limits = optionValue(options, 'limits')
   const commandRunner = typeof optionValue(options, 'commandRunner') === 'function'
     ? optionValue(options, 'commandRunner')
-    : productionCommandRunner
+    : typeof optionValue(options, 'execFile') === 'function'
+      ? async (file, args, commandOptions) => optionValue(options, 'execFile')(file, args, commandOptions)
+      : productionCommandRunner
   const environment = optionValue(options, 'environment') ?? process.env
   const handles = new WeakMap()
   const labels = new Set()
   let lastAvailability = null
+  let verifiedBinding = null
+
+  const bindingForUse = () => {
+    if (lastAvailability?.available !== true || verifiedBinding === null || hasRemoteEnvironment(environment)) {
+      return null
+    }
+    return verifiedBinding
+  }
+
+  const cleanupCreatedResource = async (binding, resourceId, policy) => {
+    await runCommand(commandRunner, policy.engine, ['rm', '--force', resourceId], {
+      timeout: policy.limits.timeoutMs,
+      outputBytes: policy.limits.outputBytes,
+      env: binding.env,
+    })
+  }
 
   const available = async () => {
+    verifiedBinding = null
+    lastAvailability = null
     if (!SUPPORTED_CONTAINER_ENGINES.includes(engine)) {
       lastAvailability = fixedAvailability(null, 'container-engine-invalid')
       return lastAvailability
@@ -334,6 +400,11 @@ export function createContainerBackend(options = {}) {
       lastAvailability = fixedAvailability(engine, 'container-remote-context')
       return lastAvailability
     }
+    const env = sanitizedEnvironment(environment)
+    if (env === null) {
+      lastAvailability = fixedAvailability(engine, 'container-environment-invalid')
+      return lastAvailability
+    }
 
     const args = engine === 'docker'
       ? ['context', 'ls', '--format', '{{json .}}']
@@ -341,6 +412,7 @@ export function createContainerBackend(options = {}) {
     const result = await runCommand(commandRunner, engine, args, {
       timeout: CONTAINER_BACKEND_LIMITS.probeTimeoutMs,
       outputBytes: CONTAINER_BACKEND_LIMITS.probeOutputBytes,
+      env,
     })
     if (result.kind === 'too-large') {
       lastAvailability = fixedAvailability(engine, 'container-probe-output-too-large')
@@ -359,6 +431,11 @@ export function createContainerBackend(options = {}) {
       lastAvailability = fixedAvailability(engine, 'container-probe-invalid')
       return lastAvailability
     }
+    if (hasRemoteEnvironment(environment)) {
+      lastAvailability = fixedAvailability(engine, 'container-remote-context')
+      return lastAvailability
+    }
+    verifiedBinding = Object.freeze({ engine, env })
     lastAvailability = availableResult(engine)
     return lastAvailability
   }
@@ -366,7 +443,8 @@ export function createContainerBackend(options = {}) {
   const prepare = async runSpec => {
     const spec = validRunSpec(runSpec)
     if (!spec) throw backendError('container-run-spec-invalid')
-    if (lastAvailability?.available !== true || hasRemoteEnvironment(environment)) {
+    const binding = bindingForUse()
+    if (binding === null) {
       throw backendError('container-not-available')
     }
     const policy = preparedPolicy({ engine, image, stagingCapability, limits })
@@ -382,31 +460,53 @@ export function createContainerBackend(options = {}) {
         limits: policy.limits,
       })
     } catch {
+      labels.delete(label)
       throw backendError('container-prepare-refused')
     }
     const created = await runCommand(commandRunner, policy.engine, args, {
       timeout: policy.limits.timeoutMs,
       outputBytes: policy.limits.outputBytes,
+      env: binding.env,
     })
-    if (created.kind === 'too-large') throw backendError('container-prepare-output-too-large')
-    if (created.kind !== 'success') throw backendError('container-prepare-failed')
+    if (created.kind === 'too-large') {
+      labels.delete(label)
+      throw backendError('container-prepare-output-too-large')
+    }
+    if (created.kind !== 'success') {
+      labels.delete(label)
+      throw backendError('container-prepare-failed')
+    }
     const resourceId = resourceIdFromOutput(created.stdout)
-    if (!resourceId) throw backendError('container-prepare-output-invalid')
+    if (!resourceId) {
+      labels.delete(label)
+      throw backendError('container-prepare-output-invalid')
+    }
+
+    const inspectBinding = bindingForUse()
+    if (inspectBinding === null) {
+      await cleanupCreatedResource(binding, resourceId, policy)
+      labels.delete(label)
+      throw backendError('container-not-available')
+    }
 
     const inspected = await runCommand(commandRunner, policy.engine, [
       'container', 'inspect', '--format', '{{json .Config.Labels}}', resourceId,
     ], {
       timeout: policy.limits.timeoutMs,
       outputBytes: policy.limits.outputBytes,
+      env: inspectBinding.env,
     })
-    if (inspected.kind === 'too-large') throw backendError('container-ownership-unverified')
-    if (inspected.kind !== 'success' || !verifiedOwnership(inspected.stdout, label)) {
+    if (inspected.kind === 'too-large' || inspected.kind !== 'success' || !verifiedOwnership(inspected.stdout, label)) {
+      await cleanupCreatedResource(binding, resourceId, policy)
+      labels.delete(label)
       throw backendError('container-ownership-unverified')
     }
 
     const ownership = Object.freeze({ runId: spec.runId, label, resourceId })
     const handle = Object.freeze({ ownership })
-    handles.set(handle, { engine: policy.engine, resourceId, limits: policy.limits, cleaned: false })
+    handles.set(handle, {
+      engine: policy.engine, resourceId, limits: policy.limits, env: binding.env, label, cleaned: false,
+    })
     return handle
   }
 
@@ -427,9 +527,11 @@ export function createContainerBackend(options = {}) {
     const result = await runCommand(commandRunner, state.engine, ['rm', '--force', state.resourceId], {
       timeout: state.limits.timeoutMs,
       outputBytes: state.limits.outputBytes,
+      env: state.env,
     })
     if (result.kind !== 'success') return Object.freeze({ complete: false })
     state.cleaned = true
+    labels.delete(state.label)
     return Object.freeze({ complete: true })
   }
 

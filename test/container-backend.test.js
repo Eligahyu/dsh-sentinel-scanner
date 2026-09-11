@@ -649,6 +649,7 @@ test('Docker and Podman produce the same hardened argv contract', () => {
   assert.equal(Array.isArray(docker), true)
   assert.equal(docker.every((value) => typeof value === 'string'), true)
   assert.equal(docker.includes('--network=none'), true)
+  assert.equal(docker.includes('--pull=never'), true)
   assert.equal(docker.includes('--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m'), true)
   assert.equal(docker.includes('--privileged'), false)
   assert.equal(docker.includes('--pid=host'), false)
@@ -752,7 +753,81 @@ test('container backend detects a bounded local Docker or Podman context through
     assert.equal(command.calls[0].options.shell, false)
     assert.equal(command.calls[0].options.timeout, CONTAINER_BACKEND_LIMITS.probeTimeoutMs)
     assert.equal(command.calls[0].options.maxBuffer, CONTAINER_BACKEND_LIMITS.probeOutputBytes)
+    assert.equal(Object.isFrozen(command.calls[0].options.env), true)
+    for (const key of ['DOCKER_HOST', 'CONTAINER_HOST', 'DOCKER_CONTEXT', 'CONTAINER_CONNECTION']) {
+      assert.equal(Object.hasOwn(command.calls[0].options.env, key), false)
+    }
     assert.equal(command.calls[0].args.includes('context'), engine === 'docker')
+  }
+})
+
+test('container backend binds a verified local environment before later commands', async () => {
+  const environment = {
+    PATH: 'C:\\safe-bin',
+    DSH_TEST_SAFE: 'retained',
+    DOCKER_HOST: '',
+    CONTAINER_HOST: '',
+    DOCKER_CONTEXT: '',
+    CONTAINER_CONNECTION: '',
+  }
+  const command = createCommandRunner([
+    localProbeFor('docker'),
+    { stdout: `${CONTAINER_ID_A}\n`, stderr: '' },
+    ({ calls }) => ({
+      stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(calls[1]) }), stderr: '',
+    }),
+  ])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY,
+    commandRunner: command.runner, environment,
+  })
+
+  assert.equal((await backend.available()).available, true)
+  environment.DOCKER_HOST = 'ssh://remote.example'
+
+  await assert.rejects(
+    () => backend.prepare(immutableContainerRunSpec()),
+    error => error?.code === 'container-not-available',
+  )
+  assert.equal(command.calls.length, 1)
+
+  environment.DOCKER_HOST = ''
+  const handle = await backend.prepare(immutableContainerRunSpec())
+  assert.ok(handle)
+  for (const call of command.calls) {
+    assert.equal(Object.isFrozen(call.options.env), true)
+    assert.equal(call.options.env.PATH, 'C:\\safe-bin')
+    assert.equal(call.options.env.DSH_TEST_SAFE, 'retained')
+    for (const key of ['DOCKER_HOST', 'CONTAINER_HOST', 'DOCKER_CONTEXT', 'CONTAINER_CONNECTION']) {
+      assert.equal(Object.hasOwn(call.options.env, key), false)
+    }
+  }
+})
+
+test('container backend production execFile path receives a frozen sanitized environment', async () => {
+  const calls = []
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY,
+    environment: {
+      PATH: 'C:\\safe-bin',
+      DOCKER_HOST: '',
+      CONTAINER_HOST: '',
+      DOCKER_CONTEXT: '',
+      CONTAINER_CONNECTION: '',
+    },
+    execFile: async (file, args, options) => {
+      calls.push({ file, args: [...args], options })
+      return localProbeFor('docker')
+    },
+  })
+
+  assert.equal((await backend.available()).available, true)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].file, 'docker')
+  assert.equal(Object.isFrozen(calls[0].options.env), true)
+  assert.equal(calls[0].options.env.PATH, 'C:\\safe-bin')
+  for (const key of ['DOCKER_HOST', 'CONTAINER_HOST', 'DOCKER_CONTEXT', 'CONTAINER_CONNECTION']) {
+    assert.equal(Object.hasOwn(calls[0].options.env, key), false)
   }
 })
 
@@ -885,6 +960,7 @@ test('container backend creates uniquely labeled hardened runner handles from im
   assert.equal(first.ownership.resourceId, CONTAINER_ID_A)
   assert.notEqual(first.ownership.label, second.ownership.label)
   for (const call of command.calls.filter(call => call.args[0] === 'run')) {
+    assert.equal(call.args.includes('--pull=never'), true)
     assert.equal(call.args.includes('--network=none'), true)
     assert.equal(call.args.includes('--pid=private'), true)
     assert.equal(call.args.includes('--ipc=private'), true)
@@ -894,6 +970,50 @@ test('container backend creates uniquely labeled hardened runner handles from im
     assert.equal(call.args.includes('--user=65532:65532'), true)
     assert.equal(call.args.some(value => value.includes('docker.sock')), false)
   }
+})
+
+test('container backend accepts bounded OCI labels while requiring its generated ownership label', async () => {
+  const command = createCommandRunner([
+    localProbeFor('docker'),
+    { stdout: `${CONTAINER_ID_A}\n`, stderr: '' },
+    ({ calls }) => ({
+      stdout: JSON.stringify({
+        'dsh.sentinel.run': generatedRunnerLabel(calls[1]),
+        'org.opencontainers.image.title': 'dsh-runner',
+        'org.opencontainers.image.version': '1.0.0',
+      }), stderr: '',
+    }),
+  ])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+
+  await backend.available()
+  await assert.doesNotReject(() => backend.prepare(immutableContainerRunSpec()))
+})
+
+test('container backend rejects oversized ownership label maps before registering a handle', async () => {
+  const command = createCommandRunner([
+    localProbeFor('docker'),
+    { stdout: `${CONTAINER_ID_A}\n`, stderr: '' },
+    ({ calls }) => ({
+      stdout: JSON.stringify({
+        'dsh.sentinel.run': generatedRunnerLabel(calls[1]),
+        'org.opencontainers.image.annotations': 'x'.repeat(4096),
+      }), stderr: '',
+    }),
+    { stdout: '', stderr: '' },
+  ])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+
+  await backend.available()
+  await assert.rejects(
+    () => backend.prepare(immutableContainerRunSpec()),
+    error => error?.code === 'container-ownership-unverified',
+  )
+  assert.deepEqual(command.calls[3].args, ['rm', '--force', CONTAINER_ID_A])
 })
 
 test('container backend rejects ownership that hostile runner output cannot prove from the generated label', async () => {
@@ -914,7 +1034,7 @@ test('container backend rejects ownership that hostile runner output cannot prov
     () => backend.prepare(immutableContainerRunSpec()),
     error => error?.code === 'container-ownership-unverified',
   )
-  assert.equal(command.calls.length, 3)
+  assert.equal(command.calls.length, 4)
 })
 
 test('container backend refuses a create response without a captured resource ID before ownership lookup', async () => {
@@ -934,18 +1054,75 @@ test('container backend refuses a create response without a captured resource ID
   assert.equal(command.calls.length, 2)
 })
 
-test('container backend requires the immutable run spec produced by the orchestrator', async () => {
-  const command = createCommandRunner([localProbeFor('docker')])
+test('container backend removes the exact newly created resource when ownership validation fails', async () => {
+  const command = createCommandRunner([
+    localProbeFor('docker'),
+    { stdout: `${CONTAINER_ID_A}\n`, stderr: '' },
+    { stdout: JSON.stringify({ 'dsh.sentinel.run': 'dsh-attacker' }), stderr: '' },
+    { stdout: '', stderr: '' },
+  ])
   const backend = createContainerBackend({
     engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
   })
 
   await backend.available()
   await assert.rejects(
-    () => backend.prepare({ ...immutableContainerRunSpec() }),
-    error => error?.code === 'container-run-spec-invalid',
+    () => backend.prepare(immutableContainerRunSpec()),
+    error => error?.code === 'container-ownership-unverified',
   )
-  assert.equal(command.calls.length, 1)
+  assert.deepEqual(command.calls[3].args, ['rm', '--force', CONTAINER_ID_A])
+  assert.equal(command.calls.some(call => call.args.includes('dsh-attacker')), false)
+})
+
+test('container backend treats a deeply frozen run spec as structural input, not provenance proof', async () => {
+  const command = createCommandRunner([localProbeFor('docker')])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+
+  await backend.available()
+  const structurallyValidCopy = Object.freeze({ ...immutableContainerRunSpec() })
+  await assert.rejects(() => backend.prepare(structurallyValidCopy), error => error?.code === 'container-prepare-failed')
+  assert.equal(command.calls.length, 2)
+})
+
+test('container backend keeps runStage and collect unavailable for valid private handles', async () => {
+  const command = createCommandRunner([
+    localProbeFor('docker'),
+    { stdout: `${CONTAINER_ID_A}\n`, stderr: '' },
+    ({ calls }) => ({
+      stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(calls[1]) }), stderr: '',
+    }),
+  ])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+  await backend.available()
+  const handle = await backend.prepare(immutableContainerRunSpec())
+
+  await assert.rejects(() => backend.runStage(handle), error => error?.code === 'container-stage-not-implemented')
+  await assert.rejects(() => backend.collect(handle), error => error?.code === 'container-collection-not-implemented')
+  assert.equal(command.calls.some(call => call.args[0] === 'evidence'), false)
+})
+
+test('container backend rejects forged handles for runStage and collect without evidence success', async () => {
+  const command = createCommandRunner([
+    localProbeFor('docker'),
+    { stdout: `${CONTAINER_ID_A}\n`, stderr: '' },
+    ({ calls }) => ({
+      stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(calls[1]) }), stderr: '',
+    }),
+  ])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+  await backend.available()
+  const handle = await backend.prepare(immutableContainerRunSpec())
+  const forged = Object.freeze({ ...handle, ownership: Object.freeze({ ...handle.ownership }) })
+
+  await assert.rejects(() => backend.runStage(forged), error => error?.code === 'container-handle-invalid')
+  await assert.rejects(() => backend.collect(forged), error => error?.code === 'container-handle-invalid')
+  assert.equal(command.calls.length, 3)
 })
 
 test('container backend refuses a non-factory staging object before it can reach a create command', async () => {

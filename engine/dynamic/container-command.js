@@ -74,6 +74,7 @@ export function buildEngineArgs(input = {}) {
     'run',
     '--detach',
     '--rm',
+    '--pull=never',
     '--network=none',
     '--pid=private',
     '--ipc=private',
