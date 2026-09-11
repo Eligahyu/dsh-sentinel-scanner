@@ -1,0 +1,72 @@
+name: dynamic-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      enable_dynamic:
+        description: Run the opt-in Phase B Linux smoke gate
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  phase-b-smoke:
+    runs-on: ubuntu-latest
+    env:
+      # Protected environment/secret value. It must name a preloaded,
+      # scanner-owned image by immutable digest; it is never pulled or built.
+      DYNAMIC_IMAGE_DIGEST: ${{ secrets.DSH_SENTINEL_DYNAMIC_IMAGE_DIGEST }}
+    steps:
+      - name: Check out the scanner sources
+        uses: actions/checkout@v7
+
+      - name: Skip when the gate was not explicitly enabled
+        if: ${{ inputs.enable_dynamic != true }}
+        run: |
+          echo "SKIP: Phase B dynamic smoke is opt-in; enable_dynamic was false."
+
+      - name: Skip when the scanner-owned immutable image is unavailable
+        if: ${{ inputs.enable_dynamic == true && env.DYNAMIC_IMAGE_DIGEST == '' }}
+        run: |
+          echo "SKIP: Phase B unavailable; protected scanner-owned immutable image digest is absent."
+
+      - name: Run the Linux network-denied smoke
+        if: ${{ inputs.enable_dynamic == true && env.DYNAMIC_IMAGE_DIGEST != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$DYNAMIC_IMAGE_DIGEST" in
+            */*@sha256:[0-9a-fA-F]*) ;;
+            *) echo "FAIL: dynamic image must be a scanner-owned immutable sha256 digest" >&2; exit 1 ;;
+          esac
+
+          if command -v docker >/dev/null 2>&1; then
+            engine=docker
+          elif command -v podman >/dev/null 2>&1; then
+            engine=podman
+          else
+            echo "SKIP: Phase B unavailable; no local Docker or Podman executable is installed."
+            exit 0
+          fi
+
+          # The image must already exist locally. This command has no pull/build
+          # path and the container has no public or private network access.
+          "$engine" image inspect "$DYNAMIC_IMAGE_DIGEST" >/dev/null
+          "$engine" run --rm \
+            --pull=never \
+            --network=none \
+            --pid=private \
+            --ipc=private \
+            --read-only \
+            --tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m \
+            --user=65532:65532 \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --pids-limit=64 \
+            --memory=512m \
+            --cpus=1 \
+            --entrypoint=/usr/local/bin/dsh-sentinel-harness \
+            "$DYNAMIC_IMAGE_DIGEST" --smoke

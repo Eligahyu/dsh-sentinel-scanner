@@ -207,3 +207,55 @@ all stages + exact cleanup --> complete
 - CLI 只有在 `--fail-on-incomplete` 或 `--strict-exit-codes` 下，才会将请求的
   `unavailable` / `refused` / `incomplete` 以退出码 `3` 告知 CI；不带严格选项时结果仍可见，
   但不会仅因动态层状态失败。
+
+## 10. Phase B threat boundary, ownership, and release gate
+
+Phase B is an explicit opt-in, Linux-gated container layer after static
+preflight. The threat boundary treats the package, dependencies, staged files,
+package metadata, and all container output as untrusted. The trusted side is
+the scanner release: it owns the local Docker/Podman endpoint binding, fixed
+executable and harness entrypoint, immutable image digest, namespace and
+resource policy, run labels, and cleanup handles. The package cannot replace
+any of those values. This trust ownership also includes the package export boundary:
+only declared public package exports are shipped; scanner internals
+are not caller-controlled runtime entrypoints.
+
+Static preflight can refuse dynamic execution for high-risk native artifacts,
+container-control or escape signals, hard artifact limits, unresolved runtime
+entrypoints, incomplete core traversal, or unavailable isolation. A missing
+scanner-owned image is `unavailable`, not a reason to pull, build, execute on
+the host, or use a host fallback.
+
+### 10.1 Staging lifecycle and endpoint/executable binding
+
+The staging lifecycle resolves the scan root, checks lexical and realpath
+containment, copies approved regular files into a per-run scanner-owned
+temporary snapshot, and excludes symlinks, hardlinks, sockets, devices, VCS
+metadata, worktrees, and paths outside the root. Only that snapshot is mounted
+read-only. The snapshot and engine resources are removed idempotently through
+the current run's ownership handle; uncertain cleanup makes the dynamic result
+`incomplete`.
+
+Every Phase B stage is a fresh network-denied runner with `--network=none`, `--pull=never`,
+private PID/IPC namespaces, read-only root and staging, non-root execution,
+dropped capabilities, `no-new-privileges`, and bounded resources. The backend
+binds the local endpoint and fixed executable through scanner-generated argument
+arrays. It rejects mutable tags, remote contexts, arbitrary entrypoints,
+engine sockets, host mounts, host namespaces, package managers, lifecycle
+scripts, real credentials, and caller-supplied flags. Phase B has no public or
+private egress.
+
+### 10.2 Evidence redaction and Phase C residual boundary
+
+Evidence is untrusted at every boundary. Engine stdout/stderr, stage output, and
+errors are bounded, parsed, normalized, and reduced to fixed codes before report
+serialization. Reports may retain canary identifiers, hashes, and bounded event
+metadata, but not raw secrets, full synthetic values, request bodies, host
+absolute paths, container IDs, or raw engine diagnostics. Forged, malformed, or
+oversized evidence is an incomplete result.
+
+Phase B deliberately does not implement the Phase C network gateway, DNS/HTTP/
+TCP/UDP observation, Node preload probe, canary correlation, or allowlisted
+replay network. A Phase B `complete` result means only that the fixed stages and
+cleanup completed under network denial; it does not imply those Phase C
+capabilities or prove package safety.

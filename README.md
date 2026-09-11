@@ -9,7 +9,7 @@
 Heuristic rules, AST/taint analysis, package quarantine, dependency intelligence,
 SBOM export, SARIF, and CI policy enforcement—without executing scanned code.
 
-`Node.js ^22.18.0 or >=24.11.0 · Static analysis primary; experimental dynamic infrastructure is opt-in and unavailable in Phase A · MIT`
+`Node.js ^22.18.0 or >=24.11.0 · Static analysis primary; Phase B dynamic analysis is explicit opt-in and network-denied · MIT`
 
 [English](#english) · [中文](README.zh-CN.md) · [Rules](docs/rules.md) ·
 [Architecture](docs/architecture.md) · [Roadmap](docs/roadmap.md)
@@ -74,13 +74,12 @@ dsh-sentinel is designed for two audiences:
    boundaries, and policy skips are represented in the report.
 6. **Automation is not detection.** SARIF, HTML, GitHub Actions, and SBOM formats
    transport or present results; detection capability lives in the engine.
-7. **Phase A dynamic analysis executes nothing.** It is experimental, opt-in
-   infrastructure only. A requested deep scan has no production backend in this
-   release, so it is reported as unavailable rather than running plugin code,
-   starting a container, or falling back to the host.
-8. **There is no host-execution fallback.** This is a permanent boundary, not a
-   temporary implementation gap. Docker/Podman execution is deferred to Phase B
-   and may begin only after its independent security audit gate.
+7. **Dynamic analysis is explicit opt-in.** Static analysis remains the default;
+   `--dynamic` adds a separate Phase B layer and never changes the static result.
+8. **Phase B has no host-execution fallback.** It can run only inside a local,
+   scanner-owned, immutable-image Docker or Podman runner. This checkout has no
+   compiled/deployed approved image, so production resolution currently reports
+   `unavailable` rather than executing a package.
 
 ## Capabilities
 
@@ -98,7 +97,7 @@ dsh-sentinel is designed for two audiences:
 | Professional report layers | Stable report schema v2 with module graph, dependency graph, capability graph, SBOM, provenance, attack chains, coverage, and failure metadata. |
 | Output and CI | Text, JSON, SARIF 2.1.0, standalone HTML, CycloneDX, and SPDX output; stable fingerprints, baselines, threshold exits, and incomplete-scan enforcement. |
 | Privacy | Automatic secret redaction, optional path anonymization with `--redact-paths`, and no hidden ignore/skip behavior. |
-| Experimental dynamic layer | Opt-in Phase A contracts, policy, evidence redaction, and a test-injected fake backend. The production resolver deliberately returns unavailable; no plugin, container, backend, process, or network execution occurs. |
+| Dynamic analysis (Phase B) | Explicit opt-in, static-preflight-gated, network-denied Docker/Podman runner with immutable image and staged-input contracts. The current release remains `unavailable` until a scanner-owned image is compiled/deployed. |
 
 ### Core analysis versus auxiliary analysis
 
@@ -112,26 +111,108 @@ Scan completeness distinguishes security-critical coverage from optional enrichm
 - unsupported or complex lockfile formats are reported instead of producing
   guessed dependency data.
 
-### Experimental dynamic analysis (Phase A)
+## Dynamic Analysis (Phase B)
 
 Static completeness and dynamic completeness are separate signals. The static
 scan remains the primary verdict and continues to report `summary.scanComplete`.
 When `--dynamic` is requested, a dedicated `analysisLayers.dynamic` record
 reports the deep-analysis state instead of changing or hiding static coverage.
 
-Phase A provides the contract and safety controls only. It never executes a
-plugin, starts Docker or Podman, invokes a production backend, or falls back to
-host execution. The only executable-style backend accepted by the orchestrator
-is an explicitly injected fake adapter used by tests. In normal CLI/API use, the
-production resolver deliberately reports `backend-not-implemented-phase-a`.
+Phase B is an explicit opt-in release gate layered after static analysis. It is
+not a claim that a finite runtime exercise proves a plugin safe. Static
+preflight remains authoritative for the static verdict, while
+`analysisLayers.dynamic` reports the independent dynamic state. A scan without
+`--dynamic` does not probe Docker or Podman and does not start a runner.
+
+The production resolver accepts only a scanner-owned image compiled/deployed at
+an immutable digest and a local Docker or Podman capability probe. If the image
+is absent, mutable, remote, or unhealthy, the dynamic layer is `unavailable`
+with a fixed reason such as `trusted-image-unavailable`; it does not pull,
+build, execute on the host, or silently fall back. The current package ships no
+approved image, so normal CLI/API use remains safely unavailable until the
+release deployment supplies one.
+
+### Static preflight and status
+
+Static analysis always runs first. Phase B refuses execution when preflight finds
+high-risk native executables or native Node modules selected for execution,
+container-control or escape signals, artifact limits, unresolved entrypoints,
+incomplete core traversal, or an unavailable isolation backend. Refusal is
+reportable and never erases static findings.
+
+The dynamic status is one of `not-requested`, `unavailable`, `refused`,
+`complete`, or `incomplete`:
+
+| Status | Meaning |
+| --- | --- |
+| `not-requested` | No `--dynamic` request was made. No engine probe occurs. |
+| `unavailable` | The local, immutable Phase B prerequisites are not present; the target was not run. |
+| `refused` | Static preflight rejected the target as outside the Phase B threat boundary. |
+| `complete` | All allowlisted stages produced bounded evidence and exact cleanup completed. |
+| `incomplete` | A stage, evidence parser, timeout, cancellation, resource limit, or cleanup path was uncertain. |
+
+With `--fail-on-incomplete` or `--strict-exit-codes`, requested
+`unavailable`/`refused`/`incomplete` dynamic results return exit code `3`.
+Without those strict controls, the result remains visible and the static exit
+policy is unchanged. `complete` means only that the supplied stages and stimuli
+completed; it is not a proof of safety, and no observed traffic means only that
+these bounded stages did not trigger traffic.
+
+### Linux prerequisites and Phase B runner boundary
+
+The supported release gate is Linux with a local Docker or rootless Podman
+engine and a preloaded scanner-owned image referenced by a full `sha256` digest.
+The image must already be present: Phase B uses `--pull=never` and performs no
+image build. Engine endpoints and contexts must be local to the scanner host.
+
+Each allowlisted stage uses a fresh, short-lived runner with the following
+fixed properties:
+
+The read-only staging mount is the only package input available to the runner;
+the original workspace is never mounted.
+
+- `--network=none`; Phase B has no public or private egress and does not provide
+  a gateway or network observation path;
+- private PID and IPC namespaces, a read-only root filesystem, a read-only
+  staging mount, a non-root UID, dropped capabilities (all Linux capabilities
+  are dropped), and
+  `no-new-privileges`;
+- bounded CPU, memory, PID, temporary-storage, output, and wall-clock budgets;
+- no user-provided container flags, no host workspace mount, no engine socket,
+  no host namespaces, no host credentials, and no real credentials;
+- no package-manager or lifecycle execution: no `preinstall`, `install`,
+  `postinstall`, or `prepare`.
+
+The staging lifecycle resolves and contains the scan root, copies only approved
+regular files into a scanner-owned temporary snapshot, excludes links/devices,
+sockets, VCS metadata, worktrees, and escape paths, mounts that snapshot
+read-only, and removes it idempotently. Cleanup is ownership-scoped to the
+current run. Any cleanup uncertainty is reported as `incomplete`; a report
+must not expose raw engine diagnostics, full request bodies, host absolute paths,
+or secret values.
+
+### Phase B versus Phase C
+
+Phase B intentionally stops at network denial. It binds the selected local
+Docker/Podman endpoint and fixed harness executable through scanner-owned
+arguments; callers cannot replace the endpoint, executable, image, mount, or
+namespace policy. Trusted image ownership belongs to the scanner release, while
+the staged package remains untrusted input. Gateway routing, DNS/HTTP/TCP/UDP
+observation, Node preload probes, canary correlation, and any explicitly
+allowlisted replay network belong to Phase C and are not implemented or implied
+by a Phase B `complete` result.
+
+The Linux-only CI gate is opt-in and skips with an explicit reason when its
+protected immutable image digest is absent. It never changes the default static
+workflow. See `.github/workflows/dynamic-smoke.yml` for the release contract.
 
 The four opt-in controls are:
 
-| Option | Phase A behavior |
+| Option | Phase B behavior |
 | --- | --- |
-| `--dynamic` | Request experimental deep analysis. The production result is unavailable in Phase A. |
-| `--dynamic-backend <auto\|docker\|podman>` | Declare the future backend preference; it does not start Docker or Podman in Phase A. |
-| `--dynamic-profile observe` | Select the only supported observation profile. |
+| `--dynamic` | Opt in to Phase B after static preflight; no request means no engine probe. |
+| `--dynamic-backend <auto\|docker\|podman>` | Select a local engine; Phase B still requires the immutable scanner-owned image and network denial. |
+| `--dynamic-profile observe` | Select the bounded Phase B observation contract; Phase C gateway/probe behavior is not included. |
 | `--dynamic-timeout <ms>` | Request a bounded timeout. Default: `15000`; values are clamped to the enforced `1000`–`30000` ms range. |
 
 An unavailable, refused, or incomplete requested deep scan exits with code `3`
@@ -204,8 +285,8 @@ npx deepseek-harness-sentinel ./plugin \
   --fail-on-incomplete \
   --strict-exit-codes
 
-# Exercise the experimental dynamic contract. Phase A reports unavailable;
-# it neither starts Docker/Podman nor runs the target on this host.
+# Request the opt-in Phase B layer. Without a deployed scanner-owned image it
+# reports unavailable; it never runs the target on the host.
 npx deepseek-harness-sentinel ./plugin \
   --dynamic \
   --dynamic-backend auto \
@@ -304,9 +385,9 @@ dsh-sentinel --rules                print the rule catalog
 | `--fail-on <severity>` | Exit 1 when a finding reaches `critical`, `high`, `medium`, or `low`. |
 | `--fail-on-incomplete` | Exit 3 when coverage is incomplete. |
 | `--strict-exit-codes` | Preserve distinct threshold, runtime, and incomplete-scan exits. |
-| `--dynamic` | Request experimental deep analysis. Phase A's production resolver returns unavailable without executing the target. |
-| `--dynamic-backend <auto\|docker\|podman>` | Declare a future container backend preference; Phase A does not invoke Docker or Podman. |
-| `--dynamic-profile observe` | Select the Phase A observation profile. |
+| `--dynamic` | Request the opt-in Phase B layer after static preflight; no request keeps scans static-only. |
+| `--dynamic-backend <auto\|docker\|podman>` | Select the local Docker/Podman backend; it still requires a scanner-owned immutable image. |
+| `--dynamic-profile observe` | Select the bounded Phase B profile; gateway/probe observation is deferred to Phase C. |
 | `--dynamic-timeout <ms>` | Bounded deep-analysis timeout; default `15000`, clamped to `1000`–`30000` ms. |
 | `--max-files`, `--max-plugins`, `--max-bytes` | Set bounded resource limits. |
 | `--config <file>` | Load `sentinel.config.json`; CLI values override config values. |
@@ -370,10 +451,11 @@ remain visible as `dynamic-module-specifier` warnings and never become invented
 module-graph edges.
 
 Static completeness does not imply dynamic completeness, and dynamic state does
-not overwrite the static verdict. A requested Phase A deep scan may therefore
-be `unavailable`, `refused`, or `incomplete` while the static report remains
+not overwrite the static verdict. A requested Phase B scan may therefore be
+`unavailable`, `refused`, or `incomplete` while the static report remains
 complete; strict CI flags decide whether that separate deep-layer state returns
-exit code `3`.
+exit code `3`. `unavailable` is expected when the scanner-owned immutable image
+has not been compiled/deployed.
 
 ## Pre-install package audit
 
@@ -423,10 +505,12 @@ target
   -> redacted JSON / text / SARIF / HTML / SBOM output
 ```
 
-If explicitly requested, the Phase A dynamic state machine runs after the
-static verdict and records only its separate, redacted analysis layer. Production
-resolution deliberately stops at `unavailable`; it does not call a process,
-network, Docker, Podman, container runtime, or host-execution fallback.
+If explicitly requested, the Phase B dynamic state machine runs after the
+static verdict and records only its separate, redacted analysis layer. It uses
+only the scanner-owned local container backend when an immutable image is
+available; otherwise it stops at `unavailable`. It does not use a host-execution
+fallback, public/private egress, a host workspace, an engine socket, or host
+namespaces. Gateway/probe observation remains Phase C.
 
 The scanner never follows target symlinks and applies lexical plus realpath
 containment to manifest-controlled paths. Medium-sized files receive lightweight
@@ -446,9 +530,9 @@ evasion, and hardening-edge groups. The current checked-in benchmark records:
 | Hardening edge group | 1.000 | 1.000 | 1.000 |
 
 These metrics describe the checked-in corpus, not all real-world plugins. The
-project also maintains 324 automated tests covering the engine, CLI, plugin
-loading, module/cross-file analysis, supply-chain layers, report contracts, and
-hardening behavior.
+The project also maintains a full automated test contract covering the engine,
+CLI, plugin loading, module/cross-file analysis, supply-chain layers, dynamic
+backend contracts, report contracts, and hardening behavior.
 
 ```sh
 npm test
@@ -483,9 +567,10 @@ Planned work focuses on broader language-aware semantic analysis, deeper lockfil
 normalization, stronger interprocedural reachability, larger public corpora, and
 stable integration contracts. See the [full roadmap](docs/roadmap.md).
 
-Dynamic execution is deliberately not on the current production path. Phase B
-may add Docker/Podman support only after an independent security audit clears
-that deferred gate.
+Dynamic execution remains an explicit release-gated path. Phase B is
+network-denied and unavailable until a scanner-owned immutable image is
+compiled/deployed; Phase C gateway/probe work and any live-network behavior are
+deferred until a separate security review.
 
 Issues and pull requests that add test-backed detections, reduce false positives,
 or improve documentation are welcome. Before contributing, read the

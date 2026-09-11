@@ -66,6 +66,60 @@ dsh-sentinel 是一个安全扫描工具,自身的安全同样重要。请通过
   `audit-install` 的 registry 获取由用户显式触发)
 - 发现任何"未显式触发就联网"的路径,请立即报告
 
+## Phase B threat boundary and trust ownership
+
+Phase B dynamic analysis is an explicit opt-in layer after static preflight. The
+scanned package, its dependencies, staged files, package metadata, and all
+runner output are untrusted. The threat boundary excludes host execution,
+package-manager and lifecycle execution, real credentials, the host workspace,
+engine sockets, host namespaces, and public or private egress. Phase B is a
+network-denied runner, not a gateway or probe implementation; residual gateway,
+probe, and network-observation work belongs to Phase C.
+
+Trust ownership is deliberately split. The scanner release owns the Docker or
+Podman executable binding, local endpoint/context check, fixed harness
+entrypoint, immutable image digest, namespace/resource policy, run labels, and
+cleanup authority. The package author owns none of those controls. The package
+is only copied into a scanner-owned staging snapshot and is never allowed to
+replace the executable, endpoint, image, mount, or flags.
+
+The package export boundary is part of this trust model: only declared public
+exports are shipped and imported scanner internals are not a package-controlled
+dynamic entrypoint. Static preflight remains the first gate and refuses native
+execution risk, container escape/control signals, hard-limit violations,
+unresolved entrypoints, incomplete core traversal, and unavailable isolation.
+
+## Phase B staging, binding, and evidence contracts
+
+The staging lifecycle resolves the scan root, applies lexical/realpath
+containment, copies approved regular files to a per-run scanner-owned temporary
+snapshot, and excludes symlinks, hardlinks, sockets, devices, VCS metadata,
+worktrees, and paths outside the root. The snapshot is mounted read-only and is
+cleaned idempotently only through the ownership handle captured by that run.
+Cleanup uncertainty is a security-relevant `incomplete` result, never a clean
+result or permission to use a host fallback.
+
+The endpoint and executable binding are fixed by the scanner-owned backend. A
+Phase B command must use a local Docker/Podman engine, a preloaded full
+`sha256` image digest, `--pull=never`, `--network=none`, private PID and IPC,
+read-only root and staging, non-root execution, dropped capabilities,
+`no-new-privileges`, and bounded resources. User-controlled image tags,
+endpoints, engine sockets, host mounts, host namespaces, and arbitrary
+entrypoints are rejected. No image is pulled or built during a scan.
+
+Evidence redaction happens before report serialization: stdout/stderr and engine
+errors are bounded, normalized, and reduced to fixed reason codes; secrets,
+full synthetic values, request bodies, host absolute paths, container IDs, and
+raw diagnostics do not enter reports. Canaries may be represented by identifiers
+or digests, never their values. Malformed or forged evidence and uncertain
+cleanup produce `incomplete`.
+
+The Phase B residual boundary is explicit: `unavailable` is the expected state
+when a scanner-owned immutable image has not been compiled/deployed, and there
+is no host-execution fallback. Phase C must separately implement and review any
+gateway, DNS/HTTP/TCP/UDP observation, preload probe, canary correlation, or
+allowlisted replay behavior; this policy does not authorize those features.
+
 ## Security-relevant design guarantees
 
 - 扫描器只读:绝不执行被扫描代码,不跟随目录符号链接

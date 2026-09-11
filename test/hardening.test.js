@@ -1089,3 +1089,109 @@ test('SC-cleanup:cleanup 幂等(重复调用安全)', async () => {
     rmSync(tmp, { recursive: true, force: true })
   }
 })
+
+// ---- Phase B documentation and release-gate contracts ----
+
+test('release docs keep English primary and document the complete Phase B boundary', () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+  const readme = readFileSync(join(root, 'README.md'), 'utf8')
+  const chinese = readFileSync(join(root, 'README.zh-CN.md'), 'utf8')
+  const firstHeading = readme.split(/\r?\n/).find(line => /^#\s/.test(line))
+
+  assert.match(firstHeading, /^# 🛡️ dsh-sentinel$/)
+  assert.ok(readme.indexOf('## Dynamic Analysis (Phase B)') >= 0, 'English README must lead with the Phase B section')
+  for (const phrase of [
+    'explicit opt-in',
+    'static preflight',
+    '`not-requested`',
+    '`unavailable`',
+    '`refused`',
+    '`incomplete`',
+    '`--network=none`',
+    '`--pull=never`',
+    'private PID and IPC namespaces',
+    'read-only root filesystem',
+    'read-only staging mount',
+    'non-root',
+    'dropped capabilities',
+    'no-new-privileges',
+    'no host-execution fallback',
+    'no package-manager or lifecycle execution',
+    'real credentials',
+    'engine socket',
+    'public or private egress',
+    'scanner-owned immutable image',
+    'Phase C',
+    'cleanup uncertainty',
+    'Linux-only CI gate',
+  ]) {
+    assert.ok(readme.includes(phrase), `README must document ${phrase}`)
+  }
+  assert.ok(readme.indexOf('## Dynamic Analysis (Phase B)') < readme.indexOf('## Installation and quick start'))
+  assert.match(chinese, /English README.*主文档|English README.*primary/i)
+  for (const phrase of ['Phase B', 'unavailable', 'network=none', 'pull=never', '没有主机执行回退', 'Phase C']) {
+    assert.ok(chinese.includes(phrase), `Chinese README must mirror ${phrase}`)
+  }
+})
+
+test('security and architecture docs declare Phase B ownership and residual Phase C boundary', () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+  const security = readFileSync(join(root, 'SECURITY.md'), 'utf8')
+  const architecture = readFileSync(join(root, 'docs', 'architecture.md'), 'utf8')
+  for (const document of [security, architecture]) {
+    for (const phrase of [
+      'threat boundary',
+      'trust ownership',
+      'package export boundary',
+      'staging lifecycle',
+      'endpoint',
+      'executable binding',
+      'evidence redaction',
+      'Phase C',
+      'network-denied',
+    ]) {
+      assert.ok(document.toLowerCase().includes(phrase.toLowerCase()), `document must declare ${phrase}`)
+    }
+  }
+})
+
+test('dynamic smoke workflow is opt-in, Linux-only, immutable-image, and cannot widen host or network access', () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+  const workflowPath = join(root, '.github', 'workflows', 'dynamic-smoke.yml')
+  assert.ok(existsSync(workflowPath), 'Phase B smoke workflow must exist')
+  const workflow = readFileSync(workflowPath, 'utf8')
+
+  assert.match(workflow, /workflow_dispatch:/)
+  assert.match(workflow, /enable_dynamic:/)
+  assert.match(workflow, /default:\s*false/)
+  assert.match(workflow, /runs-on:\s*ubuntu-latest/)
+  assert.match(workflow, /DSH_SENTINEL_DYNAMIC_IMAGE_DIGEST/)
+  assert.match(workflow, /sha256:/)
+  assert.match(workflow, /--pull=never/)
+  assert.match(workflow, /--network=none/)
+  assert.match(workflow, /--pid=private/)
+  assert.match(workflow, /--ipc=private/)
+  assert.match(workflow, /--read-only/)
+  assert.match(workflow, /--user[= ]/)
+  assert.match(workflow, /--cap-drop[= ]ALL/)
+  assert.match(workflow, /no-new-privileges/)
+  assert.match(workflow, /skip/i)
+  assert.match(workflow, /unavailable/i)
+  assert.match(workflow, /scanner-owned immutable image/i)
+
+  for (const forbidden of [
+    /docker\s+pull/i,
+    /podman\s+pull/i,
+    /docker\s+build/i,
+    /podman\s+build/i,
+    /--network=host/i,
+    /--pid=host/i,
+    /--ipc=host/i,
+    /docker\.sock/i,
+    /podman\.sock/i,
+    /\$\{\{\s*github\.workspace\s*\}\}.*(?:-v|--volume|source=)/is,
+    /host\s+namespace/i,
+  ]) {
+    assert.doesNotMatch(workflow, forbidden, `workflow must not contain ${forbidden}`)
+  }
+})
