@@ -1166,6 +1166,7 @@ test('dynamic smoke workflow has a structural opt-in protected Linux gate', () =
   const workflowPath = join(root, '.github', 'workflows', 'dynamic-smoke.yml')
   assert.ok(existsSync(workflowPath), 'Phase B smoke workflow must exist')
   const workflow = parseYaml(readFileSync(workflowPath, 'utf8'))
+  assert.deepEqual(workflow.permissions, { contents: 'read' })
   assert.deepEqual(workflow.on.workflow_dispatch.inputs.enable_dynamic, {
     description: 'Run the opt-in Phase B Linux smoke gate',
     required: true,
@@ -1192,23 +1193,79 @@ test('dynamic smoke workflow has a structural opt-in protected Linux gate', () =
   const smokeStep = job.steps.find(step => /network-denied smoke/i.test(step.name))
   assert.equal(smokeStep.if, '${{ env.DYNAMIC_IMAGE_DIGEST != \'\' }}')
   const script = smokeStep.run
+  assert.match(script, /\[\[ "\$DYNAMIC_IMAGE_DIGEST" =~ \^\[\^\[:space:\]\]\+@sha256:\[\[:xdigit:\]\]\{64\}\$ \]\]/)
   assert.match(script, /case\s+"\$engine"\s+in[\s\S]*docker\|podman/i)
-  assert.match(script, /image inspect "\$DYNAMIC_IMAGE_DIGEST"/)
+  assert.match(script, /if \[\[ -x \/usr\/bin\/docker \]\]; then[\s\S]*engine_path=\/usr\/bin\/docker[\s\S]*endpoint_flag=--host=unix:\/\/\/var\/run\/docker\.sock/)
+  assert.match(script, /elif \[\[ -x \/usr\/bin\/podman \]\]; then[\s\S]*engine_path=\/usr\/bin\/podman[\s\S]*endpoint_flag="--url=unix:\/\/\/run\/user\/\$\{podman_uid\}\/podman\/podman\.sock"/)
   assert.match(script, /SKIP: Phase B unavailable; scanner-owned immutable image is not preloaded/i)
-  assert.match(script, /timeout --signal=TERM --kill-after=10s 90s "\$engine" run/)
-  for (const arg of [
-    '--rm', '--pull=never', '--network=none', '--pid=private', '--ipc=private',
-    '--read-only', '--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m',
-    '--user=65532:65532', '--cap-drop=ALL', '--security-opt=no-new-privileges',
-    '--pids-limit=64', '--memory=512m', '--cpus=1',
-    '--entrypoint=/usr/local/bin/dsh-sentinel-harness',
-  ]) assert.ok(script.includes(arg), `runner must keep fixed ${arg}`)
+
+  const normalizedScript = script.replace(/\\\r?\n/g, ' ').replace(/\s+/g, ' ').trim()
+  assert.match(
+    normalizedScript,
+    /\/usr\/bin\/env -i PATH=\/usr\/bin:\/bin HOME=\/nonexistent "\$engine_path" "\$endpoint_flag" image inspect "\$DYNAMIC_IMAGE_DIGEST" >\/dev\/null 2>&1/,
+    'inspect must be one controlled local engine invocation',
+  )
+  assert.match(
+    normalizedScript,
+    /\/usr\/bin\/env -i PATH=\/usr\/bin:\/bin HOME=\/nonexistent \/usr\/bin\/timeout --signal=TERM --kill-after=10s 90s "\$engine_path" "\$endpoint_flag" run --rm --pull=never --network=none --pid=private --ipc=private --read-only --tmpfs=\/tmp:rw,noexec,nosuid,nodev,size=64m --user=65532:65532 --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=64 --memory=512m --cpus=1 --entrypoint=\/usr\/local\/bin\/dsh-sentinel-harness "\$DYNAMIC_IMAGE_DIGEST" --smoke/,
+    'run must be one bounded invocation with the exact allowlisted argument vector',
+  )
+  assert.equal((script.match(/"\$engine_path" "\$endpoint_flag"/g) ?? []).length, 2, 'only inspect and run may invoke the selected engine')
+  assert.doesNotMatch(script, /command -v|which\s+(?:docker|podman)/i, 'engine discovery must use absolute allowlisted paths')
+
+  for (const name of [
+    'DOCKER_HOST', 'DOCKER_CONTEXT', 'CONTAINER_HOST', 'CONTAINER_CONNECTION',
+    'DOCKER_CONFIG', 'CONTAINERS_CONF', 'CONTAINERS_STORAGE_CONF',
+    'PODMAN_CONNECTIONS_CONF', 'XDG_CONFIG_HOME',
+  ]) assert.match(script, new RegExp(`\\b${name}\\b`), `workflow must inspect ${name}`)
+  assert.match(script, /if \[\[ -n "\$\{!variable-\}" \]\]/)
+  assert.match(script, /unset "\$\{remote_environment\[@\]\}"/)
 
   for (const forbidden of [
     /docker\s+pull/i, /podman\s+pull/i, /docker\s+build/i, /podman\s+build/i,
-    /--network=host/i, /--pid=host/i, /--ipc=host/i, /--privileged/i,
-    /docker\.sock/i, /podman\.sock/i, /DOCKER_HOST/i, /CONTAINER_HOST/i,
+    /--network=(?:host|bridge|container)/i, /--pid=host/i, /--ipc=host/i,
+    /--privileged/i, /--cap-add/i, /--security-opt=seccomp/i, /--user=0(?:\D|$)/i,
     /github\.workspace/i, /--(?:volume|mount|-v)(?:[ =]|$)/i,
-    /(?:AWS_|GITHUB_TOKEN|SSH_|HOME)=/i, /--(?:env|-e)(?:[ =]|$)/i,
+    /(?:AWS_|GITHUB_TOKEN|SSH_)=/i, /--(?:env|-e)(?:[ =]|$)/i,
+    /--(?:context|connection)(?:[ =]|$)/i, /https?:\/\//i,
   ]) assert.doesNotMatch(script, forbidden, `workflow must not contain ${forbidden}`)
+})
+
+test('dynamic smoke workflow digest predicate accepts only immutable 64-hex references', () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+  const workflow = parseYaml(readFileSync(join(root, '.github', 'workflows', 'dynamic-smoke.yml'), 'utf8'))
+  const script = workflow.jobs['phase-b-smoke'].steps.find(step => /network-denied smoke/i.test(step.name)).run
+  const predicate = '[[ "$DYNAMIC_IMAGE_DIGEST" =~ ^[^[:space:]]+@sha256:[[:xdigit:]]{64}$ ]]'
+  assert.ok(script.includes(predicate), 'workflow must use the fixed Bash regex predicate')
+
+  const matchesImmutableDigest = value => /^[^\s]+@sha256:[0-9a-fA-F]{64}$/.test(value)
+  for (const value of [
+    `registry.local/dsh-sentinel@sha256:${'a'.repeat(64)}`,
+    `dsh-sentinel@sha256:${'F'.repeat(64)}`,
+  ]) assert.equal(matchesImmutableDigest(value), true, `valid digest should match: ${value}`)
+  for (const value of [
+    'registry.local/dsh-sentinel:latest',
+    `registry.local/dsh-sentinel@sha256:${'a'.repeat(63)}`,
+    `registry.local/dsh-sentinel@sha256:${'a'.repeat(65)}`,
+    `registry.local/dsh-sentinel@sha256:${'g'.repeat(64)}`,
+    `registry.local/dsh-sentinel@sha256:${'a'.repeat(64)} extra`,
+  ]) assert.equal(matchesImmutableDigest(value), false, `invalid digest should not match: ${value}`)
+})
+
+test('dynamic smoke workflow rejects inherited remote engine selectors before inspection', () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+  const workflow = parseYaml(readFileSync(join(root, '.github', 'workflows', 'dynamic-smoke.yml'), 'utf8'))
+  const script = workflow.jobs['phase-b-smoke'].steps.find(step => /network-denied smoke/i.test(step.name)).run
+  const remoteNames = [
+    'DOCKER_HOST', 'DOCKER_CONTEXT', 'CONTAINER_HOST', 'CONTAINER_CONNECTION',
+    'DOCKER_CONFIG', 'CONTAINERS_CONF', 'CONTAINERS_STORAGE_CONF',
+    'PODMAN_CONNECTIONS_CONF', 'XDG_CONFIG_HOME',
+  ]
+  const unsafeRemoteEnvironment = environment => remoteNames.some(name => Boolean(environment[name]))
+  assert.equal(unsafeRemoteEnvironment({ DOCKER_HOST: 'unix:///remote.sock' }), true)
+  assert.equal(unsafeRemoteEnvironment({ CONTAINER_CONNECTION: 'remote' }), true)
+  assert.equal(unsafeRemoteEnvironment(Object.fromEntries(remoteNames.map(name => [name, '']))), false)
+  assert.match(script, /for variable in "\$\{remote_environment\[@\]\}"/)
+  assert.match(script, /echo "FAIL: Phase B refused; remote engine selector\/configuration is set: \$variable"/)
+  assert.match(script, /unset "\$\{remote_environment\[@\]\}"/)
 })

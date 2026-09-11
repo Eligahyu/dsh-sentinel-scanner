@@ -166,7 +166,17 @@ with a local Docker or rootless Podman engine and a preloaded scanner-owned imag
 referenced by a full `sha256` digest. The protected environment is named
 `dynamic-analysis-protected`. The image must already be present: Phase B uses
 `--pull=never` and performs no image build. Engine selection is the fixed
-`docker|podman` allowlist; remote endpoints and contexts are not accepted.
+`docker|podman` allowlist; remote endpoints and contexts are not accepted. Before
+either engine command, the gate rejects any non-empty `DOCKER_HOST`,
+`DOCKER_CONTEXT`, `CONTAINER_HOST`, `CONTAINER_CONNECTION`, `DOCKER_CONFIG`,
+`CONTAINERS_CONF`, `CONTAINERS_STORAGE_CONF`, `PODMAN_CONNECTIONS_CONF`, or
+`XDG_CONFIG_HOME`, then unsets those selectors/configuration variables. It uses
+only `/usr/bin/docker` or `/usr/bin/podman`, a controlled empty environment and
+`/` as the working directory, with Docker bound to
+`--host=unix:///var/run/docker.sock` or Podman bound to
+`--url=unix:///run/user/<uid>/podman/podman.sock`. An unsafe selector fails
+closed before image inspection; the engine socket is never mounted into the
+container.
 
 Each allowlisted stage uses a fresh, short-lived runner with the following
 fixed properties:

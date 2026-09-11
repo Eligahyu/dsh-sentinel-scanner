@@ -109,3 +109,52 @@ offline `curl.exe` guard described above; that guard was removed before staging.
 | YAML parse of `.github/workflows/dynamic-smoke.yml` | exit 0; protected Linux job present. |
 | JavaScript `--check` for CLI, hardening test, resolver, command builder, and policy | exit 0 for all five files. |
 | `git diff --check` | exit 0; only Git LF/CRLF normalization warnings. |
+
+## Fix round 2/5 — final release/security review
+
+This round corrected the immutable-image predicate and closed the inherited
+engine-selector/configuration boundary before the first engine command. The
+workflow now evaluates the exact Bash regex
+`[[ "$DYNAMIC_IMAGE_DIGEST" =~ ^[^[:space:]]+@sha256:[[:xdigit:]]{64}$ ]]`,
+with positive and negative fixture coverage. It rejects non-empty
+`DOCKER_HOST`, `DOCKER_CONTEXT`, `CONTAINER_HOST`, `CONTAINER_CONNECTION`,
+`DOCKER_CONFIG`, `CONTAINERS_CONF`, `CONTAINERS_STORAGE_CONF`,
+`PODMAN_CONNECTIONS_CONF`, and `XDG_CONFIG_HOME`, clears them, and fails closed
+before image inspection. Both inspect and run use only the literal allowlisted
+absolute engine paths, explicit local Docker/Podman endpoint flags, `/usr/bin/env
+-i` with a minimal controlled environment, and `/` as the working directory.
+The contract tests normalize the workflow structure and assert the exact inspect
+and bounded run argument vectors, permissions, protected runner/environment,
+opt-in/unavailable branches, no-action/no-checkout shape, and prohibited
+privilege, mount, credential, namespace, network, pull/build, and remote-input
+alternatives.
+
+TDD RED for this round: after the review-contract expansion, the focused suite
+reported 70 passed and 1 failed because the negative credential assertion was
+too broad and rejected the required controlled `HOME=/nonexistent` setting.
+The assertion was narrowed to credential forwarding while retaining the exact
+controlled environment contract. Focused GREEN then passed 71/71.
+
+### Fix-round verification
+
+All commands below were run against the current worktree without contacting a
+Docker/Podman daemon or public network. Full-suite and release verification
+used a temporary Node preload that forced `curl.exe` probes to the unavailable
+shape and set `SENTINEL_NPM_REGISTRY` to `127.0.0.1:9`; the preload was deleted
+before staging.
+
+| Command | Result |
+| --- | --- |
+| `C:\nvm4w\nodejs\node.exe --test test/hardening.test.js` | exit 0; 71 total, 71 passed, 0 failed, 0 skipped. |
+| `C:\nvm4w\nodejs\npm.cmd test` (offline guard) | exit 0; 409 total, 395 passed, 0 failed, 14 skipped, 0 todo. |
+| `C:\nvm4w\nodejs\npm.cmd run benchmark` | exit 0; rule precision/recall/F1 `0.953/1.000/0.976`, finding `0.917/1.000/0.957`, flow `1.000/1.000/1.000`, hardening-edge F1 `1.000`. |
+| `C:\nvm4w\nodejs\npm.cmd run verify:release` (offline guard) | exit 0; same 409/395/0/14 test result, benchmark, and package dry-run. |
+| `C:\nvm4w\nodejs\npm.cmd pack --dry-run` | exit 0; package `deepseek-harness-sentinel@0.4.4`, 54 files, 160.6 kB package size, 522.6 kB unpacked. |
+| `C:\nvm4w\nodejs\npm.cmd audit --offline --ignore-scripts --no-fund` | exit 0; `found 0 vulnerabilities`. |
+| `C:\nvm4w\nodejs\node.exe bin\sentinel.mjs test\fixtures\clean-plugin --dynamic --json` | exit 0; no-engine smoke reported `dynamicStatus=unavailable`, `dynamicComplete=false`, reason `trusted-image-unavailable`. |
+| YAML parse of `.github/workflows/dynamic-smoke.yml` | exit 0; protected Linux `phase-b-smoke` job present. |
+| JavaScript `--check` for CLI, hardening test, resolver, command builder, and policy | exit 0 for all five files. |
+| `git diff --check` | exit 0; only Git LF/CRLF normalization warnings. |
+
+No Phase C code or static scanner behavior was changed. Task 3/4 contracts and
+the English-first documentation boundary remain intact.

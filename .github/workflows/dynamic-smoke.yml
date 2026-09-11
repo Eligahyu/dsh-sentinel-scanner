@@ -34,30 +34,57 @@ jobs:
       - name: Run the Linux network-denied smoke
         if: ${{ env.DYNAMIC_IMAGE_DIGEST != '' }}
         shell: bash
+        working-directory: /
         run: |
           set -euo pipefail
-          case "$DYNAMIC_IMAGE_DIGEST" in
-            */*@sha256:[0-9a-fA-F]{64}) ;;
-            *) echo "FAIL: dynamic image must be a scanner-owned immutable sha256 digest" >&2; exit 1 ;;
-          esac
+          if [[ "$DYNAMIC_IMAGE_DIGEST" =~ ^[^[:space:]]+@sha256:[[:xdigit:]]{64}$ ]]; then
+            :
+          else
+            echo "FAIL: dynamic image must be a scanner-owned immutable sha256 digest" >&2
+            exit 1
+          fi
+
+          remote_environment=(
+            DOCKER_HOST DOCKER_CONTEXT CONTAINER_HOST CONTAINER_CONNECTION
+            DOCKER_CONFIG CONTAINERS_CONF CONTAINERS_STORAGE_CONF
+            PODMAN_CONNECTIONS_CONF XDG_CONFIG_HOME
+          )
+          for variable in "${remote_environment[@]}"; do
+            if [[ -n "${!variable-}" ]]; then
+              echo "FAIL: Phase B refused; remote engine selector/configuration is set: $variable" >&2
+              exit 1
+            fi
+          done
+          unset "${remote_environment[@]}"
 
           engine=''
-          if command -v docker >/dev/null 2>&1; then
+          engine_path=''
+          endpoint_flag=''
+          if [[ -x /usr/bin/docker ]]; then
             engine=docker
-          elif command -v podman >/dev/null 2>&1; then
+            engine_path=/usr/bin/docker
+            endpoint_flag=--host=unix:///var/run/docker.sock
+          elif [[ -x /usr/bin/podman ]]; then
             engine=podman
+            engine_path=/usr/bin/podman
+            podman_uid=$(/usr/bin/id -u)
+            endpoint_flag="--url=unix:///run/user/${podman_uid}/podman/podman.sock"
           fi
           case "$engine" in
             docker|podman) ;;
             *) echo "SKIP: Phase B unavailable; no allowlisted local Docker or Podman executable is installed."; exit 0 ;;
           esac
 
-          if ! "$engine" image inspect "$DYNAMIC_IMAGE_DIGEST" >/dev/null 2>&1; then
+          cd /
+          if ! /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
+            "$engine_path" "$endpoint_flag" image inspect "$DYNAMIC_IMAGE_DIGEST" >/dev/null 2>&1; then
             echo "SKIP: Phase B unavailable; scanner-owned immutable image is not preloaded on this protected runner."
             exit 0
           fi
 
-          timeout --signal=TERM --kill-after=10s 90s "$engine" run --rm \
+          /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
+            /usr/bin/timeout --signal=TERM --kill-after=10s 90s \
+            "$engine_path" "$endpoint_flag" run --rm \
             --pull=never \
             --network=none \
             --pid=private \

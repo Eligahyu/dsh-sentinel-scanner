@@ -242,10 +242,19 @@ Every Phase B stage is a fresh network-denied runner with `--network=none`, `--p
 private PID/IPC namespaces, read-only root and staging, non-root execution,
 dropped capabilities, `no-new-privileges`, and bounded resources. The backend
 binds the local endpoint and fixed executable through scanner-generated argument
-arrays. It rejects mutable tags, remote contexts, arbitrary entrypoints,
-engine sockets, host mounts, host namespaces, package managers, lifecycle
-scripts, real credentials, and caller-supplied flags. Phase B has no public or
-private egress.
+arrays. Before either engine command, it rejects non-empty
+`DOCKER_HOST`, `DOCKER_CONTEXT`, `CONTAINER_HOST`, `CONTAINER_CONNECTION`,
+`DOCKER_CONFIG`, `CONTAINERS_CONF`, `CONTAINERS_STORAGE_CONF`,
+`PODMAN_CONNECTIONS_CONF`, or `XDG_CONFIG_HOME`, clears those variables, and
+uses only absolute `/usr/bin/docker` or `/usr/bin/podman` paths from `/` with a
+minimal controlled environment. Docker receives
+`--host=unix:///var/run/docker.sock`; Podman receives
+`--url=unix:///run/user/<uid>/podman/podman.sock` for both inspect and run.
+Unsafe selectors fail closed before inspect, and the local engine socket is not
+mounted into the container. It rejects mutable tags, remote contexts, arbitrary
+entrypoints, engine sockets, host mounts, host namespaces, package managers,
+lifecycle scripts, real credentials, and caller-supplied flags. Phase B has no
+public or private egress.
 
 ### 10.2 Evidence redaction and Phase C residual boundary
 
