@@ -13,6 +13,7 @@ import {
   normalizeContainerPolicy,
 } from '../engine/dynamic/container-policy.js'
 import { buildEngineArgs, validateEngineName } from '../engine/dynamic/container-command.js'
+import { CONTAINER_BACKEND_LIMITS, createContainerBackend } from '../engine/dynamic/container-backend.js'
 import {
   STAGING_SNAPSHOT_LIMITS,
   createStagingSnapshot,
@@ -648,6 +649,7 @@ test('Docker and Podman produce the same hardened argv contract', () => {
   assert.equal(Array.isArray(docker), true)
   assert.equal(docker.every((value) => typeof value === 'string'), true)
   assert.equal(docker.includes('--network=none'), true)
+  assert.equal(docker.includes('--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m'), true)
   assert.equal(docker.includes('--privileged'), false)
   assert.equal(docker.includes('--pid=host'), false)
   assert.equal(docker.includes('--ipc=host'), false)
@@ -686,4 +688,366 @@ test('command construction rejects host networking, namespaces, sockets, and uns
         'host-ipc-not-allowed', 'user-container-arguments'].includes(error?.code),
     )
   }
+})
+
+const CONTAINER_ID_A = 'a'.repeat(64)
+const CONTAINER_ID_B = 'b'.repeat(64)
+const LOCAL_DOCKER_CONTEXT = `${JSON.stringify({
+  Name: 'default', Current: true, DockerEndpoint: 'npipe:////./pipe/docker_engine',
+})}\n`
+const LOCAL_PODMAN_CONNECTIONS = JSON.stringify([{
+  Name: 'podman-machine-default', URI: 'unix:///run/user/1000/podman/podman.sock', Default: true,
+}])
+
+function immutableContainerRunSpec(runId = '123e4567-e89b-12d3-a456-426614174000') {
+  return Object.freeze({
+    runId,
+    target: Object.freeze({ fixture: 'dynamic-target' }),
+    profile: 'observe',
+    entrypoints: Object.freeze(['index.js']),
+    canaries: Object.freeze({ runId }),
+  })
+}
+
+function createCommandRunner(responses) {
+  const calls = []
+  const runner = async (file, args, options) => {
+    calls.push({ file, args: [...args], options: { ...options } })
+    let response = responses.shift()
+    if (typeof response === 'function') response = await response({ file, args, options, calls })
+    if (response instanceof Error) throw response
+    return response
+  }
+  return { runner, calls }
+}
+
+function localProbeFor(engine) {
+  return engine === 'docker'
+    ? { stdout: LOCAL_DOCKER_CONTEXT, stderr: '' }
+    : { stdout: LOCAL_PODMAN_CONNECTIONS, stderr: '' }
+}
+
+function generatedRunnerLabel(call) {
+  const encoded = call.args.at(call.args.indexOf('--label') + 1)
+  return encoded.slice('dsh.sentinel.run='.length)
+}
+
+test('container backend detects a bounded local Docker or Podman context through an argv runner', async () => {
+  for (const engine of ['docker', 'podman']) {
+    const command = createCommandRunner([localProbeFor(engine)])
+    const backend = createContainerBackend({
+      engine, image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+    })
+
+    const result = await backend.available()
+
+    assert.deepEqual(result, {
+      available: true,
+      backend: engine,
+      code: 'container-available',
+      capabilities: { context: 'local', image: 'immutable', network: 'none' },
+    })
+    assert.equal(command.calls.length, 1)
+    assert.equal(command.calls[0].file, engine)
+    assert.equal(command.calls[0].options.shell, false)
+    assert.equal(command.calls[0].options.timeout, CONTAINER_BACKEND_LIMITS.probeTimeoutMs)
+    assert.equal(command.calls[0].options.maxBuffer, CONTAINER_BACKEND_LIMITS.probeOutputBytes)
+    assert.equal(command.calls[0].args.includes('context'), engine === 'docker')
+  }
+})
+
+test('container backend refuses Docker host overrides before probing an engine', async () => {
+  const command = createCommandRunner([])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY,
+    commandRunner: command.runner, environment: { DOCKER_HOST: 'ssh://remote.example' },
+  })
+
+  assert.deepEqual(await backend.available(), {
+    available: false, backend: 'docker', code: 'container-remote-context', capabilities: null,
+  })
+  assert.equal(command.calls.length, 0)
+})
+
+test('container backend refuses every configured remote context override before probing an engine', async () => {
+  for (const key of ['DOCKER_HOST', 'CONTAINER_HOST', 'DOCKER_CONTEXT', 'CONTAINER_CONNECTION']) {
+    const command = createCommandRunner([])
+    const backend = createContainerBackend({
+      engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY,
+      commandRunner: command.runner, environment: { [key]: 'remote-context' },
+    })
+
+    assert.deepEqual(await backend.available(), {
+      available: false, backend: 'docker', code: 'container-remote-context', capabilities: null,
+    })
+    assert.equal(command.calls.length, 0)
+  }
+})
+
+test('container backend refuses a remote engine context returned by the bounded probe', async () => {
+  const command = createCommandRunner([{
+    stdout: `${JSON.stringify({ Name: 'remote', Current: true, DockerEndpoint: 'ssh://remote.example' })}\n`,
+    stderr: '',
+  }])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+
+  assert.deepEqual(await backend.available(), {
+    available: false, backend: 'docker', code: 'container-remote-context', capabilities: null,
+  })
+})
+
+test('container backend refuses mutable images and normalizes engine probe failures', async () => {
+  const mutableCommand = createCommandRunner([])
+  const mutable = createContainerBackend({
+    engine: 'docker', image: 'registry.example/dsh-runner:latest',
+    stagingCapability: STAGING_CAPABILITY, commandRunner: mutableCommand.runner,
+  })
+  const failedCommand = createCommandRunner([{ stdout: '', stderr: 'private engine failure', exitCode: 1 }])
+  const failed = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: failedCommand.runner,
+  })
+
+  assert.deepEqual(await mutable.available(), {
+    available: false, backend: 'docker', code: 'container-image-invalid', capabilities: null,
+  })
+  assert.equal(mutableCommand.calls.length, 0)
+  assert.deepEqual(await failed.available(), {
+    available: false, backend: 'docker', code: 'container-engine-unavailable', capabilities: null,
+  })
+})
+
+test('container backend normalizes a probe timeout without exposing engine diagnostics', async () => {
+  const timeout = new Error('private engine timeout')
+  timeout.code = 'ETIMEDOUT'
+  const command = createCommandRunner([timeout])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+
+  assert.deepEqual(await backend.available(), {
+    available: false, backend: 'docker', code: 'container-engine-unavailable', capabilities: null,
+  })
+})
+
+test('container backend rejects oversized hostile probe output without returning it', async () => {
+  const command = createCommandRunner([{
+    stdout: 'x'.repeat(CONTAINER_BACKEND_LIMITS.probeOutputBytes + 1), stderr: '',
+  }])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+
+  assert.deepEqual(await backend.available(), {
+    available: false, backend: 'docker', code: 'container-probe-output-too-large', capabilities: null,
+  })
+})
+
+test('container backend rejects unknown probe JSON fields without returning the hostile payload', async () => {
+  const command = createCommandRunner([{
+    stdout: `${JSON.stringify({
+      Name: 'default', Current: true, DockerEndpoint: 'npipe:////./pipe/docker_engine', unexpected: 'hostile',
+    })}\n`,
+    stderr: '',
+  }])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+
+  assert.deepEqual(await backend.available(), {
+    available: false, backend: 'docker', code: 'container-probe-invalid', capabilities: null,
+  })
+})
+
+test('container backend creates uniquely labeled hardened runner handles from immutable run specs', async () => {
+  const command = createCommandRunner([
+    localProbeFor('docker'),
+    { stdout: `${CONTAINER_ID_A}\n`, stderr: '' },
+    ({ calls }) => ({
+      stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(calls[1]) }), stderr: '',
+    }),
+    { stdout: `${CONTAINER_ID_B}\n`, stderr: '' },
+    ({ calls }) => ({
+      stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(calls[3]) }), stderr: '',
+    }),
+  ])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+
+  assert.equal((await backend.available()).available, true)
+  const first = await backend.prepare(immutableContainerRunSpec())
+  const second = await backend.prepare(immutableContainerRunSpec('123e4567-e89b-12d3-a456-426614174001'))
+
+  assert.equal(Object.isFrozen(first), true)
+  assert.equal(Object.isFrozen(first.ownership), true)
+  assert.equal(first.ownership.resourceId, CONTAINER_ID_A)
+  assert.notEqual(first.ownership.label, second.ownership.label)
+  for (const call of command.calls.filter(call => call.args[0] === 'run')) {
+    assert.equal(call.args.includes('--network=none'), true)
+    assert.equal(call.args.includes('--pid=private'), true)
+    assert.equal(call.args.includes('--ipc=private'), true)
+    assert.equal(call.args.includes('--read-only'), true)
+    assert.equal(call.args.includes('--cap-drop=ALL'), true)
+    assert.equal(call.args.includes('--security-opt=no-new-privileges'), true)
+    assert.equal(call.args.includes('--user=65532:65532'), true)
+    assert.equal(call.args.some(value => value.includes('docker.sock')), false)
+  }
+})
+
+test('container backend rejects ownership that hostile runner output cannot prove from the generated label', async () => {
+  const command = createCommandRunner([
+    localProbeFor('docker'),
+    {
+      stdout: `${CONTAINER_ID_A}\n`, stderr: '',
+      label: 'dsh-attacker', ownership: { runId: 'attacker', resourceId: 'attacker' },
+    },
+    { stdout: JSON.stringify({ 'dsh.sentinel.run': 'dsh-attacker' }), stderr: '' },
+  ])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+
+  await backend.available()
+  await assert.rejects(
+    () => backend.prepare(immutableContainerRunSpec()),
+    error => error?.code === 'container-ownership-unverified',
+  )
+  assert.equal(command.calls.length, 3)
+})
+
+test('container backend refuses a create response without a captured resource ID before ownership lookup', async () => {
+  const command = createCommandRunner([
+    localProbeFor('docker'),
+    { stdout: 'not-a-container-id\n', stderr: '' },
+  ])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+
+  await backend.available()
+  await assert.rejects(
+    () => backend.prepare(immutableContainerRunSpec()),
+    error => error?.code === 'container-prepare-output-invalid',
+  )
+  assert.equal(command.calls.length, 2)
+})
+
+test('container backend requires the immutable run spec produced by the orchestrator', async () => {
+  const command = createCommandRunner([localProbeFor('docker')])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+
+  await backend.available()
+  await assert.rejects(
+    () => backend.prepare({ ...immutableContainerRunSpec() }),
+    error => error?.code === 'container-run-spec-invalid',
+  )
+  assert.equal(command.calls.length, 1)
+})
+
+test('container backend refuses a non-factory staging object before it can reach a create command', async () => {
+  const command = createCommandRunner([localProbeFor('docker')])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE,
+    stagingCapability: Object.freeze({ root: 'C:/host', snapshot: 'C:/host/snapshot-untrusted' }),
+    commandRunner: command.runner,
+  })
+
+  await backend.available()
+  await assert.rejects(
+    () => backend.prepare(immutableContainerRunSpec()),
+    error => error?.code === 'container-prepare-refused',
+  )
+  assert.equal(command.calls.length, 1)
+})
+
+test('container backend retains its caller-tightened cleanup execution bounds', async () => {
+  const limits = Object.freeze({ timeoutMs: 17, memoryBytes: 1024, pidsLimit: 2, outputBytes: 128 })
+  const command = createCommandRunner([
+    localProbeFor('docker'),
+    { stdout: `${CONTAINER_ID_A}\n`, stderr: '' },
+    ({ calls }) => ({
+      stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(calls[1]) }), stderr: '',
+    }),
+    { stdout: '', stderr: '' },
+  ])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY,
+    limits, commandRunner: command.runner,
+  })
+
+  await backend.available()
+  const handle = await backend.prepare(immutableContainerRunSpec())
+
+  assert.deepEqual(await backend.cleanup(handle), { complete: true })
+  assert.equal(command.calls[3].options.timeout, limits.timeoutMs)
+  assert.equal(command.calls[3].options.maxBuffer, limits.outputBytes)
+})
+
+test('container backend cleanup only removes a resource captured by this backend prepare call', async () => {
+  const command = createCommandRunner([
+    localProbeFor('docker'),
+    { stdout: `${CONTAINER_ID_A}\n`, stderr: '' },
+    ({ calls }) => ({
+      stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(calls[1]) }), stderr: '',
+    }),
+    { stdout: '', stderr: '' },
+  ])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+
+  await backend.available()
+  const handle = await backend.prepare(immutableContainerRunSpec())
+  const forged = Object.freeze({ ...handle, ownership: Object.freeze({ ...handle.ownership }) })
+
+  assert.deepEqual(await backend.cleanup(forged), { complete: false })
+  assert.equal(command.calls.length, 3)
+  assert.deepEqual(await backend.cleanup(handle), { complete: true })
+  assert.equal(command.calls.length, 4)
+  assert.deepEqual(command.calls[3].args, ['rm', '--force', CONTAINER_ID_A])
+})
+
+test('container backend reports a failed owned cleanup with a fixed incomplete result', async () => {
+  const command = createCommandRunner([
+    localProbeFor('docker'),
+    { stdout: `${CONTAINER_ID_A}\n`, stderr: '' },
+    ({ calls }) => ({
+      stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(calls[1]) }), stderr: '',
+    }),
+    { stdout: '', stderr: '', exitCode: 1 },
+  ])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+
+  await backend.available()
+  const handle = await backend.prepare(immutableContainerRunSpec())
+
+  assert.deepEqual(await backend.cleanup(handle), { complete: false })
+  assert.deepEqual(command.calls[3].args, ['rm', '--force', CONTAINER_ID_A])
+})
+
+test('container backend suppresses duplicate cleanup after its owned resource is removed', async () => {
+  const command = createCommandRunner([
+    localProbeFor('docker'),
+    { stdout: `${CONTAINER_ID_A}\n`, stderr: '' },
+    ({ calls }) => ({
+      stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(calls[1]) }), stderr: '',
+    }),
+    { stdout: '', stderr: '' },
+  ])
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+
+  await backend.available()
+  const handle = await backend.prepare(immutableContainerRunSpec())
+
+  assert.deepEqual(await backend.cleanup(handle), { complete: true })
+  assert.deepEqual(await backend.cleanup(handle), { complete: true })
+  assert.equal(command.calls.length, 4)
 })

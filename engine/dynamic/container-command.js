@@ -78,6 +78,7 @@ export function buildEngineArgs(input = {}) {
     '--pid=private',
     '--ipc=private',
     '--read-only',
+    '--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m',
     '--user=65532:65532',
     '--cap-drop=ALL',
     '--security-opt=no-new-privileges',
