@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto'
 import { dirname, isAbsolute, normalize } from 'node:path'
 import { promisify } from 'node:util'
 import { buildEngineArgs } from './container-command.js'
+import { DYNAMIC_STAGES } from './contracts.js'
+import { normalizeDynamicEvidence } from './evidence.js'
 import {
   CONTAINER_PHASE_B_LIMITS,
   REQUIRED_IMAGE_DIGEST,
@@ -50,6 +52,11 @@ const PODMAN_CONNECTION_FIELDS = Object.freeze(new Set([
 const RUN_SPEC_FIELDS = Object.freeze(new Set([
   'runId', 'target', 'profile', 'entrypoints', 'canaries',
 ]))
+const STAGE_FIELDS = Object.freeze(new Set(['name']))
+const EVIDENCE_FIELDS = Object.freeze([
+  'stages', 'networkAttempts', 'dnsQueries', 'processes', 'fileEvents',
+  'canaryEvents', 'policyViolations', 'limitations', 'failures',
+])
 
 export const CONTAINER_BACKEND_LIMITS = Object.freeze({
   probeTimeoutMs: Math.min(5000, CONTAINER_PHASE_B_LIMITS.timeoutMs),
@@ -209,7 +216,8 @@ function isOutputLimitError(error) {
   }
 }
 
-async function runCommand(commandRunner, binding, args, { timeout, outputBytes }) {
+async function runCommand(commandRunner, binding, args, { timeout, outputBytes, signal = null }) {
+  if (signal?.aborted) return { kind: 'cancelled' }
   const options = {
     shell: false,
     timeout,
@@ -218,12 +226,22 @@ async function runCommand(commandRunner, binding, args, { timeout, outputBytes }
     env: binding.env,
   }
   if (binding.cwd !== undefined) options.cwd = binding.cwd
+  if (signal !== null) options.signal = signal
   Object.freeze(options)
   try {
     const result = await commandRunner(binding.commandFile, Object.freeze([...args]), options)
-    return commandOutput(result, outputBytes)
+    const output = commandOutput(result, outputBytes)
+    if (signal?.aborted) {
+      return output.kind === 'success'
+        ? { kind: 'cancelled', stdout: output.stdout }
+        : { kind: 'cancelled' }
+    }
+    return output
   } catch (error) {
-    return { kind: isOutputLimitError(error) ? 'too-large' : 'failed' }
+    if (isOutputLimitError(error)) return { kind: 'too-large' }
+    if (signal?.aborted || error?.code === 'ABORT_ERR' || error?.name === 'AbortError') return { kind: 'cancelled' }
+    if (error?.code === 'ETIMEDOUT' || error?.killed === true || error?.signal === 'SIGTERM') return { kind: 'timeout' }
+    return { kind: 'failed' }
   }
 }
 
@@ -345,6 +363,45 @@ function validRunSpec(runSpec) {
   }
 }
 
+function validStageSpec(stageSpec) {
+  try {
+    if (!isRecord(stageSpec) || Object.getPrototypeOf(stageSpec) !== Object.prototype || !Object.isFrozen(stageSpec)) {
+      return null
+    }
+    const keys = Reflect.ownKeys(stageSpec)
+    if (keys.length !== STAGE_FIELDS.size || keys.some(key => typeof key !== 'string' || !STAGE_FIELDS.has(key))) {
+      return null
+    }
+    const name = ownData(stageSpec, 'name')
+    if (!name.safe || !name.found || !DYNAMIC_STAGES.includes(name.value)) return null
+    return name.value
+  } catch {
+    return null
+  }
+}
+
+function stageExitCode(stdout) {
+  if (typeof stdout !== 'string' || !/^\d{1,4}\r?\n?$/.test(stdout)) return null
+  const value = Number.parseInt(stdout, 10)
+  return Number.isSafeInteger(value) && value >= 0 ? value : null
+}
+
+function parseStageEvidence(stdout, canaries, limits) {
+  if (typeof stdout !== 'string') return null
+  let parsed
+  try {
+    parsed = JSON.parse(stdout)
+  } catch {
+    return null
+  }
+  try {
+    const evidence = normalizeDynamicEvidence(parsed, { canaries, limits })
+    return Object.freeze(evidence)
+  } catch {
+    return null
+  }
+}
+
 function resourceIdFromOutput(stdout) {
   const match = /^([a-f0-9]{12,64})\r?\n?$/.exec(stdout)
   return match ? match[1] : null
@@ -452,6 +509,39 @@ export function createContainerBackend(options = {}) {
       outputBytes: policy.limits.outputBytes,
     })
     return fixedCleanupResult(result.kind === 'success')
+  }
+
+  const stageResourceRecord = (binding, resourceId, label, policy) => Object.freeze({
+    engine: binding.engine,
+    endpoint: binding.endpoint,
+    env: binding.env,
+    cwd: binding.cwd,
+    commandFile: binding.commandFile,
+    resourceId,
+    label,
+    limits: policy.limits,
+  })
+
+  const cleanupStageResource = async (state, resource) => {
+    const result = await cleanupCreatedResource(resource, resource.resourceId, {
+      limits: resource.limits,
+    })
+    if (result.complete) {
+      state.pendingResources.delete(resource.label)
+      orphanResources.delete(resource.label)
+      labels.delete(resource.label)
+      return result
+    }
+    state.pendingResources.set(resource.label, resource)
+    orphanResources.set(resource.label, resource)
+    return result
+  }
+
+  const stageErrorFor = (kind) => {
+    if (kind === 'cancelled') return backendError('container-stage-cancelled')
+    if (kind === 'timeout') return backendError('container-stage-timeout')
+    if (kind === 'too-large') return backendError('container-stage-output-too-large')
+    return backendError('container-stage-failed')
   }
 
   const retainFailedRollback = async (binding, resourceId, label, policy) => {
@@ -617,23 +707,170 @@ export function createContainerBackend(options = {}) {
       binding,
       engine: policy.engine,
       endpoint: binding.endpoint,
+      commandFile: binding.commandFile,
+      cwd: binding.cwd,
+      env: binding.env,
       resourceId,
+      policy,
       limits: policy.limits,
       label,
+      runId: spec.runId,
+      canaries: spec.canaries,
+      stageEvidence: new Map(),
+      completedStages: new Set(),
+      pendingResources: new Map(),
+      running: false,
+      baseCleaned: false,
       cleaned: false,
       cleanupPromise: null,
     })
     return handle
   }
 
-  const runStage = async handle => {
-    if (!handles.has(handle)) throw backendError('container-handle-invalid')
-    throw backendError('container-stage-not-implemented')
+  const runStage = async (handle, stageSpec, signal = null) => {
+    const state = handles.get(handle)
+    if (!state || state.cleaned) throw backendError('container-handle-invalid')
+    const name = validStageSpec(stageSpec)
+    if (name === null || state.completedStages.has(name) || state.running) {
+      throw backendError('container-stage-invalid')
+    }
+    const binding = bindingForUse()
+    if (binding === null) throw backendError('container-not-available')
+
+    const label = createLabel(labels)
+    let resourceId = null
+    let failure = null
+    state.running = true
+    try {
+      let args
+      try {
+        args = buildEngineArgs({
+          engine: state.policy.engine,
+          action: 'run',
+          label,
+          image: state.policy.image,
+          stagingCapability,
+          limits: state.policy.limits,
+        }).filter(value => value !== '--rm')
+        args = Object.freeze([...args, name])
+      } catch {
+        failure = backendError('container-stage-invalid')
+      }
+
+      if (!failure) {
+        const created = await runCommand(commandRunner, binding, boundEngineArgs(
+          binding.engine,
+          binding.endpoint,
+          args,
+        ), {
+          timeout: state.limits.timeoutMs,
+          outputBytes: state.limits.outputBytes,
+          signal,
+        })
+        if (created.kind !== 'success') {
+          if (created.stdout !== undefined) resourceId = resourceIdFromOutput(created.stdout)
+          failure = stageErrorFor(created.kind)
+        }
+        else {
+          resourceId = resourceIdFromOutput(created.stdout)
+          if (!resourceId) failure = backendError('container-stage-output-invalid')
+        }
+      }
+
+      if (!failure) {
+        const inspected = await runCommand(commandRunner, binding, boundEngineArgs(
+          binding.engine,
+          binding.endpoint,
+          ['container', 'inspect', '--format', '{{json .Config.Labels}}', resourceId],
+        ), {
+          timeout: state.limits.timeoutMs,
+          outputBytes: state.limits.outputBytes,
+          signal,
+        })
+        if (inspected.kind !== 'success' || !verifiedOwnership(inspected.stdout, label)) {
+          failure = backendError('container-stage-ownership-unverified')
+        }
+      }
+
+      if (!failure) {
+        const waited = await runCommand(commandRunner, binding, boundEngineArgs(
+          binding.engine,
+          binding.endpoint,
+          ['wait', resourceId],
+        ), {
+          timeout: state.limits.timeoutMs,
+          outputBytes: Math.min(state.limits.outputBytes, 256),
+          signal,
+        })
+        if (waited.kind !== 'success') failure = stageErrorFor(waited.kind)
+        else {
+          const exitCode = stageExitCode(waited.stdout)
+          if (exitCode === null || exitCode !== 0) failure = backendError('container-stage-nonzero')
+        }
+      }
+
+      if (!failure) {
+        const logs = await runCommand(commandRunner, binding, boundEngineArgs(
+          binding.engine,
+          binding.endpoint,
+          ['logs', resourceId],
+        ), {
+          timeout: state.limits.timeoutMs,
+          outputBytes: state.limits.outputBytes,
+          signal,
+        })
+        if (logs.kind !== 'success') failure = stageErrorFor(logs.kind)
+        else {
+          const evidence = parseStageEvidence(logs.stdout, state.canaries, state.limits)
+          if (evidence === null) failure = backendError('container-stage-evidence-invalid')
+          else {
+            state.stageEvidence.set(name, evidence)
+            state.completedStages.add(name)
+          }
+        }
+      }
+    } catch {
+      failure = backendError('container-stage-failed')
+    } finally {
+      state.running = false
+      if (resourceId !== null) {
+        const resource = stageResourceRecord(binding, resourceId, label, state.policy)
+        const cleaned = await cleanupStageResource(state, resource)
+        if (!cleaned.complete) failure = backendError('container-stage-cleanup-incomplete')
+      } else {
+        labels.delete(label)
+      }
+    }
+    if (failure) throw failure
+    return state.stageEvidence.get(name)
   }
 
   const collect = async handle => {
-    if (!handles.has(handle)) throw backendError('container-handle-invalid')
-    throw backendError('container-collection-not-implemented')
+    const state = handles.get(handle)
+    if (!state || state.cleaned) throw backendError('container-handle-invalid')
+    if (state.pendingResources.size > 0 || state.running
+      || DYNAMIC_STAGES.some(name => !state.completedStages.has(name))) {
+      throw backendError('container-collection-incomplete')
+    }
+    const merged = {}
+    for (const field of EVIDENCE_FIELDS) merged[field] = []
+    try {
+      for (const name of DYNAMIC_STAGES) {
+        const evidence = state.stageEvidence.get(name)
+        if (!evidence) throw new Error('missing evidence')
+        for (const field of EVIDENCE_FIELDS) {
+          const value = ownData(evidence, field)
+          if (!value.safe || !value.found || !Array.isArray(value.value)) throw new Error('invalid evidence')
+          merged[field].push(...value.value)
+        }
+      }
+      return Object.freeze(normalizeDynamicEvidence(merged, {
+        canaries: state.canaries,
+        limits: state.limits,
+      }))
+    } catch {
+      throw backendError('container-collection-invalid')
+    }
   }
 
   const cleanup = async handle => {
@@ -643,17 +880,26 @@ export function createContainerBackend(options = {}) {
     if (state.cleanupPromise !== null) return state.cleanupPromise
 
     state.cleanupPromise = (async () => {
-      const result = await runCommand(commandRunner, state.binding, boundEngineArgs(
-        state.engine,
-        state.endpoint,
-        ['rm', '--force', state.resourceId],
-      ), {
-        timeout: state.limits.timeoutMs,
-        outputBytes: state.limits.outputBytes,
-      })
-      if (result.kind !== 'success') return fixedCleanupResult(false)
+      if (state.running) return fixedCleanupResult(false)
+      let complete = true
+      for (const resource of [...state.pendingResources.values()]) {
+        const result = await cleanupStageResource(state, resource)
+        if (!result.complete) complete = false
+      }
+      if (!state.baseCleaned) {
+        const result = await cleanupCreatedResource(state.binding, state.resourceId, state.policy)
+        if (result.complete) {
+          state.baseCleaned = true
+          orphanResources.delete(state.label)
+          labels.delete(state.label)
+        } else {
+          complete = false
+          const resource = stageResourceRecord(state.binding, state.resourceId, state.label, state.policy)
+          orphanResources.set(state.label, resource)
+        }
+      }
+      if (!complete) return fixedCleanupResult(false)
       state.cleaned = true
-      labels.delete(state.label)
       return fixedCleanupResult(true)
     })()
     const result = state.cleanupPromise

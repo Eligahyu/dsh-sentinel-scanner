@@ -6,6 +6,8 @@ export const DYNAMIC_STATUSES = Object.freeze([
   'incomplete',
 ])
 
+export const DYNAMIC_STAGES = Object.freeze(['load', 'registration', 'invocation'])
+
 const LIST_FIELDS = Object.freeze([
   'stages',
   'networkAttempts',

@@ -898,6 +898,16 @@ test('dynamic orchestrator retains normalized stage evidence returned by the bac
   )
 })
 
+test('dynamic orchestrator sends only the immutable allowlisted stage name to the backend', async () => {
+  const backend = new FakeDynamicBackend()
+  const result = await runDynamicAnalysis({
+    target: 'fixture', options: dynamicOptions(), backend, preflight: eligiblePreflight(),
+  })
+
+  assert.equal(result.status, 'complete')
+  assert.deepEqual(backend.stageSpecKeys, [['name'], ['name'], ['name']])
+})
+
 for (const [name, fixture, expectedCode] of [
   ['stage failure', { stageErrors: { registration: new Error('backend secret') } }, 'stage-failed'],
   ['collection failure', { collectError: new Error('backend secret') }, 'collection-failed'],

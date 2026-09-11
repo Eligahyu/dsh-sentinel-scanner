@@ -83,6 +83,7 @@ export function buildEngineArgs(input = {}) {
     '--user=65532:65532',
     '--cap-drop=ALL',
     '--security-opt=no-new-privileges',
+    '--entrypoint=/usr/local/bin/dsh-sentinel-harness',
     `--pids-limit=${limits.pidsLimit}`,
     `--memory=${limits.memoryBytes}b`,
     `--stop-timeout=${Math.max(1, Math.ceil(limits.timeoutMs / 1000))}`,

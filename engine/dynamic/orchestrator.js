@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { createCanarySet } from './canaries.js'
-import { emptyDynamicLayer, normalizeDynamicLayer } from './contracts.js'
+import { DYNAMIC_STAGES, emptyDynamicLayer, normalizeDynamicLayer } from './contracts.js'
 import { evidenceDigest, normalizeDynamicEvidence } from './evidence.js'
 import { DYNAMIC_HARD_LIMITS, normalizeDynamicOptions } from './policy.js'
 import { resolveDynamicBackend } from './backend-resolver.js'
 
-export const DYNAMIC_STAGES = Object.freeze(['load', 'registration', 'invocation'])
+export { DYNAMIC_STAGES }
 
 const BACKEND_METHODS = Object.freeze(['available', 'prepare', 'runStage', 'collect', 'cleanup'])
 const EVIDENCE_FIELDS = Object.freeze([
@@ -382,7 +382,7 @@ export async function runDynamicAnalysis({ target, options, backend = null, pref
       handle = operation.value
       for (const name of DYNAMIC_STAGES) {
         operation = await runBoundedOperation(
-          operationSignal => methods.runStage.call(backend, handle, Object.freeze({ name, signal: operationSignal })),
+          operationSignal => methods.runStage.call(backend, handle, Object.freeze({ name }), operationSignal),
           normalizedOptions.timeoutMs, signal,
         )
         if (operation.kind !== 'fulfilled') {

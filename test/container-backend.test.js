@@ -1267,26 +1267,61 @@ test('container backend treats a deeply frozen run spec as structural input, not
   assert.equal(command.calls.length, 2)
 })
 
-test('container backend keeps runStage and collect unavailable for valid private handles', async () => {
+test('container backend runs each allowlisted stage in a fresh hardened runner and collects owned evidence', async () => {
   const command = createCommandRunner([
     localProbeFor('docker'),
-    { stdout: `${CONTAINER_ID_A}\n`, stderr: '' },
-    ({ calls }) => ({
-      stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(calls[1]) }), stderr: '',
-    }),
   ])
+  const stageIds = [CONTAINER_ID_A, CONTAINER_ID_B, 'c'.repeat(64)]
+  command.runner = async (file, args, options) => {
+    command.calls.push({ file, args: [...args], options: { ...options } })
+    if (args.includes('context')) return localProbeFor('docker')
+    if (args.includes('run')) {
+      const runCount = command.calls.filter(call => call.args.includes('run')).length
+      const id = runCount === 1 ? CONTAINER_ID_A : stageIds[runCount - 2]
+      return { stdout: `${id}\n`, stderr: '' }
+    }
+    if (args.includes('inspect')) {
+      const runCall = [...command.calls].reverse().find(call => call.args.includes('run'))
+      return { stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(runCall) }), stderr: '' }
+    }
+    if (args.includes('wait')) return { stdout: '0\n', stderr: '' }
+    if (args.includes('logs')) {
+      return { stdout: JSON.stringify({ networkAttempts: [] }), stderr: '' }
+    }
+    if (args.includes('rm')) return { stdout: '', stderr: '' }
+    return { stdout: '', stderr: '', exitCode: 1 }
+  }
   const backend = createContainerBackend({
     engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
   })
   await backend.available()
   const handle = await backend.prepare(immutableContainerRunSpec())
 
-  await assert.rejects(() => backend.runStage(handle), error => error?.code === 'container-stage-not-implemented')
-  await assert.rejects(() => backend.collect(handle), error => error?.code === 'container-collection-not-implemented')
-  assert.equal(command.calls.some(call => call.args[0] === 'evidence'), false)
+  for (const name of ['load', 'registration', 'invocation']) {
+    await assert.doesNotReject(() => backend.runStage(handle, Object.freeze({ name })))
+  }
+  const evidence = await backend.collect(handle)
+  assert.deepEqual(evidence.networkAttempts, [])
+  const stageCalls = command.calls.filter(call => ['load', 'registration', 'invocation'].includes(call.args.at(-1)))
+  assert.equal(stageCalls.length, 3)
+  assert.equal(command.calls.filter(call => call.args.includes('exec')).length, 0)
+  for (const [index, call] of stageCalls.entries()) {
+    assert.equal(call.args.includes('--pull=never'), true)
+    assert.equal(call.args.includes('--network=none'), true)
+    assert.equal(call.args.includes('--pid=private'), true)
+    assert.equal(call.args.includes('--ipc=private'), true)
+    assert.equal(call.args.includes('--read-only'), true)
+    assert.equal(call.args.includes('--cap-drop=ALL'), true)
+    assert.equal(call.args.includes('--security-opt=no-new-privileges'), true)
+    assert.equal(call.args.includes('--entrypoint=/usr/local/bin/dsh-sentinel-harness'), true)
+    assert.equal(call.args.at(-1), ['load', 'registration', 'invocation'][index])
+    assert.deepEqual(call.args.slice(0, 2), ['--host', LOCAL_DOCKER_ENDPOINT])
+    assert.equal(Object.isFrozen(call.options.env), true)
+    assert.equal(call.options.shell, false)
+  }
 })
 
-test('container backend rejects forged handles for runStage and collect without evidence success', async () => {
+test('container backend rejects forged handles and every non-schema stage without invoking a runner', async () => {
   const command = createCommandRunner([
     localProbeFor('docker'),
     { stdout: `${CONTAINER_ID_A}\n`, stderr: '' },
@@ -1301,9 +1336,172 @@ test('container backend rejects forged handles for runStage and collect without 
   const handle = await backend.prepare(immutableContainerRunSpec())
   const forged = Object.freeze({ ...handle, ownership: Object.freeze({ ...handle.ownership }) })
 
-  await assert.rejects(() => backend.runStage(forged), error => error?.code === 'container-handle-invalid')
+  await assert.rejects(() => backend.runStage(forged, Object.freeze({ name: 'load' })), error => error?.code === 'container-handle-invalid')
   await assert.rejects(() => backend.collect(forged), error => error?.code === 'container-handle-invalid')
+  for (const stageSpec of [
+    { name: 'load', argv: ['--privileged'] },
+    { name: 'evil' },
+    Object.freeze({ name: 'load', extra: 'forged' }),
+    { name: 'load' },
+  ]) {
+    await assert.rejects(() => backend.runStage(handle, stageSpec), error => error?.code === 'container-stage-invalid')
+  }
   assert.equal(command.calls.length, 3)
+})
+
+test('container backend bounds and normalizes stage timeout, crash, nonzero, malformed, and oversized output', async () => {
+  const cases = [
+    ['timeout', ({ args }) => args.includes('wait') ? Object.assign(new Error('engine secret C:\\host\\private'), { code: 'ETIMEDOUT' }) : null, 'container-stage-timeout'],
+    ['nonzero', ({ args }) => args.includes('wait') ? { stdout: '137\n', stderr: 'private engine diagnostics' } : null, 'container-stage-nonzero'],
+    ['malformed', ({ args }) => args.includes('logs') ? { stdout: '{not-json', stderr: '' } : null, 'container-stage-evidence-invalid'],
+    ['oversized', ({ args }) => args.includes('logs') ? { stdout: 'x'.repeat(CONTAINER_PHASE_B_LIMITS.outputBytes + 1), stderr: '' } : null, 'container-stage-output-too-large'],
+  ]
+
+  for (const [name, responseFor, expectedCode] of cases) {
+    const command = createCommandRunner([localProbeFor('docker')])
+    command.runner = async (file, args, options) => {
+      command.calls.push({ file, args: [...args], options: { ...options } })
+      if (args.includes('context')) return localProbeFor('docker')
+      if (args.includes('run')) return { stdout: `${CONTAINER_ID_A}\n`, stderr: '' }
+      if (args.includes('inspect')) {
+        const runCall = [...command.calls].reverse().find(call => call.args.includes('run'))
+        return { stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(runCall) }), stderr: '' }
+      }
+      const selected = responseFor({ file, args, options, calls: command.calls })
+      if (selected instanceof Error) throw selected
+      if (selected !== null) return selected
+      if (args.includes('wait')) return { stdout: '0\n', stderr: '' }
+      if (args.includes('logs')) return { stdout: JSON.stringify({ networkAttempts: [] }), stderr: '' }
+      if (args.includes('rm')) return { stdout: '', stderr: '' }
+      return { stdout: '', stderr: '', exitCode: 1 }
+    }
+    const backend = createContainerBackend({
+      engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+    })
+    await backend.available()
+    const handle = await backend.prepare(immutableContainerRunSpec())
+
+    await assert.rejects(
+      () => backend.runStage(handle, Object.freeze({ name: 'load' })),
+      error => error?.code === expectedCode && error.message === expectedCode,
+    )
+    assert.equal(command.calls.some(call => call.args.includes('C:\\host\\private')), false)
+    assert.deepEqual(command.calls.at(-1).args, ['--host', LOCAL_DOCKER_ENDPOINT, 'rm', '--force', CONTAINER_ID_A])
+  }
+})
+
+test('container backend retains an exact failed stage cleanup for bounded retry and never completes collection early', async () => {
+  let cleanupAttempts = 0
+  const command = createCommandRunner([localProbeFor('docker')])
+  command.runner = async (file, args, options) => {
+    command.calls.push({ file, args: [...args], options: { ...options } })
+    if (args.includes('context')) return localProbeFor('docker')
+    if (args.includes('run')) return { stdout: `${CONTAINER_ID_A}\n`, stderr: '' }
+    if (args.includes('inspect')) {
+      const runCall = [...command.calls].reverse().find(call => call.args.includes('run'))
+      return { stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(runCall) }), stderr: '' }
+    }
+    if (args.includes('wait')) return { stdout: '0\n', stderr: '' }
+    if (args.includes('logs')) return { stdout: JSON.stringify({ networkAttempts: [] }), stderr: '' }
+    if (args.includes('rm')) {
+      cleanupAttempts += 1
+      return cleanupAttempts === 1 ? { stdout: '', stderr: '', exitCode: 1 } : { stdout: '', stderr: '' }
+    }
+    return { stdout: '', stderr: '', exitCode: 1 }
+  }
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+  await backend.available()
+  const handle = await backend.prepare(immutableContainerRunSpec())
+
+  await assert.rejects(
+    () => backend.runStage(handle, Object.freeze({ name: 'load' })),
+    error => error?.code === 'container-stage-cleanup-incomplete',
+  )
+  await assert.rejects(
+    () => backend.collect(handle),
+    error => error?.code === 'container-collection-incomplete',
+  )
+  assert.deepEqual(await backend.cleanup(handle), { complete: true })
+  assert.deepEqual(command.calls.at(-1).args, ['--host', LOCAL_DOCKER_ENDPOINT, 'rm', '--force', CONTAINER_ID_A])
+  assert.deepEqual(await backend.cleanup(handle), { complete: true })
+  assert.equal(command.calls.filter(call => call.args.includes('rm')).length, 3)
+})
+
+test('container backend carries the verified Docker and Podman binding into every stage command', async () => {
+  for (const engine of ['docker', 'podman']) {
+    const endpoint = engine === 'docker' ? LOCAL_DOCKER_ENDPOINT : LOCAL_PODMAN_ENDPOINT
+    const environment = { PATH: 'C:\\trusted-engine-bin', DSH_STAGE_TEST: 'kept' }
+    const command = createCommandRunner([])
+    command.runner = async (file, args, options) => {
+      command.calls.push({ file, args: [...args], options: { ...options } })
+      if (args.includes('context') || args.includes('connection')) return localProbeFor(engine)
+      if (args.includes('run')) {
+        const id = command.calls.filter(call => call.args.includes('run')).length === 1 ? CONTAINER_ID_A : CONTAINER_ID_B
+        return { stdout: `${id}\n`, stderr: '' }
+      }
+      if (args.includes('inspect')) {
+        const runCall = [...command.calls].reverse().find(call => call.args.includes('run'))
+        return { stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(runCall) }), stderr: '' }
+      }
+      if (args.includes('wait')) return { stdout: '0\n', stderr: '' }
+      if (args.includes('logs')) return { stdout: JSON.stringify({ networkAttempts: [] }), stderr: '' }
+      if (args.includes('rm')) return { stdout: '', stderr: '' }
+      return { stdout: '', stderr: '', exitCode: 1 }
+    }
+    const backend = createContainerBackend({
+      engine, image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner, environment,
+    })
+    await backend.available()
+    const handle = await backend.prepare(immutableContainerRunSpec())
+    await backend.runStage(handle, Object.freeze({ name: 'load' }))
+
+    const stageCalls = command.calls.filter(call => call.args.includes(CONTAINER_ID_B))
+    assert.ok(stageCalls.length >= 4)
+    for (const call of stageCalls) {
+      assert.equal(call.file, engine)
+      assert.deepEqual(call.args.slice(0, 2), engine === 'docker' ? ['--host', endpoint] : ['--url', endpoint])
+      assert.equal(call.options.env.PATH, environment.PATH)
+      assert.equal(call.options.env.DSH_STAGE_TEST, environment.DSH_STAGE_TEST)
+      assert.equal(call.options.shell, false)
+    }
+    await backend.cleanup(handle)
+  }
+})
+
+test('container backend converts a cancelled late stage into a fixed failure and cleans its captured ID', async () => {
+  const command = createCommandRunner([])
+  command.runner = async (file, args, options) => {
+    command.calls.push({ file, args: [...args], options: { ...options } })
+    if (args.includes('context')) return localProbeFor('docker')
+    if (args.includes('run')) {
+      const id = command.calls.filter(call => call.args.includes('run')).length === 1 ? CONTAINER_ID_A : CONTAINER_ID_B
+      return { stdout: `${id}\n`, stderr: '' }
+    }
+    if (args.includes('inspect')) {
+      const runCall = [...command.calls].reverse().find(call => call.args.includes('run'))
+      return { stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(runCall) }), stderr: '' }
+    }
+    if (args.includes('wait')) {
+      await new Promise(resolve => setTimeout(resolve, 20))
+      return { stdout: '0\n', stderr: '' }
+    }
+    if (args.includes('rm')) return { stdout: '', stderr: '' }
+    return { stdout: '', stderr: '', exitCode: 1 }
+  }
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+  await backend.available()
+  const handle = await backend.prepare(immutableContainerRunSpec())
+  const controller = new AbortController()
+  const stage = backend.runStage(handle, Object.freeze({ name: 'load' }), controller.signal)
+  await new Promise(resolve => setTimeout(resolve, 1))
+  controller.abort()
+
+  await assert.rejects(stage, error => error?.code === 'container-stage-cancelled')
+  assert.deepEqual(command.calls.at(-1).args, ['--host', LOCAL_DOCKER_ENDPOINT, 'rm', '--force', CONTAINER_ID_B])
 })
 
 test('container backend refuses a non-factory staging object before it can reach a create command', async () => {

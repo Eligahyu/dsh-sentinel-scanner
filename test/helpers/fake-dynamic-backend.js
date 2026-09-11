@@ -25,6 +25,7 @@ export class FakeDynamicBackend {
     this.events = []
     this.prepareCalls = []
     this.cleanupCalls = []
+    this.stageSpecKeys = []
   }
 
   async wait(method, signal = null) {
@@ -56,9 +57,10 @@ export class FakeDynamicBackend {
     return Object.freeze({ id: `fake-handle-${this.prepareCalls.length}` })
   }
 
-  async runStage(handle, stageSpec) {
+  async runStage(handle, stageSpec, signal = stageSpec.signal) {
     this.calls.push({ method: 'runStage', stage: stageSpec.name })
-    await this.wait('runStage', stageSpec.signal)
+    this.stageSpecKeys.push(Reflect.ownKeys(stageSpec))
+    await this.wait('runStage', signal)
     const stageError = this.fixtures.stageErrors?.[stageSpec.name]
     if (stageError) throw stageError
     return this.fixtures.stageEvidence?.[stageSpec.name] ?? {}
