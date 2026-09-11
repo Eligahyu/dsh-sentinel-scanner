@@ -13,6 +13,7 @@ import { parse as parseYaml } from 'yaml'
 
 import { FindingBuffer, scanTree, collectFiles } from '../engine/scanner.js'
 import { computeRuntimeEntries } from '../engine/index.js'
+import { REQUIRED_IMAGE_DIGEST } from '../engine/dynamic/container-policy.js'
 import { PathEscapeError, resolveInside } from '../engine/path-safety.js'
 import { extractTarball } from '../engine/package/tarball.js'
 import { extractTarballSafe, TarSafetyError } from '../engine/package/tar.js'
@@ -1193,7 +1194,7 @@ test('dynamic smoke workflow has a structural opt-in protected Linux gate', () =
   const smokeStep = job.steps.find(step => /network-denied smoke/i.test(step.name))
   assert.equal(smokeStep.if, '${{ env.DYNAMIC_IMAGE_DIGEST != \'\' }}')
   const script = smokeStep.run
-  assert.match(script, /\[\[ "\$DYNAMIC_IMAGE_DIGEST" =~ \^\[\^\[:space:\]\]\+@sha256:\[\[:xdigit:\]\]\{64\}\$ \]\]/)
+  assert.match(script, /\[\[ "\$DYNAMIC_IMAGE_DIGEST" =~ \^\[a-z0-9\]\[a-z0-9._\/-\]\{0,254\}@sha256:\[a-f0-9\]\{64\}\$ \]\]/)
   assert.match(script, /case\s+"\$engine"\s+in[\s\S]*docker\|podman/i)
   assert.match(script, /if \[\[ -x \/usr\/bin\/docker \]\]; then[\s\S]*engine_path=\/usr\/bin\/docker[\s\S]*endpoint_flag=--host=unix:\/\/\/var\/run\/docker\.sock/)
   assert.match(script, /elif \[\[ -x \/usr\/bin\/podman \]\]; then[\s\S]*engine_path=\/usr\/bin\/podman[\s\S]*endpoint_flag="--url=unix:\/\/\/run\/user\/\$\{podman_uid\}\/podman\/podman\.sock"/)
@@ -1202,8 +1203,8 @@ test('dynamic smoke workflow has a structural opt-in protected Linux gate', () =
   const normalizedScript = script.replace(/\\\r?\n/g, ' ').replace(/\s+/g, ' ').trim()
   assert.match(
     normalizedScript,
-    /\/usr\/bin\/env -i PATH=\/usr\/bin:\/bin HOME=\/nonexistent "\$engine_path" "\$endpoint_flag" image inspect "\$DYNAMIC_IMAGE_DIGEST" >\/dev\/null 2>&1/,
-    'inspect must be one controlled local engine invocation',
+    /\/usr\/bin\/env -i PATH=\/usr\/bin:\/bin HOME=\/nonexistent \/usr\/bin\/timeout --signal=TERM --kill-after=5s 15s "\$engine_path" "\$endpoint_flag" image inspect "\$DYNAMIC_IMAGE_DIGEST" >\/dev\/null 2>&1/,
+    'inspect must be one controlled, bounded local engine invocation',
   )
   assert.match(
     normalizedScript,
@@ -1218,7 +1219,12 @@ test('dynamic smoke workflow has a structural opt-in protected Linux gate', () =
     'DOCKER_CONFIG', 'CONTAINERS_CONF', 'CONTAINERS_STORAGE_CONF',
     'PODMAN_CONNECTIONS_CONF', 'XDG_CONFIG_HOME',
   ]) assert.match(script, new RegExp(`\\b${name}\\b`), `workflow must inspect ${name}`)
+  assert.match(script, /while IFS= read -r variable; do/)
+  assert.match(script, /canonical=\$\{variable\^\^\}/)
+  assert.match(script, /case "\$canonical" in/)
+  assert.match(script, /done < <\(compgen -e\)/)
   assert.match(script, /if \[\[ -n "\$\{!variable-\}" \]\]/)
+  assert.match(script, /unset "\$variable"/)
   assert.match(script, /unset "\$\{remote_environment\[@\]\}"/)
 
   for (const forbidden of [
@@ -1231,28 +1237,33 @@ test('dynamic smoke workflow has a structural opt-in protected Linux gate', () =
   ]) assert.doesNotMatch(script, forbidden, `workflow must not contain ${forbidden}`)
 })
 
-test('dynamic smoke workflow digest predicate accepts only immutable 64-hex references', () => {
+test('dynamic smoke workflow digest predicate matches REQUIRED_IMAGE_DIGEST exactly', () => {
   const root = join(dirname(fileURLToPath(import.meta.url)), '..')
   const workflow = parseYaml(readFileSync(join(root, '.github', 'workflows', 'dynamic-smoke.yml'), 'utf8'))
   const script = workflow.jobs['phase-b-smoke'].steps.find(step => /network-denied smoke/i.test(step.name)).run
-  const predicate = '[[ "$DYNAMIC_IMAGE_DIGEST" =~ ^[^[:space:]]+@sha256:[[:xdigit:]]{64}$ ]]'
+  const predicate = '[[ "$DYNAMIC_IMAGE_DIGEST" =~ ^[a-z0-9][a-z0-9._/-]{0,254}@sha256:[a-f0-9]{64}$ ]]'
   assert.ok(script.includes(predicate), 'workflow must use the fixed Bash regex predicate')
+  assert.equal(REQUIRED_IMAGE_DIGEST.source, '^[a-z0-9](?:[a-z0-9._/-]{0,254})@sha256:[a-f0-9]{64}$')
 
-  const matchesImmutableDigest = value => /^[^\s]+@sha256:[0-9a-fA-F]{64}$/.test(value)
+  const matchesImmutableDigest = value => REQUIRED_IMAGE_DIGEST.test(value)
   for (const value of [
     `registry.local/dsh-sentinel@sha256:${'a'.repeat(64)}`,
-    `dsh-sentinel@sha256:${'F'.repeat(64)}`,
+    `dsh-sentinel@sha256:${'f'.repeat(64)}`,
+    `a/${'b'.repeat(253)}@sha256:${'0'.repeat(64)}`,
   ]) assert.equal(matchesImmutableDigest(value), true, `valid digest should match: ${value}`)
   for (const value of [
     'registry.local/dsh-sentinel:latest',
+    `Registry.local/dsh-sentinel@sha256:${'a'.repeat(64)}`,
+    `registry.local/dsh-sentinel@sha256:${'A'.repeat(64)}`,
+    `-registry.local/dsh-sentinel@sha256:${'a'.repeat(64)}`,
+    `${'a'.repeat(256)}@sha256:${'a'.repeat(64)}`,
     `registry.local/dsh-sentinel@sha256:${'a'.repeat(63)}`,
     `registry.local/dsh-sentinel@sha256:${'a'.repeat(65)}`,
     `registry.local/dsh-sentinel@sha256:${'g'.repeat(64)}`,
-    `registry.local/dsh-sentinel@sha256:${'a'.repeat(64)} extra`,
   ]) assert.equal(matchesImmutableDigest(value), false, `invalid digest should not match: ${value}`)
 })
 
-test('dynamic smoke workflow rejects inherited remote engine selectors before inspection', () => {
+test('dynamic smoke workflow rejects lowercase and mixed-case remote exports before inspection', () => {
   const root = join(dirname(fileURLToPath(import.meta.url)), '..')
   const workflow = parseYaml(readFileSync(join(root, '.github', 'workflows', 'dynamic-smoke.yml'), 'utf8'))
   const script = workflow.jobs['phase-b-smoke'].steps.find(step => /network-denied smoke/i.test(step.name)).run
@@ -1261,11 +1272,23 @@ test('dynamic smoke workflow rejects inherited remote engine selectors before in
     'DOCKER_CONFIG', 'CONTAINERS_CONF', 'CONTAINERS_STORAGE_CONF',
     'PODMAN_CONNECTIONS_CONF', 'XDG_CONFIG_HOME',
   ]
-  const unsafeRemoteEnvironment = environment => remoteNames.some(name => Boolean(environment[name]))
+  const unsafeRemoteEnvironment = environment => Object.entries(environment)
+    .some(([name, value]) => remoteNames.includes(name.toUpperCase()) && Boolean(value))
+  for (const name of ['docker_host', 'Docker_Context', 'containers_conf', 'Xdg_Config_Home']) {
+    assert.equal(unsafeRemoteEnvironment({ [name]: 'remote' }), true, `${name} must be refused`)
+  }
+  let engineCommandReached = false
+  const inherited = { docker_host: 'unix:///remote.sock', PATH: '/usr/bin:/bin' }
+  if (!unsafeRemoteEnvironment(inherited)) engineCommandReached = true
+  assert.equal(engineCommandReached, false, 'a lowercase remote selector must stop before any engine command')
   assert.equal(unsafeRemoteEnvironment({ DOCKER_HOST: 'unix:///remote.sock' }), true)
   assert.equal(unsafeRemoteEnvironment({ CONTAINER_CONNECTION: 'remote' }), true)
   assert.equal(unsafeRemoteEnvironment(Object.fromEntries(remoteNames.map(name => [name, '']))), false)
-  assert.match(script, /for variable in "\$\{remote_environment\[@\]\}"/)
+  assert.match(script, /while IFS= read -r variable; do/)
+  assert.match(script, /canonical=\$\{variable\^\^\}/)
+  assert.match(script, /case "\$canonical" in[\s\S]*DOCKER_HOST\|DOCKER_CONTEXT\|CONTAINER_HOST\|CONTAINER_CONNECTION\|\\/)
+  assert.match(script, /DOCKER_CONFIG\|CONTAINERS_CONF\|CONTAINERS_STORAGE_CONF\|\\/)
+  assert.match(script, /PODMAN_CONNECTIONS_CONF\|XDG_CONFIG_HOME\)/)
   assert.match(script, /echo "FAIL: Phase B refused; remote engine selector\/configuration is set: \$variable"/)
-  assert.match(script, /unset "\$\{remote_environment\[@\]\}"/)
+  assert.match(script, /unset "\$variable"/)
 })

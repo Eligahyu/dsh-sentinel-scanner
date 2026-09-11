@@ -101,7 +101,9 @@ Cleanup uncertainty is a security-relevant `incomplete` result, never a clean
 result or permission to use a host fallback.
 
 The endpoint and executable binding are fixed by the scanner-owned backend. Before
-any engine command, the Phase B gate rejects non-empty `DOCKER_HOST`,
+any engine command, the Phase B gate enumerates exported environment names,
+canonicalizes each name to uppercase, and rejects non-empty casing variants of
+`DOCKER_HOST`,
 `DOCKER_CONTEXT`, `CONTAINER_HOST`, `CONTAINER_CONNECTION`, `DOCKER_CONFIG`,
 `CONTAINERS_CONF`, `CONTAINERS_STORAGE_CONF`, `PODMAN_CONNECTIONS_CONF`, and
 `XDG_CONFIG_HOME`, then clears those selector/configuration variables. It uses
@@ -109,7 +111,9 @@ only trusted absolute `/usr/bin/docker` or `/usr/bin/podman` paths, a minimal
 controlled environment, `/` as the working directory, and explicit local
 `--host=unix:///var/run/docker.sock` (Docker) or
 `--url=unix:///run/user/<uid>/podman/podman.sock` (Podman) flags for both inspect
-and run. Unsafe selectors fail closed before inspection; the host CLI may use
+and run. Image inspection is wrapped in a fixed 15-second `/usr/bin/timeout`
+with TERM and 5-second kill-after bounds; the smoke run retains its fixed
+90-second host timeout. Unsafe selectors fail closed before inspection; the host CLI may use
 that explicitly bound local daemon socket, but no engine socket is mounted into
 the container. A Phase B command must use a local Docker/Podman engine, a
 preloaded full `sha256` image digest, `--pull=never`, `--network=none`, private

@@ -40,12 +40,15 @@ Phase B 只接受本地 Docker 或 rootless Podman，以及由扫描器发布、
 Linux release gate 只运行在受保护、由管理员维护的 self-hosted runner，标签为
 `self-hosted`、`linux`、`dsh-sentinel-phase-b`，environment 为
 `dynamic-analysis-protected`。它要求本地 Docker/Podman、预加载的扫描器可信镜像和受保护
-的 immutable digest；不接受 remote endpoint/context。任何 engine 命令之前都会拒绝非空的
+的 immutable digest；镜像格式固定为
+`^[a-z0-9](?:[a-z0-9._/-]{0,254})@sha256:[a-f0-9]{64}$`，不接受 remote endpoint/context。
+任何 engine 命令之前都会枚举 exported environment name、转为大写，并拒绝任何大小写形式的非空
 `DOCKER_HOST`、`DOCKER_CONTEXT`、`CONTAINER_HOST`、`CONTAINER_CONNECTION`、`DOCKER_CONFIG`、
 `CONTAINERS_CONF`、`CONTAINERS_STORAGE_CONF`、`PODMAN_CONNECTIONS_CONF` 或 `XDG_CONFIG_HOME`，
 随后清除这些 selector/config 变量；只使用 `/usr/bin/docker` 或 `/usr/bin/podman`、受控的空环境和
 `/` 工作目录，并显式绑定 Docker `--host=unix:///var/run/docker.sock` 或 Podman
 `--url=unix:///run/user/<uid>/podman/podman.sock`。不安全 selector 会在 image inspect 之前 fail closed；
+inspect 使用固定 15 秒 host timeout、TERM 和 5 秒 kill-after，smoke run 使用固定 90 秒 host timeout；
 engine socket 永远不会挂载进容器。runner 每个阶段都是新的短生命周期
 容器，并固定使用：
 

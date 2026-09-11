@@ -242,7 +242,8 @@ Every Phase B stage is a fresh network-denied runner with `--network=none`, `--p
 private PID/IPC namespaces, read-only root and staging, non-root execution,
 dropped capabilities, `no-new-privileges`, and bounded resources. The backend
 binds the local endpoint and fixed executable through scanner-generated argument
-arrays. Before either engine command, it rejects non-empty
+arrays. Before either engine command, it enumerates exported environment names,
+canonicalizes each to uppercase, and rejects non-empty casing variants of
 `DOCKER_HOST`, `DOCKER_CONTEXT`, `CONTAINER_HOST`, `CONTAINER_CONNECTION`,
 `DOCKER_CONFIG`, `CONTAINERS_CONF`, `CONTAINERS_STORAGE_CONF`,
 `PODMAN_CONNECTIONS_CONF`, or `XDG_CONFIG_HOME`, clears those variables, and
@@ -250,7 +251,9 @@ uses only absolute `/usr/bin/docker` or `/usr/bin/podman` paths from `/` with a
 minimal controlled environment. Docker receives
 `--host=unix:///var/run/docker.sock`; Podman receives
 `--url=unix:///run/user/<uid>/podman/podman.sock` for both inspect and run.
-Unsafe selectors fail closed before inspect, and the local engine socket is not
+Image inspection is wrapped in a fixed 15-second `/usr/bin/timeout` with TERM
+and 5-second kill-after bounds; the smoke run retains its fixed 90-second host
+timeout. Unsafe selectors fail closed before inspect, and the local engine socket is not
 mounted into the container. It rejects mutable tags, remote contexts, arbitrary
 entrypoints, engine sockets, host mounts, host namespaces, package managers,
 lifecycle scripts, real credentials, and caller-supplied flags. Phase B has no

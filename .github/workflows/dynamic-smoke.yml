@@ -37,7 +37,7 @@ jobs:
         working-directory: /
         run: |
           set -euo pipefail
-          if [[ "$DYNAMIC_IMAGE_DIGEST" =~ ^[^[:space:]]+@sha256:[[:xdigit:]]{64}$ ]]; then
+          if [[ "$DYNAMIC_IMAGE_DIGEST" =~ ^[a-z0-9][a-z0-9._/-]{0,254}@sha256:[a-f0-9]{64}$ ]]; then
             :
           else
             echo "FAIL: dynamic image must be a scanner-owned immutable sha256 digest" >&2
@@ -49,12 +49,20 @@ jobs:
             DOCKER_CONFIG CONTAINERS_CONF CONTAINERS_STORAGE_CONF
             PODMAN_CONNECTIONS_CONF XDG_CONFIG_HOME
           )
-          for variable in "${remote_environment[@]}"; do
-            if [[ -n "${!variable-}" ]]; then
-              echo "FAIL: Phase B refused; remote engine selector/configuration is set: $variable" >&2
-              exit 1
-            fi
-          done
+          while IFS= read -r variable; do
+            canonical=${variable^^}
+            case "$canonical" in
+              DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|CONTAINER_CONNECTION|\
+              DOCKER_CONFIG|CONTAINERS_CONF|CONTAINERS_STORAGE_CONF|\
+              PODMAN_CONNECTIONS_CONF|XDG_CONFIG_HOME)
+                if [[ -n "${!variable-}" ]]; then
+                  echo "FAIL: Phase B refused; remote engine selector/configuration is set: $variable" >&2
+                  exit 1
+                fi
+                unset "$variable"
+                ;;
+            esac
+          done < <(compgen -e)
           unset "${remote_environment[@]}"
 
           engine=''
@@ -77,6 +85,7 @@ jobs:
 
           cd /
           if ! /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
+            /usr/bin/timeout --signal=TERM --kill-after=5s 15s \
             "$engine_path" "$endpoint_flag" image inspect "$DYNAMIC_IMAGE_DIGEST" >/dev/null 2>&1; then
             echo "SKIP: Phase B unavailable; scanner-owned immutable image is not preloaded on this protected runner."
             exit 0
