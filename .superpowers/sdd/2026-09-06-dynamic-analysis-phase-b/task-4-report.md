@@ -96,3 +96,70 @@ The focused coverage now includes:
    Output was `{"available":false,"backend":null,"code":"backend-not-implemented-phase-a"}`.
    This smoke uses the existing Phase-A injected-only resolver and does not
    contact Docker or Podman.
+
+## Fix round 1/5 — rejected stage submission recovery
+
+### RED
+
+Added regressions before changing the backend for the Important resource-leak
+finding:
+
+- `ABORT_ERR`, `ETIMEDOUT`, and `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` rejection
+  with bounded `error.stdout` containing a strict container ID;
+- an ambiguous submitted stage with no recoverable ID;
+- repeated ambiguous submissions at the active orphan cap; and
+- a late aborted create that settles only after cancellation.
+
+The focused command was:
+
+```text
+node --test test/container-backend.test.js --test-name-pattern "rejected stage submission|ambiguous submitted|cannot bypass|late aborted"
+```
+
+RED result: `65` tests, `51` passed, `4` failed, `10` skipped, `0`
+cancelled. The failures were the expected missing rejection-output recovery,
+orphan retention/cap enforcement, and late-settlement cleanup behavior.
+
+### GREEN
+
+The backend now retains only a 256-byte maximum private rejected `stdout` for
+timeout, cancellation, and output-limit classifications. It parses only the
+existing strict canonical container-ID format, records attempted stages under
+their generated ownership labels, and retains an orphan reservation whenever
+submission may have occurred without an exact ID. Recovery uses the bound
+trusted engine executable, local endpoint, sanitized environment, and
+controlled cwd; it accepts at most one strict ID from an exact generated-label
+query, re-verifies the ownership label, and then removes only that exact ID.
+Zero, multiple, malformed, failed, or ownership-uncertain recovery remains
+cleanup-incomplete and keeps the label reservation. No engine diagnostics are
+included in returned errors, evidence, or this report.
+
+Focused GREEN result:
+
+```text
+node --test test/container-backend.test.js --test-name-pattern "rejected stage submission|ambiguous submitted|cannot bypass|late aborted"
+```
+
+`65` tests, `55` passed, `0` failed, `10` skipped, `0` cancelled.
+
+### Full verification
+
+The complete project test contract was run with the installed npm executable:
+
+```text
+C:\nvm4w\nodejs\npm.cmd test
+```
+
+Result: `393` tests, `383` passed, `0` failed, `10` skipped, `0` cancelled.
+
+Additional checks passed:
+
+```text
+node --check engine/dynamic/container-backend.js
+node --check test/container-backend.test.js
+git diff --check
+```
+
+The existing Phase-A injected-only resolver boundary and orchestrator
+quiescence semantics remain unchanged. No Docker or Podman daemon was
+contacted.

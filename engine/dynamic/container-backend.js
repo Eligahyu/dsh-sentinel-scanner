@@ -20,6 +20,7 @@ const MAX_PROBE_RECORDS = 32
 const MAX_RUN_SPEC_DEPTH = 8
 const MAX_RUN_SPEC_ITEMS = 500
 const MAX_ACTIVE_LABELS = 256
+const MAX_RECOVERY_OUTPUT_BYTES = 256
 const MAX_OWNERSHIP_LABELS = 32
 const MAX_OWNERSHIP_LABEL_KEY_BYTES = 128
 const MAX_OWNERSHIP_LABEL_VALUE_BYTES = 512
@@ -209,11 +210,30 @@ function commandOutput(result, outputBytes) {
 }
 
 function isOutputLimitError(error) {
-  try {
-    return error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
-  } catch {
-    return false
+  const code = ownData(error, 'code')
+  return code.safe && code.found && code.value === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+}
+
+function boundedRejectedStdout(error, outputBytes) {
+  const stdout = ownData(error, 'stdout')
+  if (!stdout.safe || !stdout.found || typeof stdout.value !== 'string') return undefined
+  const limit = Math.min(MAX_RECOVERY_OUTPUT_BYTES, outputBytes)
+  return outputWithinLimit(stdout.value, limit) ? stdout.value : undefined
+}
+
+function rejectedCommandKind(error, signal) {
+  const code = ownData(error, 'code')
+  const name = ownData(error, 'name')
+  const killed = ownData(error, 'killed')
+  const terminationSignal = ownData(error, 'signal')
+  if (signal?.aborted || (code.safe && code.found && code.value === 'ABORT_ERR')
+    || (name.safe && name.found && name.value === 'AbortError')) return 'cancelled'
+  if ((code.safe && code.found && code.value === 'ETIMEDOUT')
+    || (killed.safe && killed.found && killed.value === true)
+    || (terminationSignal.safe && terminationSignal.found && terminationSignal.value === 'SIGTERM')) {
+    return 'timeout'
   }
+  return 'failed'
 }
 
 async function runCommand(commandRunner, binding, args, { timeout, outputBytes, signal = null }) {
@@ -238,10 +258,13 @@ async function runCommand(commandRunner, binding, args, { timeout, outputBytes, 
     }
     return output
   } catch (error) {
-    if (isOutputLimitError(error)) return { kind: 'too-large' }
-    if (signal?.aborted || error?.code === 'ABORT_ERR' || error?.name === 'AbortError') return { kind: 'cancelled' }
-    if (error?.code === 'ETIMEDOUT' || error?.killed === true || error?.signal === 'SIGTERM') return { kind: 'timeout' }
-    return { kind: 'failed' }
+    const kind = isOutputLimitError(error)
+      ? 'too-large'
+      : rejectedCommandKind(error, signal)
+    const stdout = kind === 'too-large' || kind === 'cancelled' || kind === 'timeout'
+      ? boundedRejectedStdout(error, outputBytes)
+      : undefined
+    return stdout === undefined ? { kind } : { kind, stdout }
   }
 }
 
@@ -511,7 +534,7 @@ export function createContainerBackend(options = {}) {
     return fixedCleanupResult(result.kind === 'success')
   }
 
-  const stageResourceRecord = (binding, resourceId, label, policy) => Object.freeze({
+  const stageResourceRecord = (binding, resourceId, label, policy, ownershipVerified = false) => Object.freeze({
     engine: binding.engine,
     endpoint: binding.endpoint,
     env: binding.env,
@@ -520,10 +543,59 @@ export function createContainerBackend(options = {}) {
     resourceId,
     label,
     limits: policy.limits,
+    ownershipVerified,
   })
 
+  const discoverStageResource = async resource => {
+    const result = await runCommand(commandRunner, resource, boundEngineArgs(
+      resource.engine,
+      resource.endpoint,
+      ['ps', '--all', '--filter', `label=dsh.sentinel.run=${resource.label}`, '--format', '{{.ID}}'],
+    ), {
+      timeout: resource.limits.timeoutMs,
+      outputBytes: Math.min(resource.limits.outputBytes, MAX_RECOVERY_OUTPUT_BYTES),
+    })
+    if (result.kind !== 'success') return null
+    return resourceIdFromOutput(result.stdout)
+  }
+
+  const verifyStageOwnership = async (resource, resourceId) => {
+    const result = await runCommand(commandRunner, resource, boundEngineArgs(
+      resource.engine,
+      resource.endpoint,
+      ['container', 'inspect', '--format', '{{json .Config.Labels}}', resourceId],
+    ), {
+      timeout: resource.limits.timeoutMs,
+      outputBytes: resource.limits.outputBytes,
+    })
+    return result.kind === 'success' && verifiedOwnership(result.stdout, resource.label)
+  }
+
   const cleanupStageResource = async (state, resource) => {
-    const result = await cleanupCreatedResource(resource, resource.resourceId, {
+    let resourceId = resource.resourceId
+    if (resourceId === null) resourceId = await discoverStageResource(resource)
+    if (resourceId === null) {
+      state.pendingResources.set(resource.label, resource)
+      orphanResources.set(resource.label, resource)
+      return fixedCleanupResult(false)
+    }
+
+    let ownershipVerified = resource.ownershipVerified === true
+    if (!ownershipVerified) ownershipVerified = await verifyStageOwnership(resource, resourceId)
+    if (!ownershipVerified) {
+      const retained = stageResourceRecord(
+        resource,
+        resourceId,
+        resource.label,
+        { limits: resource.limits },
+        false,
+      )
+      state.pendingResources.set(resource.label, retained)
+      orphanResources.set(resource.label, retained)
+      return fixedCleanupResult(false)
+    }
+
+    const result = await cleanupCreatedResource(resource, resourceId, {
       limits: resource.limits,
     })
     if (result.complete) {
@@ -532,8 +604,15 @@ export function createContainerBackend(options = {}) {
       labels.delete(resource.label)
       return result
     }
-    state.pendingResources.set(resource.label, resource)
-    orphanResources.set(resource.label, resource)
+    const retained = stageResourceRecord(
+      resource,
+      resourceId,
+      resource.label,
+      { limits: resource.limits },
+      ownershipVerified,
+    )
+    state.pendingResources.set(resource.label, retained)
+    orphanResources.set(resource.label, retained)
     return result
   }
 
@@ -739,6 +818,9 @@ export function createContainerBackend(options = {}) {
 
     const label = createLabel(labels)
     let resourceId = null
+    let resource = null
+    let ownershipVerified = false
+    let submittedAttempt = false
     let failure = null
     state.running = true
     try {
@@ -757,7 +839,12 @@ export function createContainerBackend(options = {}) {
         failure = backendError('container-stage-invalid')
       }
 
+      if (!failure && signal?.aborted) {
+        failure = stageErrorFor('cancelled')
+      }
+
       if (!failure) {
+        submittedAttempt = true
         const created = await runCommand(commandRunner, binding, boundEngineArgs(
           binding.engine,
           binding.endpoint,
@@ -769,11 +856,15 @@ export function createContainerBackend(options = {}) {
         })
         if (created.kind !== 'success') {
           if (created.stdout !== undefined) resourceId = resourceIdFromOutput(created.stdout)
+          resource = stageResourceRecord(binding, resourceId, label, state.policy, false)
           failure = stageErrorFor(created.kind)
         }
         else {
           resourceId = resourceIdFromOutput(created.stdout)
-          if (!resourceId) failure = backendError('container-stage-output-invalid')
+          if (!resourceId) {
+            resource = stageResourceRecord(binding, null, label, state.policy, false)
+            failure = backendError('container-stage-output-invalid')
+          }
         }
       }
 
@@ -789,6 +880,8 @@ export function createContainerBackend(options = {}) {
         })
         if (inspected.kind !== 'success' || !verifiedOwnership(inspected.stdout, label)) {
           failure = backendError('container-stage-ownership-unverified')
+        } else {
+          ownershipVerified = true
         }
       }
 
@@ -833,8 +926,10 @@ export function createContainerBackend(options = {}) {
       failure = backendError('container-stage-failed')
     } finally {
       state.running = false
-      if (resourceId !== null) {
-        const resource = stageResourceRecord(binding, resourceId, label, state.policy)
+      if (submittedAttempt) {
+        if (resource === null) {
+          resource = stageResourceRecord(binding, resourceId, label, state.policy, ownershipVerified)
+        }
         const cleaned = await cleanupStageResource(state, resource)
         if (!cleaned.complete) failure = backendError('container-stage-cleanup-incomplete')
       } else {
