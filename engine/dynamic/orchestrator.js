@@ -3,7 +3,11 @@ import { createCanarySet } from './canaries.js'
 import { DYNAMIC_STAGES, emptyDynamicLayer, normalizeDynamicLayer } from './contracts.js'
 import { evidenceDigest, normalizeDynamicEvidence } from './evidence.js'
 import { DYNAMIC_HARD_LIMITS, normalizeDynamicOptions } from './policy.js'
-import { resolveDynamicBackend } from './backend-resolver.js'
+import {
+  resolveDynamicBackend,
+  stagingFactoryForTrustedImage,
+} from './backend-resolver.js'
+import { createStagingSnapshot } from './staging.js'
 
 export { DYNAMIC_STAGES }
 
@@ -296,7 +300,9 @@ async function availabilityFor(backend, methods, options, signal) {
   return { state: 'available' }
 }
 
-export async function runDynamicAnalysis({ target, options, backend = null, preflight, signal = null } = {}) {
+async function runResolvedDynamicAnalysis({
+  target, options, backend, backendIdentity = 'injected', preflight, signal = null,
+} = {}) {
   const normalizedOptions = normalizeDynamicOptions(options)
   if (!normalizedOptions.requested) return emptyDynamicLayer()
   const gate = evaluateDynamicPreflight(preflight)
@@ -305,10 +311,6 @@ export async function runDynamicAnalysis({ target, options, backend = null, pref
   }
   if (signal?.aborted) {
     return layerFor({ status: 'incomplete', options: normalizedOptions, backend: null, failures: [executionFailure('cancelled')] })
-  }
-  if (!backend) {
-    const capability = resolveDynamicBackend({ backendName: normalizedOptions.backendName })
-    return layerFor({ status: 'unavailable', options: normalizedOptions, backend: null, failures: [{ reason: 'backend-unavailable', code: capability.code }] })
   }
   const methods = resolveBackendMethods(backend)
   if (!methods) {
@@ -328,7 +330,7 @@ export async function runDynamicAnalysis({ target, options, backend = null, pref
     safeTarget = cloneJson(target)
     safeEntrypoints = cloneJson(preflight.entrypoints)
   } catch {
-    return layerFor({ status: 'incomplete', options: normalizedOptions, backend: 'injected', failures: [executionFailure('run-spec-invalid')] })
+    return layerFor({ status: 'incomplete', options: normalizedOptions, backend: backendIdentity, failures: [executionFailure('run-spec-invalid')] })
   }
   const runId = randomUUID()
   const canaries = createCanarySet({ runId })
@@ -430,6 +432,99 @@ export async function runDynamicAnalysis({ target, options, backend = null, pref
   }
   return layerFor({
     status: failures.length > 0 ? 'incomplete' : 'complete', options: normalizedOptions,
-    backend: 'injected', evidence, failures,
+    backend: backendIdentity, evidence, failures,
   })
+}
+
+function unavailableLayer(options, code) {
+  return layerFor({
+    status: 'unavailable',
+    options,
+    backend: null,
+    failures: [{ reason: 'backend-unavailable', code }],
+  })
+}
+
+function incompleteWithFailure(layer, failure) {
+  return normalizeDynamicLayer({
+    ...layer,
+    status: 'incomplete',
+    complete: false,
+    failures: [...(layer.failures ?? []), failure],
+  })
+}
+
+/**
+ * Run dynamic analysis through either the isolated test backend seam or the
+ * production resolver. Production resolution owns staging for every path.
+ */
+export async function runDynamicAnalysis(args = {}) {
+  const normalizedOptions = normalizeDynamicOptions(args.options)
+  if (!normalizedOptions.requested) return emptyDynamicLayer()
+  const gate = evaluateDynamicPreflight(args.preflight)
+  if (!gate.allowed) {
+    return layerFor({
+      status: 'refused',
+      options: normalizedOptions,
+      backend: null,
+      failures: [{ reason: 'preflight-refused', code: gate.code }],
+    })
+  }
+  if (args.signal?.aborted) {
+    return layerFor({
+      status: 'incomplete',
+      options: normalizedOptions,
+      backend: null,
+      failures: [executionFailure('cancelled')],
+    })
+  }
+
+  if (args.backend !== null && args.backend !== undefined) {
+    return runResolvedDynamicAnalysis(args)
+  }
+
+  const configured = resolveDynamicBackend({
+    backendName: normalizedOptions.backendName,
+    trustedImage: args.trustedImage,
+  })
+  if (!configured.available) return unavailableLayer(normalizedOptions, configured.code)
+
+  let staged = null
+  let result
+  try {
+    const stagingFactory = stagingFactoryForTrustedImage(args.trustedImage) ?? createStagingSnapshot
+    staged = await stagingFactory(args.target)
+    if (!staged || typeof staged !== 'object' || !staged.capability || typeof staged.cleanup !== 'function') {
+      result = unavailableLayer(normalizedOptions, 'staging-unavailable')
+    } else {
+      const resolved = resolveDynamicBackend({
+        backendName: normalizedOptions.backendName,
+        trustedImage: args.trustedImage,
+        stagingCapability: staged.capability,
+      })
+      if (!resolved.available || !resolved.backend) {
+        result = unavailableLayer(normalizedOptions, resolved.code ?? 'backend-selection-refused')
+      } else {
+        result = await runResolvedDynamicAnalysis({
+          ...args,
+          backend: resolved.backend,
+          backendIdentity: resolved.backendName,
+        })
+      }
+    }
+  } catch {
+    result = unavailableLayer(normalizedOptions, 'staging-unavailable')
+  }
+
+  if (staged) {
+    try {
+      await staged.cleanup()
+    } catch {
+      result = incompleteWithFailure(result ?? unavailableLayer(normalizedOptions, 'staging-unavailable'), {
+        reason: 'cleanup-uncertain',
+        code: 'staging-cleanup-failed',
+      })
+    }
+  }
+  return result ?? unavailableLayer(normalizedOptions, 'staging-unavailable')
 }

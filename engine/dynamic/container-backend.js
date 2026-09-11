@@ -495,6 +495,7 @@ export function createContainerBackend(options = {}) {
   const limits = optionValue(options, 'limits')
   const injectedCommandRunner = optionValue(options, 'commandRunner')
   const injectedExecFile = optionValue(options, 'execFile')
+  const requireLocalImage = optionValue(options, 'requireLocalImage') === true
   const usesInjectedRunner = typeof injectedCommandRunner === 'function'
   const executablePath = usesInjectedRunner
     ? null
@@ -701,6 +702,19 @@ export function createContainerBackend(options = {}) {
     if (typeof local !== 'string') {
       lastAvailability = fixedAvailability(engine, 'container-probe-invalid')
       return lastAvailability
+    }
+    if (requireLocalImage) {
+      const imageResult = await runCommand(commandRunner, probeBinding, [
+        'image', 'inspect', '--format', '{{.Id}}', image,
+      ], {
+        timeout: CONTAINER_BACKEND_LIMITS.probeTimeoutMs,
+        outputBytes: CONTAINER_BACKEND_LIMITS.probeOutputBytes,
+      })
+      if (imageResult.kind !== 'success' || typeof imageResult.stdout !== 'string'
+        || imageResult.stdout.trim().length === 0) {
+        lastAvailability = fixedAvailability(engine, 'container-image-unavailable')
+        return lastAvailability
+      }
     }
     const verifiedEnvironment = environmentEntries(environment)
     if (verifiedEnvironment === null) {
