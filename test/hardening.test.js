@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { gzipSync } from 'node:zlib'
 import { createServer } from 'node:http'
+import { parse as parseYaml } from 'yaml'
 
 import { FindingBuffer, scanTree, collectFiles } from '../engine/scanner.js'
 import { computeRuntimeEntries } from '../engine/index.js'
@@ -1153,45 +1154,61 @@ test('security and architecture docs declare Phase B ownership and residual Phas
       assert.ok(document.toLowerCase().includes(phrase.toLowerCase()), `document must declare ${phrase}`)
     }
   }
+  for (const document of [security, architecture]) {
+    assert.match(document, /exports map limits package-specifier imports/i)
+    assert.match(document, /implementation files may ship internally/i)
+    assert.match(document, /are not public import paths/i)
+  }
 })
 
-test('dynamic smoke workflow is opt-in, Linux-only, immutable-image, and cannot widen host or network access', () => {
+test('dynamic smoke workflow has a structural opt-in protected Linux gate', () => {
   const root = join(dirname(fileURLToPath(import.meta.url)), '..')
   const workflowPath = join(root, '.github', 'workflows', 'dynamic-smoke.yml')
   assert.ok(existsSync(workflowPath), 'Phase B smoke workflow must exist')
-  const workflow = readFileSync(workflowPath, 'utf8')
+  const workflow = parseYaml(readFileSync(workflowPath, 'utf8'))
+  assert.deepEqual(workflow.on.workflow_dispatch.inputs.enable_dynamic, {
+    description: 'Run the opt-in Phase B Linux smoke gate',
+    required: true,
+    type: 'boolean',
+    default: false,
+  })
 
-  assert.match(workflow, /workflow_dispatch:/)
-  assert.match(workflow, /enable_dynamic:/)
-  assert.match(workflow, /default:\s*false/)
-  assert.match(workflow, /runs-on:\s*ubuntu-latest/)
-  assert.match(workflow, /DSH_SENTINEL_DYNAMIC_IMAGE_DIGEST/)
-  assert.match(workflow, /sha256:/)
-  assert.match(workflow, /--pull=never/)
-  assert.match(workflow, /--network=none/)
-  assert.match(workflow, /--pid=private/)
-  assert.match(workflow, /--ipc=private/)
-  assert.match(workflow, /--read-only/)
-  assert.match(workflow, /--user[= ]/)
-  assert.match(workflow, /--cap-drop[= ]ALL/)
-  assert.match(workflow, /no-new-privileges/)
-  assert.match(workflow, /skip/i)
-  assert.match(workflow, /unavailable/i)
-  assert.match(workflow, /scanner-owned immutable image/i)
+  const job = workflow.jobs?.['phase-b-smoke']
+  assert.ok(job, 'the Phase B smoke job must be present')
+  assert.equal(job.if, '${{ inputs.enable_dynamic == true }}')
+  assert.deepEqual(job['runs-on'], ['self-hosted', 'linux', 'dsh-sentinel-phase-b'])
+  assert.equal(job.environment, 'dynamic-analysis-protected')
+  assert.equal(job['timeout-minutes'], 2)
+  assert.deepEqual(job.env, {
+    DYNAMIC_IMAGE_DIGEST: '${{ secrets.DSH_SENTINEL_DYNAMIC_IMAGE_DIGEST }}',
+  })
+  assert.ok(Array.isArray(job.steps) && job.steps.length >= 2)
+  assert.ok(job.steps.every(step => !Object.hasOwn(step, 'uses')), 'smoke must not use checkout or any action')
+
+  const unavailableStep = job.steps.find(step => /protected scanner-owned immutable image digest is absent/i.test(step.run ?? ''))
+  assert.equal(unavailableStep.if, '${{ env.DYNAMIC_IMAGE_DIGEST == \'\' }}')
+  assert.match(unavailableStep.run, /protected scanner-owned immutable image digest is absent/i)
+
+  const smokeStep = job.steps.find(step => /network-denied smoke/i.test(step.name))
+  assert.equal(smokeStep.if, '${{ env.DYNAMIC_IMAGE_DIGEST != \'\' }}')
+  const script = smokeStep.run
+  assert.match(script, /case\s+"\$engine"\s+in[\s\S]*docker\|podman/i)
+  assert.match(script, /image inspect "\$DYNAMIC_IMAGE_DIGEST"/)
+  assert.match(script, /SKIP: Phase B unavailable; scanner-owned immutable image is not preloaded/i)
+  assert.match(script, /timeout --signal=TERM --kill-after=10s 90s "\$engine" run/)
+  for (const arg of [
+    '--rm', '--pull=never', '--network=none', '--pid=private', '--ipc=private',
+    '--read-only', '--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m',
+    '--user=65532:65532', '--cap-drop=ALL', '--security-opt=no-new-privileges',
+    '--pids-limit=64', '--memory=512m', '--cpus=1',
+    '--entrypoint=/usr/local/bin/dsh-sentinel-harness',
+  ]) assert.ok(script.includes(arg), `runner must keep fixed ${arg}`)
 
   for (const forbidden of [
-    /docker\s+pull/i,
-    /podman\s+pull/i,
-    /docker\s+build/i,
-    /podman\s+build/i,
-    /--network=host/i,
-    /--pid=host/i,
-    /--ipc=host/i,
-    /docker\.sock/i,
-    /podman\.sock/i,
-    /\$\{\{\s*github\.workspace\s*\}\}.*(?:-v|--volume|source=)/is,
-    /host\s+namespace/i,
-  ]) {
-    assert.doesNotMatch(workflow, forbidden, `workflow must not contain ${forbidden}`)
-  }
+    /docker\s+pull/i, /podman\s+pull/i, /docker\s+build/i, /podman\s+build/i,
+    /--network=host/i, /--pid=host/i, /--ipc=host/i, /--privileged/i,
+    /docker\.sock/i, /podman\.sock/i, /DOCKER_HOST/i, /CONTAINER_HOST/i,
+    /github\.workspace/i, /--(?:volume|mount|-v)(?:[ =]|$)/i,
+    /(?:AWS_|GITHUB_TOKEN|SSH_|HOME)=/i, /--(?:env|-e)(?:[ =]|$)/i,
+  ]) assert.doesNotMatch(script, forbidden, `workflow must not contain ${forbidden}`)
 })

@@ -14,48 +14,50 @@ permissions:
 
 jobs:
   phase-b-smoke:
-    runs-on: ubuntu-latest
+    if: ${{ inputs.enable_dynamic == true }}
+    # This protected runner is administered with the exact scanner-owned image
+    # preloaded. No checkout or other action is needed by the smoke command.
+    runs-on: [self-hosted, linux, dsh-sentinel-phase-b]
+    environment: dynamic-analysis-protected
+    timeout-minutes: 2
     env:
-      # Protected environment/secret value. It must name a preloaded,
-      # scanner-owned image by immutable digest; it is never pulled or built.
+      # This secret is scoped to the explicitly enabled protected job. It is
+      # passed only as an image argument and is never echoed.
       DYNAMIC_IMAGE_DIGEST: ${{ secrets.DSH_SENTINEL_DYNAMIC_IMAGE_DIGEST }}
     steps:
-      - name: Check out the scanner sources
-        uses: actions/checkout@v7
-
-      - name: Skip when the gate was not explicitly enabled
-        if: ${{ inputs.enable_dynamic != true }}
-        run: |
-          echo "SKIP: Phase B dynamic smoke is opt-in; enable_dynamic was false."
-
-      - name: Skip when the scanner-owned immutable image is unavailable
-        if: ${{ inputs.enable_dynamic == true && env.DYNAMIC_IMAGE_DIGEST == '' }}
+      - name: Skip when the scanner-owned immutable image digest is absent
+        if: ${{ env.DYNAMIC_IMAGE_DIGEST == '' }}
+        shell: bash
         run: |
           echo "SKIP: Phase B unavailable; protected scanner-owned immutable image digest is absent."
 
       - name: Run the Linux network-denied smoke
-        if: ${{ inputs.enable_dynamic == true && env.DYNAMIC_IMAGE_DIGEST != '' }}
+        if: ${{ env.DYNAMIC_IMAGE_DIGEST != '' }}
         shell: bash
         run: |
           set -euo pipefail
           case "$DYNAMIC_IMAGE_DIGEST" in
-            */*@sha256:[0-9a-fA-F]*) ;;
+            */*@sha256:[0-9a-fA-F]{64}) ;;
             *) echo "FAIL: dynamic image must be a scanner-owned immutable sha256 digest" >&2; exit 1 ;;
           esac
 
+          engine=''
           if command -v docker >/dev/null 2>&1; then
             engine=docker
           elif command -v podman >/dev/null 2>&1; then
             engine=podman
-          else
-            echo "SKIP: Phase B unavailable; no local Docker or Podman executable is installed."
+          fi
+          case "$engine" in
+            docker|podman) ;;
+            *) echo "SKIP: Phase B unavailable; no allowlisted local Docker or Podman executable is installed."; exit 0 ;;
+          esac
+
+          if ! "$engine" image inspect "$DYNAMIC_IMAGE_DIGEST" >/dev/null 2>&1; then
+            echo "SKIP: Phase B unavailable; scanner-owned immutable image is not preloaded on this protected runner."
             exit 0
           fi
 
-          # The image must already exist locally. This command has no pull/build
-          # path and the container has no public or private network access.
-          "$engine" image inspect "$DYNAMIC_IMAGE_DIGEST" >/dev/null
-          "$engine" run --rm \
+          timeout --signal=TERM --kill-after=10s 90s "$engine" run --rm \
             --pull=never \
             --network=none \
             --pid=private \

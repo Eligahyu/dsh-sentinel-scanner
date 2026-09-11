@@ -63,3 +63,49 @@ part of the committed tree.
 No Docker or Podman command was invoked locally. No public network was used by
 the verification commands; the only network-shaped tests were forced into their
 documented offline/unavailable paths.
+
+## Fix round 1/5 — independent release/security review
+
+The review identified three important workflow issues and two minor issues.
+They were verified against the checked-in workflow and documentation before
+implementation:
+
+- removed `actions/checkout` and all `uses:` entries so the opt-in gate has no
+  pre-gate public checkout egress;
+- moved the smoke to the protected administrator-managed self-hosted Linux
+  runner labels `self-hosted`, `linux`, `dsh-sentinel-phase-b` and environment
+  `dynamic-analysis-protected`, with the digest secret scoped to the enabled job;
+- added fixed `timeout-minutes: 2` and a fixed host `timeout ... 90s` around the
+  engine run;
+- added a local `image inspect` branch that skips with an explicit
+  `unavailable` reason when the exact immutable image is not preloaded;
+- bounded engine selection to the literal `docker|podman` allowlist with no
+  remote endpoint input;
+- corrected `SECURITY.md` and `docs/architecture.md` so the package `exports`
+  map limits package-specifier imports while implementation files may ship
+  internally and are not public import paths;
+- replaced the workflow substring test with structural YAML assertions and exact
+  runner-argument/forbidden-input assertions.
+
+TDD RED for the review-fix contracts: the old workflow lacked the structural job
+gate and the corrected export-map wording. TDD GREEN: the focused hardening suite
+passed 69/69 after the fixes.
+
+### Fix-round verification
+
+All commands below were run locally without contacting a Docker/Podman daemon or
+public network. The full suite and `verify:release` used the same temporary
+offline `curl.exe` guard described above; that guard was removed before staging.
+
+| Command | Result |
+| --- | --- |
+| `C:\nvm4w\nodejs\node.exe --test test/hardening.test.js` | exit 0; 69 passed, 0 failed. |
+| `C:\nvm4w\nodejs\npm.cmd test` (offline guard) | exit 0; 407 total, 393 passed, 0 failed, 14 skipped, 0 todo. |
+| `C:\nvm4w\nodejs\npm.cmd run benchmark` | exit 0; rule precision/recall/F1 `0.953/1.000/0.976`, finding `0.917/1.000/0.957`, flow `1.000/1.000/1.000`, hardening-edge F1 `1.000`. |
+| `C:\nvm4w\nodejs\npm.cmd run verify:release` (offline guard) | exit 0; same 407/393/0/14 test result, benchmark, and package dry-run. |
+| `C:\nvm4w\nodejs\npm.cmd pack --dry-run` | exit 0; 54 files, 159.9 kB package size, 520.6 kB unpacked. |
+| `C:\nvm4w\nodejs\npm.cmd audit --offline --ignore-scripts --no-fund` | exit 0; `found 0 vulnerabilities`. |
+| `node bin\sentinel.mjs test\fixtures\clean-plugin --dynamic --json` | exit 0; `dynamicStatus=unavailable`, `dynamicComplete=False`. |
+| YAML parse of `.github/workflows/dynamic-smoke.yml` | exit 0; protected Linux job present. |
+| JavaScript `--check` for CLI, hardening test, resolver, command builder, and policy | exit 0 for all five files. |
+| `git diff --check` | exit 0; only Git LF/CRLF normalization warnings. |

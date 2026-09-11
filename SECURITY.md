@@ -83,11 +83,12 @@ cleanup authority. The package author owns none of those controls. The package
 is only copied into a scanner-owned staging snapshot and is never allowed to
 replace the executable, endpoint, image, mount, or flags.
 
-The package export boundary is part of this trust model: only declared public
-exports are shipped and imported scanner internals are not a package-controlled
-dynamic entrypoint. Static preflight remains the first gate and refuses native
-execution risk, container escape/control signals, hard-limit violations,
-unresolved entrypoints, incomplete core traversal, and unavailable isolation.
+The package export boundary is part of this trust model: the exports map limits package-specifier imports
+to declared public entrypoints. Implementation files may ship internally in the tarball for runtime use,
+but they are not public import paths and are not package-controlled dynamic entrypoints. Static preflight
+remains the first gate and refuses native execution risk, container
+escape/control signals, hard-limit violations, unresolved entrypoints,
+incomplete core traversal, and unavailable isolation.
 
 ## Phase B staging, binding, and evidence contracts
 

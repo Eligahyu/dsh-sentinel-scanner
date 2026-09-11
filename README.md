@@ -160,10 +160,13 @@ these bounded stages did not trigger traffic.
 
 ### Linux prerequisites and Phase B runner boundary
 
-The supported release gate is Linux with a local Docker or rootless Podman
-engine and a preloaded scanner-owned image referenced by a full `sha256` digest.
-The image must already be present: Phase B uses `--pull=never` and performs no
-image build. Engine endpoints and contexts must be local to the scanner host.
+The supported release gate is a protected, administrator-managed Linux
+self-hosted runner labeled `self-hosted`, `linux`, and `dsh-sentinel-phase-b`,
+with a local Docker or rootless Podman engine and a preloaded scanner-owned image
+referenced by a full `sha256` digest. The protected environment is named
+`dynamic-analysis-protected`. The image must already be present: Phase B uses
+`--pull=never` and performs no image build. Engine selection is the fixed
+`docker|podman` allowlist; remote endpoints and contexts are not accepted.
 
 Each allowlisted stage uses a fresh, short-lived runner with the following
 fixed properties:
@@ -202,9 +205,12 @@ observation, Node preload probes, canary correlation, and any explicitly
 allowlisted replay network belong to Phase C and are not implemented or implied
 by a Phase B `complete` result.
 
-The Linux-only CI gate is opt-in and skips with an explicit reason when its
-protected immutable image digest is absent. It never changes the default static
-workflow. See `.github/workflows/dynamic-smoke.yml` for the release contract.
+The Linux-only CI gate is opt-in and runs only on that protected self-hosted
+runner. It skips with an explicit `unavailable` reason when the protected
+immutable image digest is absent or the exact image is not locally preloaded.
+It has fixed two-minute job and 90-second host-command timeouts and never changes
+the default static workflow. See `.github/workflows/dynamic-smoke.yml` for the
+release contract.
 
 The four opt-in controls are:
 

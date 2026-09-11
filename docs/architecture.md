@@ -217,8 +217,10 @@ the scanner release: it owns the local Docker/Podman endpoint binding, fixed
 executable and harness entrypoint, immutable image digest, namespace and
 resource policy, run labels, and cleanup handles. The package cannot replace
 any of those values. This trust ownership also includes the package export boundary:
-only declared public package exports are shipped; scanner internals
-are not caller-controlled runtime entrypoints.
+the exports map limits package-specifier imports to declared public entrypoints.
+Implementation files may ship internally in the tarball for runtime use, but they are not public import paths
+and are not caller-controlled
+dynamic entrypoints.
 
 Static preflight can refuse dynamic execution for high-risk native artifacts,
 container-control or escape signals, hard artifact limits, unresolved runtime

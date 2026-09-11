@@ -37,11 +37,15 @@ Phase B 只接受本地 Docker 或 rootless Podman，以及由扫描器发布、
 
 ## Phase B runner 边界
 
-Linux release gate 要求本地 Docker/Podman、预加载的扫描器可信镜像和受保护的 immutable
-digest。runner 每个阶段都是新的短生命周期容器，并固定使用：
+Linux release gate 只运行在受保护、由管理员维护的 self-hosted runner，标签为
+`self-hosted`、`linux`、`dsh-sentinel-phase-b`，environment 为
+`dynamic-analysis-protected`。它要求本地 Docker/Podman、预加载的扫描器可信镜像和受保护
+的 immutable digest；不接受 remote endpoint/context。runner 每个阶段都是新的短生命周期
+容器，并固定使用：
 
 - `--network=none`，不允许 public 或 private egress；Phase C 的 gateway/probe 不在其中；
-- `--pull=never`，不拉取镜像；不在扫描中 build 镜像；
+- `--pull=never`，不拉取镜像；不在扫描中 build 镜像；如果本地没有 exact image，则明确
+  报告 `unavailable` 并跳过；
 - private PID/IPC namespace、read-only root、read-only staging、non-root 用户、dropped
   capabilities 和 `no-new-privileges`；
 - 有界的 CPU、内存、PID、临时空间、输出和 wall-clock 资源；
@@ -60,7 +64,8 @@ entrypoint、mount 或 namespace 策略。可信镜像由 scanner release 负责
 
 ## Phase C 限定
 
-Phase B 故意只做 network-denied runner。DNS/HTTP/TCP/UDP gateway、Node preload probe、
+Phase B 故意只做 network-denied runner。CI gate 使用固定两分钟 job timeout 和 90 秒 host
+command timeout。DNS/HTTP/TCP/UDP gateway、Node preload probe、
 canary correlation 和任何 allowlisted replay network 都是 Phase C 工作；Phase B 的
 `complete` 不暗示这些能力，也不暗示公共网络访问。
 
