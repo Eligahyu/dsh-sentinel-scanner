@@ -693,11 +693,13 @@ test('command construction rejects host networking, namespaces, sockets, and uns
 
 const CONTAINER_ID_A = 'a'.repeat(64)
 const CONTAINER_ID_B = 'b'.repeat(64)
+const LOCAL_DOCKER_ENDPOINT = 'npipe:////./pipe/docker_engine'
+const LOCAL_PODMAN_ENDPOINT = 'unix:///run/user/1000/podman/podman.sock'
 const LOCAL_DOCKER_CONTEXT = `${JSON.stringify({
-  Name: 'default', Current: true, DockerEndpoint: 'npipe:////./pipe/docker_engine',
+  Name: 'default', Current: true, DockerEndpoint: LOCAL_DOCKER_ENDPOINT,
 })}\n`
 const LOCAL_PODMAN_CONNECTIONS = JSON.stringify([{
-  Name: 'podman-machine-default', URI: 'unix:///run/user/1000/podman/podman.sock', Default: true,
+  Name: 'podman-machine-default', URI: LOCAL_PODMAN_ENDPOINT, Default: true,
 }])
 
 function immutableContainerRunSpec(runId = '123e4567-e89b-12d3-a456-426614174000') {
@@ -731,6 +733,10 @@ function localProbeFor(engine) {
 function generatedRunnerLabel(call) {
   const encoded = call.args.at(call.args.indexOf('--label') + 1)
   return encoded.slice('dsh.sentinel.run='.length)
+}
+
+function endpointPrefix(engine, endpoint) {
+  return engine === 'docker' ? ['--host', endpoint] : ['--url', endpoint]
 }
 
 test('container backend detects a bounded local Docker or Podman context through an argv runner', async () => {
@@ -800,6 +806,48 @@ test('container backend binds a verified local environment before later commands
     assert.equal(call.options.env.DSH_TEST_SAFE, 'retained')
     for (const key of ['DOCKER_HOST', 'CONTAINER_HOST', 'DOCKER_CONTEXT', 'CONTAINER_CONNECTION']) {
       assert.equal(Object.hasOwn(call.options.env, key), false)
+    }
+  }
+})
+
+test('container backend binds the probed local endpoint across create, inspect, and cleanup', async () => {
+  for (const engine of ['docker', 'podman']) {
+    let simulatedDefaultEndpoint = engine === 'docker' ? LOCAL_DOCKER_ENDPOINT : LOCAL_PODMAN_ENDPOINT
+    const environment = {
+      PATH: 'C:\\safe-bin',
+      DOCKER_CONFIG: 'C:\\remote-docker-config',
+      CONTAINERS_CONF: 'C:\\remote-containers.conf',
+      PODMAN_CONNECTIONS_CONF: 'C:\\remote-connections.conf',
+      XDG_CONFIG_HOME: 'C:\\remote-config-home',
+    }
+    const command = createCommandRunner([
+      localProbeFor(engine),
+      { stdout: `${CONTAINER_ID_A}\n`, stderr: '' },
+      ({ calls }) => ({
+        stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(calls[1]) }), stderr: '',
+      }),
+      { stdout: '', stderr: '' },
+    ])
+    const backend = createContainerBackend({
+      engine, image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+      environment,
+    })
+
+    assert.equal((await backend.available()).available, true)
+    simulatedDefaultEndpoint = 'ssh://remote.example'
+    environment.PATH = 'C:\\redirected-bin'
+    const handle = await backend.prepare(immutableContainerRunSpec())
+    await backend.cleanup(handle)
+
+    const endpoint = engine === 'docker' ? LOCAL_DOCKER_ENDPOINT : LOCAL_PODMAN_ENDPOINT
+    for (const call of command.calls.slice(1)) {
+      assert.deepEqual(call.args.slice(0, 2), endpointPrefix(engine, endpoint))
+      assert.equal(call.args.includes(simulatedDefaultEndpoint), false)
+      assert.equal(call.options.env.PATH, 'C:\\safe-bin')
+      assert.equal(Object.hasOwn(call.options.env, 'DOCKER_CONFIG'), false)
+      assert.equal(Object.hasOwn(call.options.env, 'CONTAINERS_CONF'), false)
+      assert.equal(Object.hasOwn(call.options.env, 'PODMAN_CONNECTIONS_CONF'), false)
+      assert.equal(Object.hasOwn(call.options.env, 'XDG_CONFIG_HOME'), false)
     }
   }
 })
@@ -959,7 +1007,7 @@ test('container backend creates uniquely labeled hardened runner handles from im
   assert.equal(Object.isFrozen(first.ownership), true)
   assert.equal(first.ownership.resourceId, CONTAINER_ID_A)
   assert.notEqual(first.ownership.label, second.ownership.label)
-  for (const call of command.calls.filter(call => call.args[0] === 'run')) {
+  for (const call of command.calls.filter(call => call.args.includes('run'))) {
     assert.equal(call.args.includes('--pull=never'), true)
     assert.equal(call.args.includes('--network=none'), true)
     assert.equal(call.args.includes('--pid=private'), true)
@@ -1013,7 +1061,7 @@ test('container backend rejects oversized ownership label maps before registerin
     () => backend.prepare(immutableContainerRunSpec()),
     error => error?.code === 'container-ownership-unverified',
   )
-  assert.deepEqual(command.calls[3].args, ['rm', '--force', CONTAINER_ID_A])
+  assert.deepEqual(command.calls[3].args, ['--host', LOCAL_DOCKER_ENDPOINT, 'rm', '--force', CONTAINER_ID_A])
 })
 
 test('container backend rejects ownership that hostile runner output cannot prove from the generated label', async () => {
@@ -1070,8 +1118,41 @@ test('container backend removes the exact newly created resource when ownership 
     () => backend.prepare(immutableContainerRunSpec()),
     error => error?.code === 'container-ownership-unverified',
   )
-  assert.deepEqual(command.calls[3].args, ['rm', '--force', CONTAINER_ID_A])
+  assert.deepEqual(command.calls[3].args, ['--host', LOCAL_DOCKER_ENDPOINT, 'rm', '--force', CONTAINER_ID_A])
   assert.equal(command.calls.some(call => call.args.includes('dsh-attacker')), false)
+})
+
+test('container backend retains failed rollback reservations at the active-resource ceiling', async () => {
+  let createAttempts = 0
+  let rollbackAttempts = 0
+  const command = createCommandRunner([])
+  command.runner = async (file, args, options) => {
+    command.calls.push({ file, args: [...args], options: { ...options } })
+    if (args.includes('context') || args.includes('connection')) return localProbeFor('docker')
+    if (args.includes('run')) {
+      createAttempts += 1
+      return { stdout: `${String(createAttempts).padStart(64, '0')}\n`, stderr: '' }
+    }
+    if (args.includes('inspect')) return { stdout: '{}', stderr: '' }
+    if (args.includes('rm')) {
+      rollbackAttempts += 1
+      return { stdout: '', stderr: '', exitCode: 1 }
+    }
+    return { stdout: '', stderr: '', exitCode: 1 }
+  }
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+
+  await backend.available()
+  for (let attempt = 0; attempt < CONTAINER_BACKEND_LIMITS.maxActiveResources + 1; attempt += 1) {
+    await assert.rejects(
+      () => backend.prepare(immutableContainerRunSpec()),
+      error => error?.code === 'container-ownership-unverified' || error?.code === 'container-label-generation-failed',
+    )
+  }
+  assert.equal(createAttempts, CONTAINER_BACKEND_LIMITS.maxActiveResources)
+  assert.equal(rollbackAttempts, CONTAINER_BACKEND_LIMITS.maxActiveResources)
 })
 
 test('container backend treats a deeply frozen run spec as structural input, not provenance proof', async () => {
@@ -1185,7 +1266,7 @@ test('container backend cleanup only removes a resource captured by this backend
   assert.equal(command.calls.length, 3)
   assert.deepEqual(await backend.cleanup(handle), { complete: true })
   assert.equal(command.calls.length, 4)
-  assert.deepEqual(command.calls[3].args, ['rm', '--force', CONTAINER_ID_A])
+  assert.deepEqual(command.calls[3].args, ['--host', LOCAL_DOCKER_ENDPOINT, 'rm', '--force', CONTAINER_ID_A])
 })
 
 test('container backend reports a failed owned cleanup with a fixed incomplete result', async () => {
@@ -1205,7 +1286,7 @@ test('container backend reports a failed owned cleanup with a fixed incomplete r
   const handle = await backend.prepare(immutableContainerRunSpec())
 
   assert.deepEqual(await backend.cleanup(handle), { complete: false })
-  assert.deepEqual(command.calls[3].args, ['rm', '--force', CONTAINER_ID_A])
+  assert.deepEqual(command.calls[3].args, ['--host', LOCAL_DOCKER_ENDPOINT, 'rm', '--force', CONTAINER_ID_A])
 })
 
 test('container backend suppresses duplicate cleanup after its owned resource is removed', async () => {
@@ -1227,4 +1308,43 @@ test('container backend suppresses duplicate cleanup after its owned resource is
   assert.deepEqual(await backend.cleanup(handle), { complete: true })
   assert.deepEqual(await backend.cleanup(handle), { complete: true })
   assert.equal(command.calls.length, 4)
+})
+
+test('container backend makes concurrent cleanup single-flight and shares its fixed result', async () => {
+  let releaseCleanup
+  const cleanupGate = new Promise(resolve => { releaseCleanup = resolve })
+  const command = createCommandRunner([
+    localProbeFor('docker'),
+    { stdout: `${CONTAINER_ID_A}\n`, stderr: '' },
+    ({ calls }) => ({
+      stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(calls[1]) }), stderr: '',
+    }),
+  ])
+  command.runner = async (file, args, options) => {
+    command.calls.push({ file, args: [...args], options: { ...options } })
+    if (command.calls.length === 1) return localProbeFor('docker')
+    if (args.includes('run')) return { stdout: `${CONTAINER_ID_A}\n`, stderr: '' }
+    if (args.includes('inspect')) {
+      return { stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(command.calls[1]) }), stderr: '' }
+    }
+    if (args.includes('rm')) {
+      await cleanupGate
+      return { stdout: '', stderr: '' }
+    }
+    return { stdout: '', stderr: '', exitCode: 1 }
+  }
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+  await backend.available()
+  const handle = await backend.prepare(immutableContainerRunSpec())
+
+  const first = backend.cleanup(handle)
+  const second = backend.cleanup(handle)
+  await Promise.resolve()
+  assert.equal(command.calls.filter(call => call.args.includes('rm')).length, 1)
+  releaseCleanup()
+  const results = await Promise.all([first, second])
+  assert.deepEqual(results, [{ complete: true }, { complete: true }])
+  assert.equal(command.calls.filter(call => call.args.includes('rm')).length, 1)
 })

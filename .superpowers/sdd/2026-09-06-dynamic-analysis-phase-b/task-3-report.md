@@ -59,3 +59,24 @@
 - Focused: `node --test test/container-backend.test.js` — 50 tests total; 40 passed, 0 failed, 10 expected skips.
 - Full: `C:\nvm4w\nodejs\npm.cmd test` — 377 tests total; 367 passed, 0 failed, 10 expected skips.
 - `git diff --check` — clean apart from Git's normal Windows line-ending conversion notices.
+
+## Fix round 2 — endpoint binding, rollback reservations, and cleanup single-flight
+
+### Security and correctness fixes
+
+- Retained the validated local Docker/Podman endpoint from the capability probe in immutable backend state. Every later create, inspect, failed-prepare rollback, and normal cleanup command is now explicitly prefixed with `--host <endpoint>` for Docker or `--url <endpoint>` for Podman, so mutable default context/config state cannot redirect the command after availability succeeds.
+- Extended the controlled child environment to remove engine/config selector variables including `DOCKER_HOST`, `CONTAINER_HOST`, `DOCKER_CONTEXT`, `CONTAINER_CONNECTION`, `DOCKER_CONFIG`, `CONTAINERS_CONF`, `CONTAINERS_STORAGE_CONF`, `PODMAN_CONNECTIONS_CONF`, and `XDG_CONFIG_HOME`. The frozen environment snapshot also fixes the `PATH` used by production `execFile` resolution against later caller mutations.
+- Changed failed rollback cleanup to return a fixed `{ complete: boolean }` result. When the exact captured resource cannot be removed, a private orphan record retains its resource ID, generated label, bound endpoint/environment, and limits; the label remains reserved and counts toward the configured 256-resource ceiling. Successful exact cleanup releases the reservation.
+- Made normal cleanup single-flight with a private promise stored before the first await. Concurrent callers share the same fixed result and issue exactly one `rm`; failed cleanup preserves incomplete semantics and permits a later retry, while successful cleanup alone marks the handle cleaned and releases its label.
+
+### Regression coverage and TDD evidence
+
+- Added Docker and Podman regressions that mutate the simulated default endpoint/config after availability and verify the captured local endpoint remains present on create, inspect, and cleanup argv. The tests also verify config-selector removal and protection against mutable `PATH` redirection.
+- Added a rollback-failure stress regression that forces ownership validation failure and `rm` failure repeatedly. It proves exactly 256 create attempts are possible and the 257th attempt is rejected before creating another resource.
+- Added a concurrent cleanup regression that gates the first removal and verifies two callers receive identical fixed results while exactly one `rm` is issued.
+- The first focused run after adding the new regressions was red with 3 failures: missing endpoint prefixing, missing rollback reservation accounting, and duplicate concurrent cleanup. After implementation and existing argv expectation updates, the focused suite was green.
+
+### Verification
+
+- Focused: `node --test test/container-backend.test.js` — 53 tests total; 43 passed, 0 failed, 10 expected skips.
+- Full: `C:\nvm4w\nodejs\npm.cmd test` — 380 tests total; 370 passed, 0 failed, 10 expected skips.

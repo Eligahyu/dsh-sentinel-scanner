@@ -24,6 +24,11 @@ const MAX_OWNERSHIP_LABEL_BYTES = 4096
 const REMOTE_ENGINE_ENVIRONMENT = Object.freeze([
   'DOCKER_HOST', 'CONTAINER_HOST', 'DOCKER_CONTEXT', 'CONTAINER_CONNECTION',
 ])
+const CONFIG_SELECTOR_ENVIRONMENT = Object.freeze([
+  ...REMOTE_ENGINE_ENVIRONMENT,
+  'DOCKER_CONFIG', 'CONTAINERS_CONF', 'CONTAINERS_STORAGE_CONF',
+  'PODMAN_CONNECTIONS_CONF', 'XDG_CONFIG_HOME',
+])
 const DOCKER_CONTEXT_FIELDS = Object.freeze(new Set([
   'Name', 'Description', 'DockerEndpoint', 'KubernetesEndpoint', 'Current', 'StackOrchestrator',
 ]))
@@ -37,6 +42,7 @@ const RUN_SPEC_FIELDS = Object.freeze(new Set([
 export const CONTAINER_BACKEND_LIMITS = Object.freeze({
   probeTimeoutMs: Math.min(5000, CONTAINER_PHASE_B_LIMITS.timeoutMs),
   probeOutputBytes: Math.min(8192, CONTAINER_PHASE_B_LIMITS.outputBytes),
+  maxActiveResources: MAX_ACTIVE_LABELS,
 })
 
 function backendError(code) {
@@ -125,7 +131,7 @@ function localDockerContext(stdout) {
     }
   }
   if (endpoint === null) return null
-  return isLocalEndpoint(endpoint)
+  return isLocalEndpoint(endpoint) ? endpoint : false
 }
 
 function localPodmanContext(stdout) {
@@ -146,7 +152,7 @@ function localPodmanContext(stdout) {
     }
   }
   if (endpoint === null) return null
-  return isLocalEndpoint(endpoint)
+  return isLocalEndpoint(endpoint) ? endpoint : false
 }
 
 function parseLocalContext(engine, stdout) {
@@ -218,7 +224,7 @@ function sanitizedEnvironment(environment) {
   const safe = {}
   try {
     for (const key of Reflect.ownKeys(environment)) {
-      if (typeof key !== 'string' || REMOTE_ENGINE_ENVIRONMENT.includes(key)) continue
+      if (typeof key !== 'string' || CONFIG_SELECTOR_ENVIRONMENT.includes(key)) continue
       const descriptor = Object.getOwnPropertyDescriptor(environment, key)
       if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) return null
       if (typeof descriptor.value !== 'string') return null
@@ -329,6 +335,15 @@ function verifiedOwnership(stdout, label) {
   return jsonValue(labels, 'dsh.sentinel.run') === label
 }
 
+function boundEngineArgs(engine, endpoint, args) {
+  const prefix = engine === 'docker' ? ['--host', endpoint] : ['--url', endpoint]
+  return [...prefix, ...args]
+}
+
+function fixedCleanupResult(complete) {
+  return Object.freeze({ complete })
+}
+
 function createLabel(labels) {
   try {
     if (labels.size >= MAX_ACTIVE_LABELS) throw backendError('container-label-generation-failed')
@@ -367,6 +382,7 @@ export function createContainerBackend(options = {}) {
   const environment = optionValue(options, 'environment') ?? process.env
   const handles = new WeakMap()
   const labels = new Set()
+  const orphanResources = new Map()
   let lastAvailability = null
   let verifiedBinding = null
 
@@ -378,11 +394,34 @@ export function createContainerBackend(options = {}) {
   }
 
   const cleanupCreatedResource = async (binding, resourceId, policy) => {
-    await runCommand(commandRunner, policy.engine, ['rm', '--force', resourceId], {
+    const result = await runCommand(commandRunner, policy.engine, boundEngineArgs(
+      binding.engine,
+      binding.endpoint,
+      ['rm', '--force', resourceId],
+    ), {
       timeout: policy.limits.timeoutMs,
       outputBytes: policy.limits.outputBytes,
       env: binding.env,
     })
+    return fixedCleanupResult(result.kind === 'success')
+  }
+
+  const retainFailedRollback = async (binding, resourceId, label, policy) => {
+    const result = await cleanupCreatedResource(binding, resourceId, policy)
+    if (result.complete) {
+      orphanResources.delete(label)
+      labels.delete(label)
+    } else {
+      orphanResources.set(label, Object.freeze({
+        engine: binding.engine,
+        endpoint: binding.endpoint,
+        env: binding.env,
+        resourceId,
+        label,
+        limits: policy.limits,
+      }))
+    }
+    return result
   }
 
   const available = async () => {
@@ -427,7 +466,7 @@ export function createContainerBackend(options = {}) {
       lastAvailability = fixedAvailability(engine, 'container-remote-context')
       return lastAvailability
     }
-    if (local !== true) {
+    if (typeof local !== 'string') {
       lastAvailability = fixedAvailability(engine, 'container-probe-invalid')
       return lastAvailability
     }
@@ -435,7 +474,7 @@ export function createContainerBackend(options = {}) {
       lastAvailability = fixedAvailability(engine, 'container-remote-context')
       return lastAvailability
     }
-    verifiedBinding = Object.freeze({ engine, env })
+    verifiedBinding = Object.freeze({ engine, endpoint: local, env })
     lastAvailability = availableResult(engine)
     return lastAvailability
   }
@@ -463,7 +502,11 @@ export function createContainerBackend(options = {}) {
       labels.delete(label)
       throw backendError('container-prepare-refused')
     }
-    const created = await runCommand(commandRunner, policy.engine, args, {
+    const created = await runCommand(commandRunner, policy.engine, boundEngineArgs(
+      binding.engine,
+      binding.endpoint,
+      args,
+    ), {
       timeout: policy.limits.timeoutMs,
       outputBytes: policy.limits.outputBytes,
       env: binding.env,
@@ -484,28 +527,35 @@ export function createContainerBackend(options = {}) {
 
     const inspectBinding = bindingForUse()
     if (inspectBinding === null) {
-      await cleanupCreatedResource(binding, resourceId, policy)
-      labels.delete(label)
+      await retainFailedRollback(binding, resourceId, label, policy)
       throw backendError('container-not-available')
     }
 
-    const inspected = await runCommand(commandRunner, policy.engine, [
-      'container', 'inspect', '--format', '{{json .Config.Labels}}', resourceId,
-    ], {
+    const inspected = await runCommand(commandRunner, policy.engine, boundEngineArgs(
+      inspectBinding.engine,
+      inspectBinding.endpoint,
+      ['container', 'inspect', '--format', '{{json .Config.Labels}}', resourceId],
+    ), {
       timeout: policy.limits.timeoutMs,
       outputBytes: policy.limits.outputBytes,
       env: inspectBinding.env,
     })
     if (inspected.kind === 'too-large' || inspected.kind !== 'success' || !verifiedOwnership(inspected.stdout, label)) {
-      await cleanupCreatedResource(binding, resourceId, policy)
-      labels.delete(label)
+      await retainFailedRollback(binding, resourceId, label, policy)
       throw backendError('container-ownership-unverified')
     }
 
     const ownership = Object.freeze({ runId: spec.runId, label, resourceId })
     const handle = Object.freeze({ ownership })
     handles.set(handle, {
-      engine: policy.engine, resourceId, limits: policy.limits, env: binding.env, label, cleaned: false,
+      engine: policy.engine,
+      endpoint: binding.endpoint,
+      resourceId,
+      limits: policy.limits,
+      env: binding.env,
+      label,
+      cleaned: false,
+      cleanupPromise: null,
     })
     return handle
   }
@@ -522,17 +572,30 @@ export function createContainerBackend(options = {}) {
 
   const cleanup = async handle => {
     const state = handles.get(handle)
-    if (!state) return Object.freeze({ complete: false })
-    if (state.cleaned) return Object.freeze({ complete: true })
-    const result = await runCommand(commandRunner, state.engine, ['rm', '--force', state.resourceId], {
-      timeout: state.limits.timeoutMs,
-      outputBytes: state.limits.outputBytes,
-      env: state.env,
+    if (!state) return fixedCleanupResult(false)
+    if (state.cleaned) return fixedCleanupResult(true)
+    if (state.cleanupPromise !== null) return state.cleanupPromise
+
+    state.cleanupPromise = (async () => {
+      const result = await runCommand(commandRunner, state.engine, boundEngineArgs(
+        state.engine,
+        state.endpoint,
+        ['rm', '--force', state.resourceId],
+      ), {
+        timeout: state.limits.timeoutMs,
+        outputBytes: state.limits.outputBytes,
+        env: state.env,
+      })
+      if (result.kind !== 'success') return fixedCleanupResult(false)
+      state.cleaned = true
+      labels.delete(state.label)
+      return fixedCleanupResult(true)
+    })()
+    const result = state.cleanupPromise
+    void result.then(value => {
+      if (!value.complete) state.cleanupPromise = null
     })
-    if (result.kind !== 'success') return Object.freeze({ complete: false })
-    state.cleaned = true
-    labels.delete(state.label)
-    return Object.freeze({ complete: true })
+    return result
   }
 
   return Object.freeze({ available, prepare, runStage, collect, cleanup })
