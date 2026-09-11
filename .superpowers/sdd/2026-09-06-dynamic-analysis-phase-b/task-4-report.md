@@ -163,3 +163,64 @@ git diff --check
 The existing Phase-A injected-only resolver boundary and orchestrator
 quiescence semantics remain unchanged. No Docker or Podman daemon was
 contacted.
+
+## Fix round 2/5 — concurrent stage-finalization cleanup race
+
+### RED
+
+Added gate-based regressions for concurrent cleanup during each stage cleanup
+state:
+
+- strict recovered ID paused during ownership verification, followed by a
+  failed first exact `rm` and a successful retry;
+- no-ID ambiguous label recovery paused during bounded label discovery; and
+- known stage ID paused during exact removal.
+
+The RED command was:
+
+```text
+node --test test/container-backend.test.js --test-name-pattern "does not mark clean|ambiguous stage label recovery|known stage ID awaits"
+```
+
+RED result: `68` tests, `55` passed, `3` failed, `10` skipped, `0`
+cancelled. Each new regression observed the race by receiving
+`{ complete: true }` from concurrent cleanup while stage finalization was
+still blocked.
+
+### GREEN
+
+Stage handles now remain explicitly `finalizingStage` and `running` until
+resource registration, recovery, ownership verification, and exact removal
+have settled. Cleanup treats either state as non-quiescent and returns the
+fixed incomplete result without cleaning the base resource. The final clean
+transition also requires no active stage/finalization, no pending stage
+resources, and successful base cleanup. Failed recovered removal remains in
+the existing pending/orphan reservation and is retried by the next cleanup.
+
+Focused GREEN command:
+
+```text
+node --test test/container-backend.test.js
+```
+
+Result: `68` tests, `58` passed, `0` failed, `10` skipped, `0` cancelled.
+
+Full project verification:
+
+```text
+C:\nvm4w\nodejs\npm.cmd test
+```
+
+Result: `396` tests, `386` passed, `0` failed, `10` skipped, `0` cancelled.
+
+Syntax and whitespace checks also passed:
+
+```text
+node --check engine/dynamic/container-backend.js
+node --check test/container-backend.test.js
+git diff --check
+```
+
+The strict bounded rejected-output recovery, exact ownership checks, orphan
+cap, fixed harness/isolation, Phase-A resolver boundary, and no-daemon
+verification remain unchanged.

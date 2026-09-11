@@ -1801,3 +1801,141 @@ test('container backend makes concurrent cleanup single-flight and shares its fi
   assert.deepEqual(results, [{ complete: true }, { complete: true }])
   assert.equal(command.calls.filter(call => call.args.includes('rm')).length, 1)
 })
+
+test('container backend does not mark clean while recovered stage ownership cleanup is in flight', async () => {
+  let releaseRecovery
+  let recoveryStarted
+  const recoveryGate = new Promise(resolve => { releaseRecovery = resolve })
+  const recoveryStartedGate = new Promise(resolve => { recoveryStarted = resolve })
+  let stageRemovalAttempts = 0
+  const command = createCommandRunner([])
+  command.runner = async (file, args, options) => {
+    command.calls.push({ file, args: [...args], options: { ...options } })
+    if (args.includes('context')) return localProbeFor('docker')
+    if (args.includes('run')) {
+      if (command.calls.filter(call => call.args.includes('run')).length === 1) {
+        return { stdout: `${CONTAINER_ID_A}\n`, stderr: '' }
+      }
+      throw rejectedEngineCommand('ABORT_ERR', `${CONTAINER_ID_B}\n`)
+    }
+    if (args.includes('inspect')) {
+      if (args.includes(CONTAINER_ID_B)) {
+        recoveryStarted()
+        await recoveryGate
+      }
+      const runCall = [...command.calls].reverse().find(call => call.args.includes('run'))
+      return { stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(runCall) }), stderr: '' }
+    }
+    if (args.includes('rm')) {
+      if (args.includes(CONTAINER_ID_B)) {
+        stageRemovalAttempts += 1
+        return stageRemovalAttempts === 1
+          ? { stdout: '', stderr: '', exitCode: 1 }
+          : { stdout: '', stderr: '' }
+      }
+      return { stdout: '', stderr: '' }
+    }
+    return { stdout: '', stderr: '', exitCode: 1 }
+  }
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+  await backend.available()
+  const handle = await backend.prepare(immutableContainerRunSpec())
+  const stage = backend.runStage(handle, Object.freeze({ name: 'load' }))
+  await recoveryStartedGate
+
+  const concurrentCleanup = await backend.cleanup(handle)
+  assert.deepEqual(concurrentCleanup, { complete: false })
+
+  releaseRecovery()
+  await assert.rejects(stage, error => error?.code === 'container-stage-cleanup-incomplete')
+  await assert.rejects(() => backend.collect(handle), error => error?.code === 'container-collection-incomplete')
+  assert.equal(stageRemovalAttempts, 1)
+
+  assert.deepEqual(await backend.cleanup(handle), { complete: true })
+  assert.equal(stageRemovalAttempts, 2)
+  assert.deepEqual(await backend.cleanup(handle), { complete: true })
+})
+
+test('container backend keeps concurrent cleanup incomplete during ambiguous stage label recovery', async () => {
+  let releaseRecovery
+  let recoveryStarted
+  const recoveryGate = new Promise(resolve => { releaseRecovery = resolve })
+  const recoveryStartedGate = new Promise(resolve => { recoveryStarted = resolve })
+  const command = createCommandRunner([])
+  command.runner = async (file, args, options) => {
+    command.calls.push({ file, args: [...args], options: { ...options } })
+    if (args.includes('context')) return localProbeFor('docker')
+    if (args.includes('run')) {
+      if (command.calls.filter(call => call.args.includes('run')).length === 1) {
+        return { stdout: `${CONTAINER_ID_A}\n`, stderr: '' }
+      }
+      throw rejectedEngineCommand('ETIMEDOUT')
+    }
+    if (args.includes('inspect')) {
+      const runCall = [...command.calls].reverse().find(call => call.args.includes('run'))
+      return { stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(runCall) }), stderr: '' }
+    }
+    if (args.includes('ps')) {
+      recoveryStarted()
+      await recoveryGate
+      return { stdout: '', stderr: '' }
+    }
+    if (args.includes('rm')) return { stdout: '', stderr: '' }
+    return { stdout: '', stderr: '', exitCode: 1 }
+  }
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+  await backend.available()
+  const handle = await backend.prepare(immutableContainerRunSpec())
+  const stage = backend.runStage(handle, Object.freeze({ name: 'load' }))
+  await recoveryStartedGate
+
+  assert.deepEqual(await backend.cleanup(handle), { complete: false })
+  releaseRecovery()
+  await assert.rejects(stage, error => error?.code === 'container-stage-cleanup-incomplete')
+  assert.deepEqual(await backend.cleanup(handle), { complete: false })
+})
+
+test('container backend keeps concurrent cleanup incomplete while a known stage ID awaits exact removal', async () => {
+  let releaseRemoval
+  let removalStarted
+  const removalGate = new Promise(resolve => { releaseRemoval = resolve })
+  const removalStartedGate = new Promise(resolve => { removalStarted = resolve })
+  const command = createCommandRunner([])
+  command.runner = async (file, args, options) => {
+    command.calls.push({ file, args: [...args], options: { ...options } })
+    if (args.includes('context')) return localProbeFor('docker')
+    if (args.includes('run')) {
+      const runCount = command.calls.filter(call => call.args.includes('run')).length
+      return { stdout: `${runCount === 1 ? CONTAINER_ID_A : CONTAINER_ID_B}\n`, stderr: '' }
+    }
+    if (args.includes('inspect')) {
+      const runCall = [...command.calls].reverse().find(call => call.args.includes('run'))
+      return { stdout: JSON.stringify({ 'dsh.sentinel.run': generatedRunnerLabel(runCall) }), stderr: '' }
+    }
+    if (args.includes('wait')) return { stdout: '1\n', stderr: '' }
+    if (args.includes('rm')) {
+      if (args.includes(CONTAINER_ID_B)) {
+        removalStarted()
+        await removalGate
+      }
+      return { stdout: '', stderr: '' }
+    }
+    return { stdout: '', stderr: '', exitCode: 1 }
+  }
+  const backend = createContainerBackend({
+    engine: 'docker', image: IMAGE, stagingCapability: STAGING_CAPABILITY, commandRunner: command.runner,
+  })
+  await backend.available()
+  const handle = await backend.prepare(immutableContainerRunSpec())
+  const stage = backend.runStage(handle, Object.freeze({ name: 'load' }))
+  await removalStartedGate
+
+  assert.deepEqual(await backend.cleanup(handle), { complete: false })
+  releaseRemoval()
+  await assert.rejects(stage, error => error?.code === 'container-stage-nonzero')
+  assert.deepEqual(await backend.cleanup(handle), { complete: true })
+})

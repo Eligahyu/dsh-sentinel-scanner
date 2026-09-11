@@ -799,6 +799,7 @@ export function createContainerBackend(options = {}) {
       completedStages: new Set(),
       pendingResources: new Map(),
       running: false,
+      finalizingStage: false,
       baseCleaned: false,
       cleaned: false,
       cleanupPromise: null,
@@ -823,6 +824,7 @@ export function createContainerBackend(options = {}) {
     let submittedAttempt = false
     let failure = null
     state.running = true
+    state.finalizingStage = true
     try {
       let args
       try {
@@ -925,15 +927,19 @@ export function createContainerBackend(options = {}) {
     } catch {
       failure = backendError('container-stage-failed')
     } finally {
-      state.running = false
-      if (submittedAttempt) {
-        if (resource === null) {
-          resource = stageResourceRecord(binding, resourceId, label, state.policy, ownershipVerified)
+      try {
+        if (submittedAttempt) {
+          if (resource === null) {
+            resource = stageResourceRecord(binding, resourceId, label, state.policy, ownershipVerified)
+          }
+          const cleaned = await cleanupStageResource(state, resource)
+          if (!cleaned.complete) failure = backendError('container-stage-cleanup-incomplete')
+        } else {
+          labels.delete(label)
         }
-        const cleaned = await cleanupStageResource(state, resource)
-        if (!cleaned.complete) failure = backendError('container-stage-cleanup-incomplete')
-      } else {
-        labels.delete(label)
+      } finally {
+        state.finalizingStage = false
+        state.running = false
       }
     }
     if (failure) throw failure
@@ -975,7 +981,7 @@ export function createContainerBackend(options = {}) {
     if (state.cleanupPromise !== null) return state.cleanupPromise
 
     state.cleanupPromise = (async () => {
-      if (state.running) return fixedCleanupResult(false)
+      if (state.running || state.finalizingStage) return fixedCleanupResult(false)
       let complete = true
       for (const resource of [...state.pendingResources.values()]) {
         const result = await cleanupStageResource(state, resource)
@@ -994,6 +1000,9 @@ export function createContainerBackend(options = {}) {
         }
       }
       if (!complete) return fixedCleanupResult(false)
+      if (state.running || state.finalizingStage || state.pendingResources.size > 0 || !state.baseCleaned) {
+        return fixedCleanupResult(false)
+      }
       state.cleaned = true
       return fixedCleanupResult(true)
     })()
