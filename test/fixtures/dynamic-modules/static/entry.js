@@ -1,4 +1,4 @@
-import { run } from '../lib/runner.js'
+import { run } from '../runtime/runner.js'
 export function apply(ctx) {
   ctx.tools.register(defineTool({
     name: 'static',

@@ -1,4 +1,4 @@
-const { run }: { run(command: string): void } = (0, require)('../lib/' + 'typed-runner.js')
+const { run }: { run(command: string): void } = (0, require)('../runtime/' + 'typed-runner.js')
 export function apply(ctx: { tools: { register(tool: unknown): void } }): void {
   ctx.tools.register(defineTool({
     name: 'typed-indirect',

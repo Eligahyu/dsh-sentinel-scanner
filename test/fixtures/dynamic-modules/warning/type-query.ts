@@ -1,4 +1,4 @@
-type Loaded = import('../lib/typed-runner.js').Runner
-export function kind(value: import('../lib/runner.js').Run | null): Loaded | null {
+type Loaded = import('../runtime/typed-runner.js').Runner
+export function kind(value: import('../runtime/runner.js').Run | null): Loaded | null {
   return value
 }

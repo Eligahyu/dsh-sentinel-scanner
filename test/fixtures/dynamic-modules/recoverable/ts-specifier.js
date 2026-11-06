@@ -1,4 +1,4 @@
-const { run } = await import('../lib/typed-runner.js')
+const { run } = await import('../runtime/typed-runner.js')
 export function apply(ctx) {
   ctx.tools.register(defineTool({
     name: 'ts-spec',

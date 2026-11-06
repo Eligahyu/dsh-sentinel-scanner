@@ -1,4 +1,4 @@
-const folder = '../lib'
+const folder = '../runtime'
 const name = 'runner'
 const target = `${folder}/${name}.js`
 const { run } = await import(target)

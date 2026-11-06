@@ -160,15 +160,15 @@ const dynamicRoot = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'd
 
 test('cross-file taint follows recovered dynamic import and require edges', () => {
   const cases = [
-    ['recoverable/entry.js', 'lib/runner.js'],
-    ['recoverable/require.cjs', 'lib/runner.js'],
-    ['recoverable/const-fold.js', 'lib/runner.js'],
-    ['recoverable/indirect.cjs', 'lib/runner.js'],
-    ['recoverable/ts-specifier.js', 'lib/typed-runner.ts'],
-    ['typed/entry.ts', 'lib/typed-runner.ts'],
-    ['typed/indirect.cts', 'lib/typed-runner.ts'],
-    ['static/entry.js', 'lib/runner.js'],
-    ['static/commonjs.cjs', 'lib/runner.js'],
+    ['recoverable/entry.js', 'runtime/runner.js'],
+    ['recoverable/require.cjs', 'runtime/runner.js'],
+    ['recoverable/const-fold.js', 'runtime/runner.js'],
+    ['recoverable/indirect.cjs', 'runtime/runner.js'],
+    ['recoverable/ts-specifier.js', 'runtime/typed-runner.ts'],
+    ['typed/entry.ts', 'runtime/typed-runner.ts'],
+    ['typed/indirect.cts', 'runtime/typed-runner.ts'],
+    ['static/entry.js', 'runtime/runner.js'],
+    ['static/commonjs.cjs', 'runtime/runner.js'],
   ]
   for (const [file, target] of cases) {
     const graph = buildModuleGraph(dynamicRoot, [file])
@@ -210,11 +210,11 @@ test('scan report keeps recovered dynamic reachability distinct from warnings', 
   assert.equal(report.summary.scanComplete, true)
   assert.equal(report.analysisLayers.moduleGraph.crossFile.complete, true)
   assert.ok(report.attackChains.some((chain) => chain.modulePath[0] === 'recoverable/entry.js'
-    && chain.modulePath[1] === 'lib/runner.js'))
+    && chain.modulePath[1] === 'runtime/runner.js'))
   assert.ok(report.attackChains.some((chain) => chain.modulePath[0] === 'static/entry.js'
-    && chain.modulePath[1] === 'lib/runner.js'))
+    && chain.modulePath[1] === 'runtime/runner.js'))
   assert.ok(report.attackChains.some((chain) => chain.modulePath[0] === 'typed/indirect.cts'
-    && chain.modulePath[1] === 'lib/typed-runner.ts'))
+    && chain.modulePath[1] === 'runtime/typed-runner.ts'))
   assert.equal(report.attackChains.some((chain) => String(chain.modulePath[0]).startsWith('warning/')), false)
   assert.ok(report.coverageSkips.some((skip) => skip.reason === 'dynamic-module-specifier'
     && skip.path === 'warning/partial.js'))

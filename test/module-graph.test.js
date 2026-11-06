@@ -296,19 +296,19 @@ test('recoverable dynamic import, require, and require.resolve become edges', ()
   assert.equal(graph.failures.length, 0)
   assert.equal(edgesFrom(graph, 'recoverable/entry.js').length, 3)
   assert.ok(edgesFrom(graph, 'recoverable/entry.js').every((edge) => edge.kind === 'static-import'
-    && edge.specifier === '../lib/runner.js'
-    && edge.to === 'lib/runner.js'))
+    && edge.specifier === '../runtime/runner.js'
+    && edge.to === 'runtime/runner.js'))
   assert.ok(edgesFrom(graph, 'recoverable/require.cjs').some((edge) => edge.kind === 'static-require'
-    && edge.specifier === '../lib/runner.js'
-    && edge.to === 'lib/runner.js'
+    && edge.specifier === '../runtime/runner.js'
+    && edge.to === 'runtime/runner.js'
     && edge.bindings.some((binding) => binding.local === 'run')))
-  assert.ok(edgesFrom(graph, 'recoverable/const-fold.js').some((edge) => edge.specifier === '../lib/runner.js'
+  assert.ok(edgesFrom(graph, 'recoverable/const-fold.js').some((edge) => edge.specifier === '../runtime/runner.js'
     && edge.bindings.some((binding) => binding.imported === 'run' && binding.local === 'run')))
   assert.ok(edgesFrom(graph, 'recoverable/indirect.cjs').some((edge) => edge.kind === 'static-require'
-    && edge.to === 'lib/runner.js'))
+    && edge.to === 'runtime/runner.js'))
   assert.equal(edgesFrom(graph, 'recoverable/resolve.cjs').length, 2)
   assert.ok(edgesFrom(graph, 'recoverable/resolve.cjs').every((edge) => edge.kind === 'static-require-resolve'
-    && edge.to === 'lib/runner.js'
+    && edge.to === 'runtime/runner.js'
     && edge.bindings.length === 0))
   assert.equal(graph.warnings.some((warning) => warning.reason === 'dynamic-module-specifier'
     && warning.path.startsWith('recoverable/')), false)
@@ -323,16 +323,16 @@ test('dynamic .js specifiers fall back to TypeScript sources', () => {
 
   assert.equal(graph.complete, true)
   assert.equal(graph.failures.length, 0)
-  assert.ok(edgesFrom(graph, 'recoverable/ts-specifier.js').some((edge) => edge.specifier === '../lib/typed-runner.js'
-    && edge.to === 'lib/typed-runner.ts'))
+  assert.ok(edgesFrom(graph, 'recoverable/ts-specifier.js').some((edge) => edge.specifier === '../runtime/typed-runner.js'
+    && edge.to === 'runtime/typed-runner.ts'))
   assert.ok(graph.nodes.some((node) => node.path === 'typed/entry.ts'
     && node.parser === 'unparsed'
-    && node.imports.includes('../lib/typed-runner.js')))
-  assert.ok(edgesFrom(graph, 'typed/entry.ts').some((edge) => edge.to === 'lib/typed-runner.ts'
+    && node.imports.includes('../runtime/typed-runner.js')))
+  assert.ok(edgesFrom(graph, 'typed/entry.ts').some((edge) => edge.to === 'runtime/typed-runner.ts'
     && edge.bindings.some((binding) => binding.local === 'run')))
   assert.ok(edgesFrom(graph, 'typed/indirect.cts').some((edge) => edge.kind === 'static-require'
-    && edge.specifier === '../lib/typed-runner.js'
-    && edge.to === 'lib/typed-runner.ts'))
+    && edge.specifier === '../runtime/typed-runner.js'
+    && edge.to === 'runtime/typed-runner.ts'))
 })
 
 test('static import and require edges still resolve beside dynamic calls', () => {
@@ -341,11 +341,11 @@ test('static import and require edges still resolve beside dynamic calls', () =>
   assert.equal(graph.complete, true)
   assert.equal(graph.failures.length, 0)
   assert.ok(edgesFrom(graph, 'static/entry.js').some((edge) => edge.kind === 'static-import'
-    && edge.specifier === '../lib/runner.js'
-    && edge.to === 'lib/runner.js'))
+    && edge.specifier === '../runtime/runner.js'
+    && edge.to === 'runtime/runner.js'))
   assert.ok(edgesFrom(graph, 'static/commonjs.cjs').some((edge) => edge.kind === 'static-require'
-    && edge.specifier === '../lib/runner.js'
-    && edge.to === 'lib/runner.js'))
+    && edge.specifier === '../runtime/runner.js'
+    && edge.to === 'runtime/runner.js'))
   assert.equal(graph.warnings.some((warning) => warning.reason === 'dynamic-module-specifier'), false)
 })
 

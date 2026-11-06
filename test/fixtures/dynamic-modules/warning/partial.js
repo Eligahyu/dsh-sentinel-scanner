@@ -1,7 +1,7 @@
 export async function load(name) {
   return [
-    import('../lib/' + name + '.js'),
-    require('../lib/' + name),
-    require.resolve(`../lib/${name}.js`),
+    import('../runtime/' + name + '.js'),
+    require('../runtime/' + name),
+    require.resolve(`../runtime/${name}.js`),
   ]
 }

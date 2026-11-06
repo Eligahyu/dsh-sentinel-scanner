@@ -1,3 +1,3 @@
-let target = '../lib/runner.js'
-target = '../lib/other.js'
+let target = '../runtime/runner.js'
+target = '../runtime/other.js'
 export const loaded = import(target)

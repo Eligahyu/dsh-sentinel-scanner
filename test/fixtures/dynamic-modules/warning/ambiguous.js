@@ -1,5 +1,5 @@
 function one() {
-  const target = '../lib/runner.js'
+  const target = '../runtime/runner.js'
   return import(target)
 }
 function two(target) {
