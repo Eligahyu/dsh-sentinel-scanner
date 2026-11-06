@@ -303,6 +303,7 @@ export async function scan(target, opts = {}) {
     coverageSkips = [
       ...(tree.coverageSkips ?? []),
       ...moduleGraphCoverageSkips(tree.moduleGraph),
+      ...(crossFile.coverageSkips ?? []),
       ...crossFile.failures,
     ]
     // 模块图失败(JS 跨文件分析不完整)参与 scanComplete;

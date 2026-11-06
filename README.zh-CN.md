@@ -9,6 +9,20 @@ dsh-sentinel 是 DeepSeek Harness（DSH）插件的只读安全、供应链和�
 npm 发布包、DSH profile 和 CI 进行静态审计，输出风险分、裁决、可审阅证据和覆盖率信息。
 静态扫描不会 `require`、`import`、`eval` 或执行被扫描的插件代码。
 
+## 跨文件语义 reachability（v0.5）
+
+在原有静态 import/require 与可还原动态 import 边之上，跨文件污点分析新增有界 reachability：
+
+- 已建模的 source 形态 API 回调，例如 `readFile(path, (err, data) => ...)` 中的 `data`；
+- 数组/元素已带污点时的 `forEach` / `map` 等迭代回调；
+- 同一调用方先调用导出的 setter、再调用读取模块级绑定的导出 getter（闭包捕获）；
+- 接收者和属性静态可知的对象/类/原型方法，例如 `runner.run(...)`、`new Runner().run(...)`。
+
+边界仍然保守：未知调用绝不视为纯 passthrough（可能 sanitize 或重写路径）；不做完整控制流、
+异步交错、`Proxy` / `eval` / `Function` 构造函数、动态属性或任意原型改写。无法证明的回调或
+方法只会产生 `cross-file-*` coverageSkips，不会猜测模块边，也不会单独把扫描判为不完整。
+英文 [README](README.md) 与 [架构文档](docs/architecture.md) 有完整说明。
+
 ## Phase B 动态分析：显式选择、网络隔离
 
 动态分析不是默认行为。只有明确传入 `--dynamic` 才会在静态结果之后请求独立的动态层；没有

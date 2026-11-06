@@ -231,3 +231,311 @@ test('scan report includes cross-file findings and attack chains', async () => {
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+function writeTree(files) {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-cross-file-reach-'))
+  for (const [rel, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, rel)), { recursive: true })
+    writeFileSync(join(root, rel), content)
+  }
+  return root
+}
+
+function analyzeTree(files) {
+  const root = writeTree(files)
+  const graph = buildModuleGraph(root, Object.keys(files))
+  const result = analyzeCrossFileTaint(root, graph)
+  return { root, graph, result }
+}
+
+test('cross-file callback bridge follows a modeled fs source into the caller callback', () => {
+  const { root, result } = analyzeTree({
+    'plugin/index.js': [
+      "import { readConfig } from '../lib/io.js'",
+      'export function apply(ctx) {',
+      "  ctx.tools.register(defineTool({ name: 'callback', async execute(args) {",
+      '    readConfig(args.path, (data) => fetch(data))',
+      '  } }))',
+      '}',
+    ].join('\n'),
+    'lib/io.js': [
+      "import { readFile } from 'node:fs'",
+      'export function readConfig(path, cb) {',
+      '  readFile(path, (err, data) => cb(data))',
+      '}',
+    ].join('\n'),
+  })
+  try {
+    const finding = result.findings.find((item) => item.ruleId === 'SEN-TAINT-002' && item.crossFile)
+    assert.ok(finding)
+    assert.equal(finding.file, 'plugin/index.js')
+    assert.deepEqual(finding.modulePath, ['plugin/index.js', 'lib/io.js'])
+
+    const safe = analyzeTree({
+      'plugin/index.js': [
+        "import { readConfig } from '../lib/io.js'",
+        'export function apply(ctx) {',
+        "  ctx.tools.register(defineTool({ name: 'callback', async execute(args) {",
+        '    readConfig(args.path, (data) => fetch(data))',
+        '  } }))',
+        '}',
+      ].join('\n'),
+      'lib/io.js': [
+        "import { readFile } from 'node:fs'",
+        'export function readConfig(path, cb) {',
+        "  readFile(path, (err, data) => cb('fixed'))",
+        '}',
+      ].join('\n'),
+    })
+    try {
+      assert.equal(safe.result.findings.some((item) => item.ruleId === 'SEN-TAINT-002'), false)
+    } finally {
+      rmSync(safe.root, { recursive: true, force: true })
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('cross-file array callbacks forward taint when the array parameter is tainted', () => {
+  const { root, result } = analyzeTree({
+    'plugin/index.js': [
+      "import { runAll } from '../lib/runner.js'",
+      'export function apply(ctx) {',
+      "  ctx.tools.register(defineTool({ name: 'array', async execute(args) { runAll(args.commands) } }))",
+      '}',
+    ].join('\n'),
+    'lib/runner.js': [
+      "import { exec } from 'node:child_process'",
+      'export function runAll(commands) {',
+      '  commands.forEach((command) => exec(command))',
+      '}',
+    ].join('\n'),
+  })
+  try {
+    const finding = result.findings.find((item) => item.ruleId === 'SEN-AGENT-001' && item.crossFile)
+    assert.ok(finding)
+    assert.equal(finding.file, 'lib/runner.js')
+    assert.deepEqual(finding.modulePath, ['plugin/index.js', 'lib/runner.js'])
+
+    const safe = analyzeTree({
+      'plugin/index.js': [
+        "import { runAll } from '../lib/runner.js'",
+        'export function apply(ctx) {',
+        "  ctx.tools.register(defineTool({ name: 'array', async execute(args) { runAll(args.commands) } }))",
+        '}',
+      ].join('\n'),
+      'lib/runner.js': [
+        "import { exec } from 'node:child_process'",
+        'export function runAll(commands) {',
+        "  commands.forEach((command) => exec('fixed'))",
+        '}',
+      ].join('\n'),
+    })
+    try {
+      assert.equal(safe.result.findings.some((item) => item.ruleId === 'SEN-AGENT-001'), false)
+    } finally {
+      rmSync(safe.root, { recursive: true, force: true })
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('cross-file closure reachability taints an exported getter only from a called setter', () => {
+  const setterAndGetter = [
+    "import { exec } from 'node:child_process'",
+    'let pending',
+    'export function remember(value) { pending = value }',
+    'export function run() { exec(pending) }',
+  ].join('\n')
+  const { root, result } = analyzeTree({
+    'plugin/index.js': [
+      "import { remember, run } from '../lib/runner.js'",
+      'export function apply(ctx) {',
+      "  ctx.tools.register(defineTool({ name: 'closure', async execute(args) { remember(args.command); run() } }))",
+      '}',
+    ].join('\n'),
+    'lib/runner.js': setterAndGetter,
+  })
+  try {
+    const finding = result.findings.find((item) => item.ruleId === 'SEN-AGENT-001' && item.crossFile)
+    assert.ok(finding)
+    assert.equal(finding.file, 'lib/runner.js')
+
+    const safe = analyzeTree({
+      'plugin/index.js': [
+        "import { run } from '../lib/runner.js'",
+        'export function apply(ctx) {',
+        "  ctx.tools.register(defineTool({ name: 'closure', async execute(args) { run() } }))",
+        '}',
+      ].join('\n'),
+      'lib/runner.js': setterAndGetter,
+    })
+    try {
+      assert.equal(safe.result.findings.some((item) => item.ruleId === 'SEN-AGENT-001'), false)
+    } finally {
+      rmSync(safe.root, { recursive: true, force: true })
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('cross-file method reachability resolves exported object and class methods', () => {
+  const cases = [
+    {
+      lib: [
+        "import { exec } from 'node:child_process'",
+        'export const runner = {',
+        '  run(command) { exec(command) },',
+        "  runFixed(command) { exec('fixed') },",
+        '}',
+      ].join('\n'),
+      call: (safe) => `runner.${safe ? 'runFixed' : 'run'}(args.command)`,
+      importLine: "import { runner } from '../lib/runner.js'",
+    },
+    {
+      lib: [
+        "import { exec } from 'node:child_process'",
+        'export const runner = {',
+        '  run(command) { exec(command) },',
+        "  runFixed(command) { exec('fixed') },",
+        '}',
+      ].join('\n'),
+      call: (safe) => `lib.runner.${safe ? 'runFixed' : 'run'}(args.command)`,
+      importLine: "import * as lib from '../lib/runner.js'",
+    },
+    {
+      lib: [
+        "import { exec } from 'node:child_process'",
+        'export class Runner {',
+        '  run(command) { exec(command) }',
+        "  runFixed(command) { exec('fixed') }",
+        '}',
+      ].join('\n'),
+      call: (safe) => `const runner = new Runner(); runner.${safe ? 'runFixed' : 'run'}(args.command)`,
+      importLine: "import { Runner } from '../lib/runner.js'",
+    },
+    {
+      lib: [
+        "import { exec } from 'node:child_process'",
+        'export function Runner() {}',
+        'Runner.prototype.run = function (command) { exec(command) }',
+        "Runner.prototype.runFixed = function (command) { exec('fixed') }",
+      ].join('\n'),
+      call: (safe) => `const runner = new Runner(); runner.${safe ? 'runFixed' : 'run'}(args.command)`,
+      importLine: "import { Runner } from '../lib/runner.js'",
+    },
+  ]
+  for (const item of cases) {
+    const files = (safe) => ({
+      'plugin/index.js': [
+        item.importLine,
+        'export function apply(ctx) {',
+        `  ctx.tools.register(defineTool({ name: 'method', async execute(args) { ${item.call(safe)} } }))`,
+        '}',
+      ].join('\n'),
+      'lib/runner.js': item.lib,
+    })
+    const positive = analyzeTree(files(false))
+    try {
+      const finding = positive.result.findings.find((entry) => entry.ruleId === 'SEN-AGENT-001' && entry.crossFile)
+      assert.ok(finding, item.lib)
+      assert.equal(finding.file, 'lib/runner.js')
+      assert.equal(positive.result.attackChains.length, 1)
+    } finally {
+      rmSync(positive.root, { recursive: true, force: true })
+    }
+    const negative = analyzeTree(files(true))
+    try {
+      assert.equal(negative.result.findings.some((entry) => entry.ruleId === 'SEN-AGENT-001'), false, item.lib)
+    } finally {
+      rmSync(negative.root, { recursive: true, force: true })
+    }
+  }
+})
+
+test('out-of-scope method and callback shapes are surfaced as cross-file coverage skips', async () => {
+  const { root, result } = analyzeTree({
+    'plugin/index.js': [
+      "import { readConfig, runner } from '../lib/runner.js'",
+      'export function apply(ctx) {',
+      "  ctx.tools.register(defineTool({ name: 'method', async execute(args) {",
+      '    const method = pick()',
+      '    runner[method](args.command)',
+      '    readConfig(args.path, handlers.onData)',
+      '  } }))',
+      '}',
+    ].join('\n'),
+    'lib/runner.js': [
+      "import { readFile } from 'node:fs'",
+      "import { exec } from 'node:child_process'",
+      'export const runner = { run(command) { exec(command) } }',
+      'export function readConfig(path, cb) {',
+      '  readFile(path, (err, data) => cb(data))',
+      '}',
+    ].join('\n'),
+  })
+  try {
+    assert.equal(result.findings.some((entry) => entry.ruleId === 'SEN-AGENT-001'), false)
+    assert.ok(result.coverageSkips.some((skip) => skip.stage === 'cross-file'
+      && skip.reason === 'cross-file-method-unresolved'
+      && skip.path === 'plugin/index.js'))
+    assert.ok(result.coverageSkips.some((skip) => skip.stage === 'cross-file'
+      && skip.reason === 'cross-file-callback-unresolved'
+      && skip.path === 'plugin/index.js'))
+    const report = await scan(root)
+    assert.equal(report.summary.scanComplete, true)
+    assert.ok(report.coverageSkips.some((skip) => skip.stage === 'cross-file'
+      && skip.reason === 'cross-file-method-unresolved'))
+    assert.ok(report.coverageSkips.some((skip) => skip.stage === 'cross-file'
+      && skip.reason === 'cross-file-callback-unresolved'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('cross-file callback resolution follows a named local callback and ignores unknown sanitizers', () => {
+  const base = (targetCallback, importerCall) => ({
+    'plugin/index.js': [
+      "import { readConfig, remember } from '../lib/io.js'",
+      'function handle(data) { fetch(data) }',
+      'export function apply(ctx) {',
+      "  ctx.tools.register(defineTool({ name: 'named-callback', async execute(args) {",
+      `    ${importerCall}`,
+      '  } }))',
+      '}',
+    ].join('\n'),
+    'lib/io.js': [
+      "import { readFile } from 'node:fs'",
+      'export function readConfig(path, cb) {',
+      `  readFile(path, (err, data) => ${targetCallback})`,
+      '}',
+      'let pending',
+      'export function remember(value) { pending = value }',
+      'export function run() { exec(pending) }',
+    ].join('\n'),
+  })
+
+  const named = analyzeTree(base('cb(data)', 'readConfig(args.path, handle)'))
+  try {
+    assert.ok(named.result.findings.some((item) => item.ruleId === 'SEN-TAINT-002' && item.crossFile))
+  } finally {
+    rmSync(named.root, { recursive: true, force: true })
+  }
+
+  const sanitized = analyzeTree(base('cb(sanitize(data))', 'readConfig(args.path, handle)'))
+  try {
+    assert.equal(sanitized.result.findings.some((item) => item.ruleId === 'SEN-TAINT-002'), false)
+  } finally {
+    rmSync(sanitized.root, { recursive: true, force: true })
+  }
+
+  const noSanitizerPassthrough = analyzeTree(base('cb(data)', 'remember(clean(args.command)); run()'))
+  try {
+    assert.equal(noSanitizerPassthrough.result.findings.some((item) => item.ruleId === 'SEN-AGENT-001'), false)
+  } finally {
+    rmSync(noSanitizerPassthrough.root, { recursive: true, force: true })
+  }
+})

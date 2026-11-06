@@ -87,7 +87,7 @@ dsh-sentinel is designed for two audiences:
 | --- | --- |
 | Heuristic rules | 51 rules across execution, credentials, exfiltration, obfuscation, install scripts, filesystem, network, manifests, Agent Tools, taint, supply chain, binaries, and persistence. |
 | Agent Tool analysis | Traces `defineTool` inputs such as `args.*` into shell, filesystem, network, and dynamic-code sinks. Handles aliases, computed properties, optional chaining, variable propagation, and bounded cross-function flows. |
-| Module and cross-file analysis | Builds a bounded JS/TS module graph across ESM, statically provable CommonJS `require` / `require.resolve`, and dynamic `import()` / `require()` / `require.resolve()` whose targets fold to a static string: literals, concatenation, templates made only of literal parts, and unambiguous `const` strings. Resolved `.js` specifiers still fall back to `.ts` sources. Cross-file taint follows those edges for ESM imports, destructured bindings, and typed TypeScript exports. Type-only imports/exports are erased and never become runtime edges. Targets that stay computed, conditional, or otherwise unprovable are `dynamic-module-specifier` warnings on the module graph and in `coverageSkips`; they never become guessed edges and do not by themselves mark the scan incomplete. |
+| Module and cross-file analysis | Builds a bounded JS/TS module graph across ESM, statically provable CommonJS `require` / `require.resolve`, and dynamic `import()` / `require()` / `require.resolve()` whose targets fold to a static string: literals, concatenation, templates made only of literal parts, and unambiguous `const` strings. Resolved `.js` specifiers still fall back to `.ts` sources. Cross-file taint follows those edges for ESM imports, destructured bindings, and typed TypeScript exports. It also follows bounded callback bridges from already-modeled source APIs (for example `readFile(path, (err, data) => ...)`), array iteration callbacks when the array or element is already tainted, exported getters that close over a module binding tainted by another exported setter called from the same importer, and statically proven object/class/prototype methods (`runner.run(...)`, `new Runner().run(...)`). Type-only imports/exports are erased and never become runtime edges. Targets that stay computed, conditional, or otherwise unprovable are `dynamic-module-specifier` warnings on the module graph and in `coverageSkips`; unresolved callback or method receivers become `cross-file-*` coverage skips. None of these warnings become guessed edges or by themselves mark the scan incomplete. |
 | Language-aware coverage | JavaScript uses Acorn; `.ts`/`.tsx`/`.mts`/`.cts` use a native TypeScript AST from `oxc-parser`. TypeScript type-only syntax is understood rather than regex-recovered. If the parser is unavailable or the file has a syntax error, the file is explicitly marked `parser: unparsed`, static specifier recovery still runs, and a `parser-unparsed` warning plus `coverageSkips` entry is reported. Python and PowerShell files are not incorrectly fed into the JS parser and still receive applicable heuristic scanning. |
 | DSH manifest validation | Audits `dsh.bundle`, `cordis.patch.yml`, package entry contracts, and lexical/realpath/symlink containment. Escaping paths trigger `SEN-MAN-009`. |
 | Scan modes | `source` skips generated build trees by default; `package` includes distributable output such as `dist` and `build`; `profile` discovers and audits installed DSH plugins. |
@@ -493,8 +493,17 @@ Dynamic `import()` / `require()` / `require.resolve()` targets that fold to a
 static string become real module-graph edges and can carry cross-file taint.
 Targets that cannot be reduced remain visible as `dynamic-module-specifier`
 warnings on the module graph and in `coverageSkips`, and never become invented
-module-graph edges. Those warnings do not, by themselves, mark the scan
-incomplete.
+module-graph edges. The bounded cross-file pass also reports unresolved callback
+or method receivers as `cross-file-callback-unresolved` /
+`cross-file-method-unresolved` coverage skips. Those warnings do not, by
+themselves, mark the scan incomplete.
+
+Cross-file reachability stays deliberately bounded. Unknown calls are never
+treated as pure passthroughs because they may sanitize or rewrite paths. The
+engine does not perform full control-flow analysis, async interleaving,
+`Proxy`/`eval`/`Function`-constructor resolution, dynamic property lookup,
+arbitrary prototype mutation, or call-order-aware closure state. Those shapes
+remain coverage skips or documented limitations rather than guessed edges.
 
 Static completeness does not imply dynamic completeness, and dynamic state does
 not overwrite the static verdict. A requested Phase B scan may therefore be
@@ -606,12 +615,14 @@ is another reason findings require contextual review.
 
 Completed work includes scan-completeness contracts, three scan modes, safe package
 quarantine, AST/taint analysis, stable fingerprints, SARIF, binary inspection,
-module/dependency/capability graphs, cross-file analysis, SBOM formats, provenance,
-package drift detection, and release verification.
+module/dependency/capability graphs, bounded callback/closure/prototype
+cross-file reachability, SBOM formats, provenance, package drift detection, and
+release verification.
 
 Planned work focuses on broader language-aware semantic analysis, deeper lockfile
-normalization, stronger interprocedural reachability, larger public corpora, and
-stable integration contracts. See the [full roadmap](docs/roadmap.md).
+normalization, full control-flow/interprocedural reachability, larger public
+corpora, and stable integration contracts. See the
+[full roadmap](docs/roadmap.md).
 
 Dynamic execution remains an explicit release-gated path. Phase B is
 network-denied and unavailable until a scanner-owned immutable image is

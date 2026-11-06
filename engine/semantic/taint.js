@@ -9,7 +9,7 @@
  *   跨函数(同文件):本地函数参数传播,深度受限。
  */
 
-import { walk, calleeName, staticStringOf, referencedIdentifiers, collectAliases, collectImports } from './ast.js'
+import { walk, calleeName, staticStringOf, referencedIdentifiers, collectAliases, collectImports, unwrapExpression } from './ast.js'
 import { normalizeHostname } from './harness.js'
 
 const SINKS = [
@@ -21,6 +21,8 @@ const SINKS = [
 const SINK_NAMES = new Set(SINKS.flatMap((s) => s.names))
 const DECODERS = new Set(['atob', 'decodeURIComponent', 'unescape', 'String.fromCharCode'])
 const READERS = new Set(['readFile', 'readFileSync', 'createReadStream', 'openSync'])
+const ITERATION_METHODS = new Set(['forEach', 'map', 'flatMap', 'filter', 'some', 'every', 'find', 'reduce', 'reduceRight'])
+const FUNCTION_TYPES = new Set(['FunctionExpression', 'ArrowFunctionExpression', 'FunctionDeclaration'])
 const SECRET_ENV = /(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY|AUTH)/i
 
 /**
@@ -34,9 +36,19 @@ const BUILTIN_NO_BINDING = new Set(['eval', 'Function', 'fetch'])
 const BINDING_MODULES = ['child_process', 'node:child_process', 'fs', 'node:fs', 'node:fs/promises', 'fs/promises']
 
 /** raw 调用名是否确认绑定到内置模块(imports/aliases)。 */
-export function bindingConfirmsBuiltin(raw, { aliases, imports } = {}) {
+export function bindingConfirmsBuiltin(raw, { aliases, imports, cpVars } = {}) {
   if (BUILTIN_NO_BINDING.has(raw)) return true
-  if (typeof raw === 'string' && raw.includes('.')) return true // member 形态限定性足够
+  if (typeof raw === 'string' && raw.includes('.')) {
+    // member 形态通常已足够限定;但 RegExp.prototype.exec 与 child_process.exec
+    // 同名,`.exec` 必须证明 receiver 绑定到 child_process。
+    if (raw.slice(raw.lastIndexOf('.') + 1) !== 'exec') return true
+    const root = raw.slice(0, raw.lastIndexOf('.'))
+    if (aliases?.has(raw)) return true
+    const rootMod = imports?.get(root)
+    if (typeof rootMod === 'string'
+      && BINDING_MODULES.some((m) => rootMod === m || rootMod.startsWith(m + ':'))) return true
+    return cpVars?.has(root) === true
+  }
   if (aliases?.has(raw)) return true // import/require 解构绑定
   const mod = imports?.get(raw)
   if (typeof mod === 'string' && BINDING_MODULES.some((m) => mod === m || mod.startsWith(m + ':'))) return true
@@ -238,6 +250,62 @@ function sourceNameInArg(node, toolArgName) {
   return found ?? 'direct'
 }
 
+function functionNodeForCallback(node) {
+  const fn = unwrapExpression(node)
+  if (!fn || !FUNCTION_TYPES.has(fn.type) || !fn.body) return null
+  return {
+    params: (fn.params ?? []).map((p) => firstParamName(p)).filter(Boolean),
+    bodyNode: fn.body.type === 'BlockStatement' ? fn.body : fn.body,
+    raw: fn,
+  }
+}
+
+function firstParamName(param) {
+  const target = unwrapExpression(param)
+  if (!target) return null
+  if (target.type === 'Identifier') return target.name
+  if (target.type === 'AssignmentPattern') return firstParamName(target.left)
+  if (target.type === 'RestElement') return firstParamName(target.argument)
+  return null
+}
+
+/** Resolve member/new chains such as `new Runner().run` and `runner.run`. */
+function callTargetName(callee) {
+  const direct = calleeName(callee)
+  if (direct) return direct
+  const target = unwrapExpression(callee)
+  if (target?.type !== 'MemberExpression') return null
+  const object = unwrapExpression(target.object)
+  if (object?.type !== 'NewExpression') return null
+  const className = calleeName(object.callee)
+  const prop = target.computed ? staticStringOf(target.property) : target.property?.name
+  return className && prop ? `${className}.${prop}` : null
+}
+
+/** Conservative receiver taint for array iteration: literals and already-tainted bindings. */
+function receiverTaint(node, taints, toolArgName) {
+  const target = unwrapExpression(node)
+  if (!target) return null
+  if (target.type === 'ArrayExpression') {
+    for (const element of target.elements ?? []) {
+      if (!element) continue
+      const direct = sourceTag(element, toolArgName)
+      if (direct) return { tag: direct, source: sourceNameInArg(element, toolArgName) }
+      for (const name of referencedIdentifiers(element)) {
+        if (taints.has(name)) return taints.get(name)
+      }
+    }
+    return null
+  }
+  if (target.type === 'Identifier' && taints.has(target.name)) return taints.get(target.name)
+  const direct = sourceTag(target, toolArgName)
+  if (direct) return { tag: direct, source: sourceNameInArg(target, toolArgName) }
+  for (const name of referencedIdentifiers(target)) {
+    if (taints.has(name)) return taints.get(name)
+  }
+  return null
+}
+
 /**
  * 单个函数体的污点分析。
  * @param {object} ctx {content, aliases, file}
@@ -373,10 +441,68 @@ function taintFunction(ctx, fn, depth = 0) {
     }
   }
 
-  // 跨函数(同文件,深度受限):本地函数调用,参数带污点 → 递归分析该函数
+  const runSub = (entry, paramTaints) => {
+    if (!entry || paramTaints.size === 0) return
+    const sub = taintFunction({ ...ctx, paramTaints }, {
+      bodyNode: entry.bodyNode,
+      params: entry.params,
+      toolArgName: fn.toolArgName,
+      localFunctions: fn.localFunctions,
+    }, depth + 1)
+    for (const f of sub) {
+      if (!findings.some((x) => x.ruleId === f.ruleId && x.line === f.line)) findings.push(f)
+    }
+  }
+
+  // 已知 source 形态的回调 API:readFile(path, (err, data) => ...) 的 data 是 read 污点。
+  // 只建模已存在的 READERS,不把未知回调当作 passthrough。
+  if (depth < 2) {
+    for (const call of calls) {
+      const raw = callTargetName(call.callee) ?? calleeName(call.callee)
+      if (!raw) continue
+      const tail = raw.slice(raw.lastIndexOf('.') + 1)
+      if (READERS.has(tail)) {
+        const callbackArg = [...call.arguments].reverse().find((arg) => {
+          const node = unwrapExpression(arg)
+          return FUNCTION_TYPES.has(node?.type)
+            || (node?.type === 'Identifier' && fn.localFunctions?.has(node.name))
+        })
+        if (!callbackArg) continue
+        const target = unwrapExpression(callbackArg)
+        const entry = FUNCTION_TYPES.has(target?.type)
+          ? functionNodeForCallback(target)
+          : fn.localFunctions?.get(target?.name)
+        if (!entry || !entry.params[1]) continue
+        runSub(entry, new Map([[entry.params[1], { tag: 'read', source: raw }]]))
+        continue
+      }
+
+      const method = [...ITERATION_METHODS].find((name) => raw.endsWith(`.${name}`))
+      if (!method) continue
+      const callee = unwrapExpression(call.callee)
+      if (callee?.type !== 'MemberExpression') continue
+      const inherited = receiverTaint(callee.object, taints, fn.toolArgName)
+      if (!inherited) continue
+      const callbackArg = call.arguments[0]
+      const target = unwrapExpression(callbackArg)
+      const entry = FUNCTION_TYPES.has(target?.type)
+        ? functionNodeForCallback(target)
+        : fn.localFunctions?.get(target?.name)
+      if (!entry) continue
+      const seed = new Map()
+      if (method === 'reduce' || method === 'reduceRight') {
+        for (const param of entry.params.slice(0, 2)) seed.set(param, inherited)
+      } else if (entry.params[0]) {
+        seed.set(entry.params[0], inherited)
+      }
+      runSub(entry, seed)
+    }
+  }
+
+  // 跨函数(同文件,深度受限):本地函数/对象方法/类方法调用,参数带污点 → 递归分析。
   if (depth < 1 && fn.localFunctions) {
     for (const call of calls) {
-      const raw = calleeName(call.callee)
+      const raw = callTargetName(call.callee)
       if (!raw || SINK_NAMES.has(resolveCallee(raw, aliases) ?? '')) continue // sink 已处理
       const localFn = fn.localFunctions.get(raw)
       if (!localFn) continue
@@ -397,16 +523,7 @@ function taintFunction(ctx, fn, depth = 0) {
           }
         }
       })
-      if (paramTaints.size === 0) continue
-      const sub = taintFunction({ ...ctx, paramTaints }, {
-        bodyNode: localFn.bodyNode,
-        params: localFn.params,
-        toolArgName: fn.toolArgName,
-        localFunctions: fn.localFunctions,
-      }, depth + 1)
-      for (const f of sub) {
-        if (!findings.some((x) => x.ruleId === f.ruleId && x.line === f.line)) findings.push(f)
-      }
+      runSub(localFn, paramTaints)
     }
   }
   return findings
@@ -427,19 +544,63 @@ export function astTaintScan(ast, content, relPath) {
     if (!aliases.has(local)) aliases.set(local, original)
   }
   const imports = collected.imports
+  const cpVars = collected.cpVars
   const localFunctions = new Map()
+  const classMethods = new Map()
+  const instances = []
   const executeFns = []
+
+  const functionEntry = (node) => {
+    const target = unwrapExpression(node)
+    if (!FUNCTION_TYPES.has(target?.type) || !target.body) return null
+    return {
+      params: (target.params ?? []).map((p) => firstParamName(p)).filter(Boolean),
+      bodyNode: target.body.type === 'BlockStatement'
+        ? target.body
+        : { type: 'BlockStatement', body: [target.body] },
+    }
+  }
+  const addObjectMethods = (base, object) => {
+    for (const prop of object?.properties ?? []) {
+      if (prop?.type !== 'Property' || prop.computed) continue
+      const key = prop.key?.name ?? staticStringOf(prop.key)
+      const entry = functionEntry(prop.value)
+      if (key && entry) localFunctions.set(`${base}.${key}`, entry)
+    }
+  }
 
   walk(ast, (node) => {
     if (node.type === 'FunctionDeclaration' && node.id) {
-      localFunctions.set(node.id.name, { params: node.params.map((p) => p.name).filter(Boolean), bodyNode: node.body })
+      const entry = functionEntry(node)
+      if (entry) localFunctions.set(node.id.name, entry)
     }
-    if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier'
-      && (node.init?.type === 'ArrowFunctionExpression' || node.init?.type === 'FunctionExpression')) {
-      localFunctions.set(node.id.name, {
-        params: node.init.params.map((p) => p.name).filter(Boolean),
-        bodyNode: node.init.body.type === 'BlockStatement' ? node.init.body : { type: 'BlockStatement', body: [node.init.body] },
-      })
+    if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier' && node.init) {
+      const init = unwrapExpression(node.init)
+      const entry = functionEntry(init)
+      if (entry) localFunctions.set(node.id.name, entry)
+      if (init?.type === 'ObjectExpression') addObjectMethods(node.id.name, init)
+      if (init?.type === 'NewExpression') {
+        const className = calleeName(init.callee)
+        if (className) instances.push({ local: node.id.name, className })
+      }
+    }
+    if (node.type === 'ClassDeclaration' && node.id?.name) {
+      const methods = new Map()
+      for (const member of node.body?.body ?? []) {
+        if (member.type !== 'MethodDefinition' || member.computed) continue
+        const key = member.key?.name ?? staticStringOf(member.key)
+        const entry = functionEntry(member.value)
+        if (!key || !entry) continue
+        methods.set(key, entry)
+        localFunctions.set(`${node.id.name}.prototype.${key}`, entry)
+        if (member.static) localFunctions.set(`${node.id.name}.${key}`, entry)
+      }
+      classMethods.set(node.id.name, methods)
+    }
+    if (node.type === 'AssignmentExpression') {
+      const left = calleeName(node.left)
+      const entry = functionEntry(node.right)
+      if (left && entry && left.includes('.')) localFunctions.set(left, entry)
     }
     if (node.type === 'CallExpression' && calleeName(node.callee) === 'defineTool') {
       const obj = node.arguments[0]
@@ -459,7 +620,17 @@ export function astTaintScan(ast, content, relPath) {
     }
   })
 
-  const ctx = { content, aliases, imports, file: relPath }
+  // 实例方法别名:`const runner = new Runner()` → runner.method 复用类方法摘要。
+  for (const { local, className } of instances) {
+    const methods = classMethods.get(className)
+    if (!methods) continue
+    for (const [method, entry] of methods) {
+      localFunctions.set(`${local}.${method}`, entry)
+      localFunctions.set(`${className}.${method}`, entry)
+    }
+  }
+
+  const ctx = { content, aliases, imports, cpVars, file: relPath }
   const findings = []
 
   // 1) execute(args) 上下文(SEN-AGENT)
