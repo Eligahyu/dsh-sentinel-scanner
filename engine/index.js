@@ -22,7 +22,7 @@ import { buildReport, verdictFor } from './report.js'
 import { RULES, CODE_EXT } from './rules.js'
 import { semanticScan } from './semantic/index.js'
 import { resolveInside } from './path-safety.js'
-import { buildModuleGraph, dynamicModuleCoverageSkips } from './semantic/module-graph.js'
+import { buildModuleGraph, moduleGraphCoverageSkips, moduleGraphParseFailures } from './semantic/module-graph.js'
 import { analyzeCrossFileTaint } from './semantic/cross-file-taint.js'
 import { buildDependencyGraph } from './supplychain/dependency-graph.js'
 import { buildCapabilityGraph, evaluateCapabilityPolicy } from './semantic/capability-graph.js'
@@ -262,7 +262,8 @@ export async function scan(target, opts = {}) {
       const ext = target.includes('.') ? target.slice(target.lastIndexOf('.') + 1) : 'text'
       languages = { [ext]: 1 }
       analysisLayers = { moduleGraph }
-      coverageSkips = dynamicModuleCoverageSkips(moduleGraph)
+      coverageSkips = moduleGraphCoverageSkips(moduleGraph)
+      scanCoverage.parseFailures = moduleGraphParseFailures(moduleGraph)
     }
   } else {
     // Manifest 检查先行:得到 runtime entries,用于 test 文件降权的 reachability 判断。
@@ -301,7 +302,7 @@ export async function scan(target, opts = {}) {
     attackChains = crossFile.attackChains
     coverageSkips = [
       ...(tree.coverageSkips ?? []),
-      ...dynamicModuleCoverageSkips(tree.moduleGraph),
+      ...moduleGraphCoverageSkips(tree.moduleGraph),
       ...crossFile.failures,
     ]
     // 模块图失败(JS 跨文件分析不完整)参与 scanComplete;

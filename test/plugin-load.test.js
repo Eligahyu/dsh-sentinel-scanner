@@ -14,6 +14,27 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const WINDOWS_LOCK_CODES = new Set(['EPERM', 'EBUSY'])
+
+/**
+ * Best-effort temp cleanup. Windows keeps a dlopened `.node` mapped for the
+ * lifetime of the process, so the copied oxc binding cannot be unlinked while
+ * this test still runs. Retry briefly, then retain the tree and report it
+ * instead of failing an otherwise green scan test.
+ */
+function removeTempTree(root, t) {
+  try {
+    rmSync(root, {
+      recursive: true,
+      force: true,
+      maxRetries: process.platform === 'win32' ? 3 : 0,
+      retryDelay: 100,
+    })
+  } catch (error) {
+    if (process.platform !== 'win32' || !WINDOWS_LOCK_CODES.has(error?.code)) throw error
+    t.diagnostic(`kept temporary plugin tree: native addon is still locked (${error.code})`)
+  }
+}
 
 function makeStubTools(modulesDir) {
   const stub = `export function defineTool(opts) { return opts }\n`
@@ -24,7 +45,7 @@ function makeStubTools(modulesDir) {
   writeFileSync(join(modulesDir, '@deepseek-ai', 'dsh-tools', 'index.js'), stub)
 }
 
-test('plugin registers sentinel_scan + sentinel_scan_profile and executes a real scan', async () => {
+test('plugin registers sentinel_scan + sentinel_scan_profile and executes a real scan', async (t) => {
   const tmp = mkdtempSync(join(process.env.TEMP ?? '/tmp', 'sentinel-plugin-load-'))
   try {
     const modulesDir = join(tmp, 'node_modules')
@@ -94,7 +115,7 @@ test('plugin registers sentinel_scan + sentinel_scan_profile and executes a real
       else process.env.DSH_HOME = previousHome
     }
   } finally {
-    rmSync(tmp, { recursive: true, force: true })
+    removeTempTree(tmp, t)
   }
 })
 

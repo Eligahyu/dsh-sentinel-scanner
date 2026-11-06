@@ -7,7 +7,7 @@
  * access, conditionals, numeric coercion — stays unresolved.
  */
 
-import { staticString, walk } from './ast.js'
+import { staticString, unwrapExpression, walk } from './ast.js'
 
 const PENDING = Symbol('pending')
 const MAX_DEPTH = 8
@@ -188,7 +188,8 @@ function patternNames(pattern, out = []) {
   return out
 }
 
-function recoverNode(node, lookup) {
+function recoverNode(input, lookup) {
+  const node = unwrapExpression(input)
   if (!node || typeof node.type !== 'string') return null
   const direct = staticString(node)
   if (direct !== null) return direct
@@ -220,7 +221,6 @@ function recoverNode(node, lookup) {
     if (value === PENDING) return PENDING
     return typeof value === 'string' ? value : null
   }
-  if (node.type === 'ParenthesizedExpression') return recoverNode(node.expression, lookup)
   return null
 }
 
@@ -342,7 +342,8 @@ export function namedBindingsFromObjectPattern(pattern, lookup = () => null) {
 
 /** Direct `require` / `require.resolve`, including `(0, require)` and optional calls. */
 export function requireCallKind(callee) {
-  const target = callee?.type === 'SequenceExpression' ? callee.expressions?.at(-1) : callee
+  const unwrapped = unwrapExpression(callee)
+  const target = unwrapped?.type === 'SequenceExpression' ? unwrapExpression(unwrapped.expressions?.at(-1)) : unwrapped
   if (!target) return null
   if (target.type === 'Identifier' && target.name === 'require') return 'require'
   if (target.type === 'MemberExpression'

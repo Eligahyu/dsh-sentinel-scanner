@@ -48,7 +48,8 @@ function validatePath(value, code = 'invalid-staged-root') {
     throw policyError(code)
   }
   if (!isAbsolutePath(value) || /[,;=|\r\n\0'"`]/.test(value)) throw policyError(code)
-  if (!/^[A-Za-z0-9._:\\\/-]+$/.test(value)) throw policyError(code)
+  // Windows CI exposes %TEMP% through an 8.3 short path (C:\Users\RUNNER~1\...).
+  if (!/^[A-Za-z0-9._:\\\/~-]+$/.test(value)) throw policyError(code)
 
   const api = pathApi(value)
   if (api.normalize(value) !== value) throw policyError(code)

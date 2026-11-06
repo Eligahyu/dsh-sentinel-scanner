@@ -43,10 +43,17 @@
 - [x] 静态 CommonJS `require` / `require.resolve` 模块图、TS fallback 与解构导入跨文件污点
 - [x] 可静态还原的动态 `import()` / `require()` / `require.resolve()` 跨文件 reachability(字面量、拼接、纯字面量模板、无歧义 const;无法还原的目标保持 warning,不猜测边)
 - [ ] 复杂回调/闭包/原型链的跨文件 reachability
-- [ ] 原生 TypeScript parser,减少静态 import/export 降级
+- [x] 原生 TypeScript parser:`.ts/.tsx/.mts/.cts` 使用 oxc-parser AST,type-only import/export 不建运行时边,解析失败显式降级并报告
 - [ ] GitHub Action 拆独立仓库 + 徽章服务
 - [ ] DSH 官方 pre-install hook 对接(若官方提供)
 - [ ] 公开威胁情报(默认关闭,仅上传包名/版本/hash)
+
+#### v0.5 原生 TS parser 剩余限制
+- oxc-parser 的 native binding 不可用(未知平台/安装被裁剪)或 TS 新语法解析失败时,该文件退回静态 specifier recovery;AST 级污点退回正则 `medium`,并保留 `parser-unparsed` warning 与 `coverageSkips`,但不伪造模块边。
+- type-only 擦除覆盖 `import type`、`export type`、inline `type` specifier 与 type-only `import = require`;复杂 re-export/`declare module` 的运行时语义仍按语法判断,不做完整类型检查。
+- 跨文件 AST 污点采用保守变量传播,不穿过未知函数调用(可能是 sanitizer 或 `resolve()` 路径归一化);复杂回调/闭包/原型链仍是已知缺口。
+- 条件表达式、计算属性、函数返回值、数组下标、`join()`/解码等才能确定的动态 specifier 仍只记 warning,不猜测边。
+- TSX 按 JSX 语法解析;Vue/Svelte 单文件组件仍走非 JS 语义/正则路径。
 
 ### v1.0
 - [ ] 稳定语义引擎与基准(目标:rule precision ≥ 0.90 / recall ≥ 0.85)

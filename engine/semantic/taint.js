@@ -420,8 +420,13 @@ function taintFunction(ctx, fn, depth = 0) {
  * @returns {Array} findings
  */
 export function astTaintScan(ast, content, relPath) {
+  // AST 绑定是主路径;正则别名只作为同一份源码的补充证据(不跨文件、不执行)。
   const aliases = collectAliases(content)
-  const { imports } = collectImports(ast)
+  const collected = collectImports(ast)
+  for (const [local, original] of collected.aliases) {
+    if (!aliases.has(local)) aliases.set(local, original)
+  }
+  const imports = collected.imports
   const localFunctions = new Map()
   const executeFns = []
 

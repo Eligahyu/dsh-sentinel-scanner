@@ -132,7 +132,7 @@ test('scan report exposes the module graph analysis layer', async () => {
   }
 })
 
-test('typed TypeScript imports use a static fallback and resolve .js specifiers to .ts', () => {
+test('native TypeScript parser resolves typed imports and .js specifiers to .ts', () => {
   const root = fixture()
   try {
     writeFileSync(join(root, 'plugin', 'typed.ts'), [
@@ -145,15 +145,15 @@ test('typed TypeScript imports use a static fallback and resolve .js specifiers 
     const graph = buildModuleGraph(root, ['plugin/typed.ts'])
 
     assert.equal(graph.complete, true)
-    assert.ok(graph.nodes.some((node) => node.path === 'plugin/typed.ts' && node.parser === 'unparsed'))
+    assert.ok(graph.nodes.some((node) => node.path === 'plugin/typed.ts' && node.parser === 'oxc'))
     assert.ok(graph.edges.some((edge) => edge.from === 'plugin/typed.ts' && edge.to === 'lib/typed-runner.ts'))
-    assert.ok(graph.warnings.some((warning) => warning.path === 'plugin/typed.ts' && warning.reason === 'parser-unparsed'))
+    assert.equal(graph.warnings.some((warning) => warning.path === 'plugin/typed.ts' && warning.reason === 'parser-unparsed'), false)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
 })
 
-test('typed CommonJS files recover static require edges through the TypeScript fallback', () => {
+test('typed CommonJS files recover static require edges through the TypeScript AST', () => {
   const root = fixture()
   try {
     writeFileSync(join(root, 'plugin', 'typed.cts'), [
@@ -165,20 +165,18 @@ test('typed CommonJS files recover static require edges through the TypeScript f
     const graph = buildModuleGraph(root, ['plugin/typed.cts'])
 
     assert.equal(graph.complete, true)
-    assert.ok(graph.nodes.some((node) => node.path === 'plugin/typed.cts' && node.parser === 'unparsed'))
+    assert.ok(graph.nodes.some((node) => node.path === 'plugin/typed.cts' && node.parser === 'oxc'))
     assert.ok(graph.edges.some((edge) => edge.from === 'plugin/typed.cts'
       && edge.to === 'lib/typed-runner.ts'
       && edge.kind === 'static-require'))
-    assert.ok(graph.warnings.some((warning) => warning.path === 'plugin/typed.cts'
-      && warning.reason === 'parser-unparsed'
-      && warning.importsRecovered === 1))
+    assert.equal(graph.warnings.some((warning) => warning.path === 'plugin/typed.cts'), false)
     assert.equal(graph.warnings.some((warning) => warning.reason === 'dynamic-module-specifier'), false)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
 })
 
-test('TypeScript fallback ignores require text inside strings', () => {
+test('TypeScript AST ignores require text inside strings', () => {
   const root = fixture()
   try {
     writeFileSync(join(root, 'plugin', 'string-only.ts'), [
@@ -191,9 +189,8 @@ test('TypeScript fallback ignores require text inside strings', () => {
     assert.equal(graph.complete, true)
     assert.equal(graph.edges.length, 0)
     assert.deepEqual(graph.nodes.find((node) => node.path === 'plugin/string-only.ts')?.imports, [])
-    assert.ok(graph.warnings.some((warning) => warning.path === 'plugin/string-only.ts'
-      && warning.reason === 'parser-unparsed'
-      && warning.importsRecovered === 0))
+    assert.equal(graph.nodes.find((node) => node.path === 'plugin/string-only.ts')?.parser, 'oxc')
+    assert.equal(graph.warnings.some((warning) => warning.path === 'plugin/string-only.ts'), false)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -236,7 +233,8 @@ test('.mts and .cts files are represented instead of silently skipped', () => {
 
     assert.deepEqual(graph.nodes.map((node) => node.path).sort(), ['plugin/entry.mts', 'plugin/legacy.cts'])
     assert.equal(graph.complete, true)
-    assert.equal(graph.warnings.filter((warning) => warning.reason === 'parser-unparsed').length, 2)
+    assert.deepEqual(graph.nodes.map((node) => node.parser), ['oxc', 'oxc'])
+    assert.equal(graph.warnings.filter((warning) => warning.reason === 'parser-unparsed').length, 0)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -270,7 +268,9 @@ test('declaration files and development scripts do not make runtime analysis inc
 
     assert.equal(graph.complete, true)
     assert.equal(graph.failures.length, 0)
-    assert.ok(graph.warnings.some((warning) => warning.path === 'lib/types/index.d.ts' && warning.reason === 'missing-file'))
+    // type-only re-export 被擦除,不是运行时边,也不产生 missing-file 噪声。
+    assert.equal(graph.edges.some((edge) => edge.from === 'lib/types/index.d.ts'), false)
+    assert.equal(graph.warnings.some((warning) => warning.path === 'lib/types/index.d.ts'), false)
     assert.ok(graph.warnings.some((warning) => warning.path === 'scripts/live-e2e.mjs' && warning.reason === 'missing-file'))
   } finally {
     rmSync(root, { recursive: true, force: true })
@@ -326,7 +326,7 @@ test('dynamic .js specifiers fall back to TypeScript sources', () => {
   assert.ok(edgesFrom(graph, 'recoverable/ts-specifier.js').some((edge) => edge.specifier === '../runtime/typed-runner.js'
     && edge.to === 'runtime/typed-runner.ts'))
   assert.ok(graph.nodes.some((node) => node.path === 'typed/entry.ts'
-    && node.parser === 'unparsed'
+    && node.parser === 'oxc'
     && node.imports.includes('../runtime/typed-runner.js')))
   assert.ok(edgesFrom(graph, 'typed/entry.ts').some((edge) => edge.to === 'runtime/typed-runner.ts'
     && edge.bindings.some((binding) => binding.local === 'run')))
