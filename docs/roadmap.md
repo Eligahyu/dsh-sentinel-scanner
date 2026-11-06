@@ -39,7 +39,7 @@
 
 ### v0.5
 - [x] pnpm v9 lockfile 标准化(importers/packages/snapshots)、workspace/peer 实例、`requiresBuild` 依赖路径、SBOM 引用与精确 direct/transitive 统计
-- [ ] yarn/bun lockfile 标准化与 install-script 依赖链标注(当前仅显式 unsupported/degraded)
+- [x] yarn/bun lockfile 标准化与 install-script 依赖链标注(yarn classic v1/Berry、bun.lock 文本;`bun.lockb` 显式 degraded;无脚本元数据时明确 `installScriptEvidence.status=unavailable`)
 - [x] 静态 CommonJS `require` / `require.resolve` 模块图、TS fallback 与解构导入跨文件污点
 - [ ] 动态 import/require、复杂回调/闭包的跨文件 reachability
 - [ ] 原生 TypeScript parser,减少静态 import/export 降级

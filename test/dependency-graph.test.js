@@ -761,15 +761,20 @@ test('dependency graph rejects lockfiles above the configured byte limit before 
   }
 })
 
-test('dependency graph returns explicit unsupported state for remaining lockfiles', () => {
+test('dependency graph explicitly degrades recognized binary bun.lockb files', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsh-dependency-other-'))
   try {
-    writeFileSync(join(root, 'yarn.lock'), 'alpha@^1.0.0:\n  version "1.0.0"\n')
+    writeFileSync(join(root, 'bun.lockb'), Buffer.from(
+      '#!/usr/bin/env bun\nbun-lockfile-format-v0\nbinary-body',
+      'utf8',
+    ))
     const graph = buildDependencyGraph(root)
     assert.equal(graph.complete, false)
-    assert.equal(graph.ecosystem, 'yarn')
-    assert.equal(graph.lockfile, 'yarn.lock')
-    assert.ok(graph.failures.some((f) => f.reason === 'unsupported-lockfile'))
+    assert.equal(graph.ecosystem, 'bun')
+    assert.equal(graph.lockfile, 'bun.lockb')
+    assert.equal(graph.degraded, true)
+    assert.deepEqual(graph.nodes, [])
+    assert.ok(graph.failures.some((f) => f.reason === 'unsupported-binary-lockfile'))
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
