@@ -144,13 +144,19 @@ profile package.json direct dependencies
 - env 凭据 → 网络(SEN-TAINT-001,受信端点豁免)
 - 文件读取/记忆 → 网络(SEN-TAINT-002)、解码 → 执行(SEN-TAINT-003)
 - SSRF 目标细化:云元数据端点 → critical
-- 有界跨文件污点流:ESM 与可静态证明的 CommonJS `require` / `require.resolve` 图上的参数传递与攻击链聚合
-- CommonJS 解构导入(`const {run} = require('./runner')`)到 `exports.run` / `module.exports.run` 的函数或箭头函数跨文件 source → sink 追踪
+- 有界跨文件污点流:ESM、可静态证明的 CommonJS `require` / `require.resolve`,以及能折叠成静态字符串的动态 `import()` / `require()` / `require.resolve()` 边上的参数传递与攻击链聚合
+- CommonJS 与动态 `import()` / `require()` 的解构绑定(`const {run} = await import('./runner.js')`)到 `exports.run` / `module.exports.run` / `export function` 的函数或箭头函数跨文件 source → sink 追踪
+- 动态说明符折叠范围:字符串字面量、`+` 拼接、模板中每个插值也都是静态字符串,以及全文件唯一、未被赋值/参数遮蔽的 `const`
 - TypeScript `.js` specifier → `.ts/.tsx/.mts/.cts` 源文件回退;声明文件与开发入口降级为 warning
+- 无法折叠的动态目标记 `dynamic-module-specifier` 警告,并进入报告 `coverageSkips`;该警告不是 failure,不单独把 `scanComplete` 打成 false
 
 不支持(已知限制):
-- 运行时才能确定目标的动态 import/require、复杂回调/闭包捕获/原型链的完整跨文件传播;动态目标会显式记录 warning,不会猜测边
-- 完整 TypeScript 类型语法 AST;超出 Acorn 能力时使用静态 import/export/require 降级
+- 条件表达式、计算属性、函数返回值、数组下标、解码/`join` 等才能确定的动态 import/require;这些只保留 warning,不猜测边
+- 同一标识符存在重复 `const`、`let`/`var`、参数或赋值时不做常量折叠;TypeScript 降级路径不折叠标识符(需要原生 TypeScript parser)
+- 动态 import 的命名空间成员调用(`.then` 回调、闭包捕获、原型链)以及 `require.resolve` 返回的路径字符串;这些不进入攻击链
+- 间接 `import`(`(0, import)(...)`)是语法错误,整文件按 parse failure 处理,不从失败解析里猜边
+- TypeScript 类型位置的 `import()`（`type` / `typeof` / 参数或返回类型）不是运行时依赖,降级路径跳过,不建边也不记 dynamic warning
+- 完整 TypeScript 类型语法 AST;超出 Acorn 能力时使用静态 import/export/require 与可还原动态调用降级
 - 非 JS 语言的语义(走正则)
 
 ## 7. 供应链审计

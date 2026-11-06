@@ -87,7 +87,7 @@ dsh-sentinel is designed for two audiences:
 | --- | --- |
 | Heuristic rules | 51 rules across execution, credentials, exfiltration, obfuscation, install scripts, filesystem, network, manifests, Agent Tools, taint, supply chain, binaries, and persistence. |
 | Agent Tool analysis | Traces `defineTool` inputs such as `args.*` into shell, filesystem, network, and dynamic-code sinks. Handles aliases, computed properties, optional chaining, variable propagation, and bounded cross-function flows. |
-| Module and cross-file analysis | Builds a bounded JS/TS module graph across ESM and statically provable CommonJS `require` / `require.resolve` edges, including constant string concatenation and TypeScript `.js` specifiers that map to `.ts` sources. Cross-file taint follows ESM imports and destructured CommonJS exports; unprovable dynamic module specifiers are reported instead of guessed. TypeScript parser limits are reported as a capability boundary instead of falsely failing every TS scan. |
+| Module and cross-file analysis | Builds a bounded JS/TS module graph across ESM, statically provable CommonJS `require` / `require.resolve`, and dynamic `import()` / `require()` / `require.resolve()` whose targets fold to a static string: literals, concatenation, templates made only of literal parts, and unambiguous `const` strings. Resolved `.js` specifiers still fall back to `.ts` sources. Cross-file taint follows those edges for ESM imports and destructured bindings. Targets that stay computed, conditional, or otherwise unprovable are `dynamic-module-specifier` warnings on the module graph and in `coverageSkips`; they never become guessed edges and do not by themselves mark the scan incomplete. TypeScript parser limits remain a capability boundary. |
 | Language-aware coverage | JS-family files receive semantic analysis. TypeScript is conservatively degraded where syntax exceeds the parser boundary. Python and PowerShell files are not incorrectly fed into the JS parser and still receive applicable heuristic scanning. |
 | DSH manifest validation | Audits `dsh.bundle`, `cordis.patch.yml`, package entry contracts, and lexical/realpath/symlink containment. Escaping paths trigger `SEN-MAN-009`. |
 | Scan modes | `source` skips generated build trees by default; `package` includes distributable output such as `dist` and `build`; `profile` discovers and audits installed DSH plugins. |
@@ -487,9 +487,12 @@ File/plugin limits, files above the hard size ceiling, binary sampling limits, a
 core module/cross-file analysis failures can make a scan incomplete. TypeScript
 syntax outside the current parser capability is explicitly degraded and recorded;
 ordinary `.ts`, `.tsx`, or `.d.ts` presence is not an automatic scan failure.
-Dynamic `import()` / `require()` targets that cannot be reduced to a static string
-remain visible as `dynamic-module-specifier` warnings and never become invented
-module-graph edges.
+Dynamic `import()` / `require()` / `require.resolve()` targets that fold to a
+static string become real module-graph edges and can carry cross-file taint.
+Targets that cannot be reduced remain visible as `dynamic-module-specifier`
+warnings on the module graph and in `coverageSkips`, and never become invented
+module-graph edges. Those warnings do not, by themselves, mark the scan
+incomplete.
 
 Static completeness does not imply dynamic completeness, and dynamic state does
 not overwrite the static verdict. A requested Phase B scan may therefore be

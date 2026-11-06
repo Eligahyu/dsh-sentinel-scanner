@@ -22,7 +22,7 @@ import { buildReport, verdictFor } from './report.js'
 import { RULES, CODE_EXT } from './rules.js'
 import { semanticScan } from './semantic/index.js'
 import { resolveInside } from './path-safety.js'
-import { buildModuleGraph } from './semantic/module-graph.js'
+import { buildModuleGraph, dynamicModuleCoverageSkips } from './semantic/module-graph.js'
 import { analyzeCrossFileTaint } from './semantic/cross-file-taint.js'
 import { buildDependencyGraph } from './supplychain/dependency-graph.js'
 import { buildCapabilityGraph, evaluateCapabilityPolicy } from './semantic/capability-graph.js'
@@ -262,6 +262,7 @@ export async function scan(target, opts = {}) {
       const ext = target.includes('.') ? target.slice(target.lastIndexOf('.') + 1) : 'text'
       languages = { [ext]: 1 }
       analysisLayers = { moduleGraph }
+      coverageSkips = dynamicModuleCoverageSkips(moduleGraph)
     }
   } else {
     // Manifest 检查先行:得到 runtime entries,用于 test 文件降权的 reachability 判断。
@@ -298,7 +299,11 @@ export async function scan(target, opts = {}) {
     findingsTotal += crossFile.findings.length
     allStats = mergeStats(allStats, crossCollector.stats())
     attackChains = crossFile.attackChains
-    coverageSkips = [...(tree.coverageSkips ?? []), ...crossFile.failures]
+    coverageSkips = [
+      ...(tree.coverageSkips ?? []),
+      ...dynamicModuleCoverageSkips(tree.moduleGraph),
+      ...crossFile.failures,
+    ]
     // 模块图失败(JS 跨文件分析不完整)参与 scanComplete;
     // 依赖图解析失败(pnpm/yarn lockfile 复杂格式)只是辅助层降级,不判扫描不完整。
     scanComplete = scanComplete && crossFile.complete

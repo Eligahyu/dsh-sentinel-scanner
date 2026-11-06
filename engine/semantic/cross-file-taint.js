@@ -3,7 +3,9 @@
  *
  * The first pass models the high-value DSH shape: a tool entry passes args.*
  * into an imported function, whose exported parameter reaches a dangerous
- * sink. Unresolved graph edges are evidence of incomplete analysis.
+ * sink. Statically recovered dynamic import()/require() edges are followed
+ * the same way. Unresolved graph failures are evidence of incomplete analysis;
+ * dynamic targets that stayed warnings are not guessed.
  */
 
 import { createHash } from 'node:crypto'
@@ -67,9 +69,10 @@ function importsForSpecifier(content, specifier) {
 
 function exportedFunction(content, name) {
   const escaped = escapeRe(name)
+  const returnType = '(?::\\s*[A-Za-z_$][\\w$.<>\\[\\]|& \\t]{0,80})?'
   const patterns = [
-    new RegExp(`export\\s+(?:async\\s+)?function\\s+${escaped}\\s*\\(\\s*([A-Za-z_$][\\w$]*)[^)]*\\)\\s*\\{`, 'm'),
-    new RegExp(`(?:module\\s*\\.\\s*exports|exports)\\s*\\.\\s*${escaped}\\s*=\\s*(?:async\\s+)?function(?:\\s+[A-Za-z_$][\\w$]*)?\\s*\\(\\s*([A-Za-z_$][\\w$]*)[^)]*\\)\\s*\\{`, 'm'),
+    new RegExp(`export\\s+(?:async\\s+)?function\\s+${escaped}\\s*(?:<[A-Za-z_$][\\w$,\\s|&.]{0,80}>)?\\s*\\(\\s*([A-Za-z_$][\\w$]*)[^)]*\\)\\s*${returnType}\\s*\\{`, 'm'),
+    new RegExp(`(?:module\\s*\\.\\s*exports|exports)\\s*\\.\\s*${escaped}\\s*=\\s*(?:async\\s+)?function(?:\\s+[A-Za-z_$][\\w$]*)?\\s*\\(\\s*([A-Za-z_$][\\w$]*)[^)]*\\)\\s*${returnType}\\s*\\{`, 'm'),
   ]
   const match = patterns.map((pattern) => pattern.exec(content)).find(Boolean)
   if (match) {
@@ -79,7 +82,7 @@ function exportedFunction(content, name) {
     return { param: match[1], body: content.slice(open + 1, end), start: match.index }
   }
 
-  const arrow = new RegExp(`(?:module\\s*\\.\\s*exports|exports)\\s*\\.\\s*${escaped}\\s*=\\s*(?:async\\s+)?(?:\\(\\s*([A-Za-z_$][\\w$]*)[^)]*\\)|([A-Za-z_$][\\w$]*))\\s*=>\\s*`, 'm').exec(content)
+  const arrow = new RegExp(`(?:module\\s*\\.\\s*exports|exports)\\s*\\.\\s*${escaped}\\s*=\\s*(?:async\\s+)?(?:\\(\\s*([A-Za-z_$][\\w$]*)[^)]*\\)\\s*${returnType}|([A-Za-z_$][\\w$]*))\\s*=>\\s*`, 'm').exec(content)
   if (!arrow) return null
   const param = arrow[1] ?? arrow[2]
   const bodyStart = arrow.index + arrow[0].length
@@ -109,6 +112,26 @@ function sourceInvocation(content, local) {
   const call = new RegExp(`\\b${escapeRe(local)}\\s*\\(\\s*(args\\.[A-Za-z_$][\\w$]*)`)
   const match = call.exec(content)
   return match ? { source: match[1], start: match.index } : null
+}
+
+function dedupeBindings(bindings) {
+  const seen = new Set()
+  const out = []
+  for (const binding of bindings ?? []) {
+    if (!binding?.imported || !binding?.local) continue
+    if (!/^[A-Za-z_$][\w$]*$/.test(binding.imported) || !/^[A-Za-z_$][\w$]*$/.test(binding.local)) continue
+    const key = `${binding.imported}\0${binding.local}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ imported: binding.imported, local: binding.local })
+  }
+  return out
+}
+
+function bindingsForEdge(content, edge) {
+  if (edge?.kind === 'static-require-resolve') return []
+  if (Array.isArray(edge?.bindings)) return dedupeBindings(edge.bindings)
+  return dedupeBindings(importsForSpecifier(content, edge?.specifier))
 }
 
 function chainId(chain) {
@@ -143,7 +166,7 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
     const from = sourceByPath.get(edge.from)
     const to = sourceByPath.get(edge.to)
     if (!from || !to) continue
-    for (const binding of importsForSpecifier(from, edge.specifier)) {
+    for (const binding of bindingsForEdge(from, edge)) {
       const invocation = sourceInvocation(from, binding.local)
       if (!invocation) continue
       const exported = exportedFunction(to, binding.imported === 'default' ? binding.local : binding.imported)

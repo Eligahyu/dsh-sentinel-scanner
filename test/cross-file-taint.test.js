@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { buildModuleGraph } from '../engine/semantic/module-graph.js'
 import { analyzeCrossFileTaint } from '../engine/semantic/cross-file-taint.js'
@@ -153,6 +154,70 @@ test('cross-file taint reports unresolved graph edges as incomplete', () => {
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+const dynamicRoot = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'dynamic-modules')
+
+test('cross-file taint follows recovered dynamic import and require edges', () => {
+  const cases = [
+    ['recoverable/entry.js', 'lib/runner.js'],
+    ['recoverable/require.cjs', 'lib/runner.js'],
+    ['recoverable/const-fold.js', 'lib/runner.js'],
+    ['recoverable/indirect.cjs', 'lib/runner.js'],
+    ['recoverable/ts-specifier.js', 'lib/typed-runner.ts'],
+    ['typed/entry.ts', 'lib/typed-runner.ts'],
+    ['typed/indirect.cts', 'lib/typed-runner.ts'],
+    ['static/entry.js', 'lib/runner.js'],
+    ['static/commonjs.cjs', 'lib/runner.js'],
+  ]
+  for (const [file, target] of cases) {
+    const graph = buildModuleGraph(dynamicRoot, [file])
+    const result = analyzeCrossFileTaint(dynamicRoot, graph)
+    const finding = result.findings.find((item) => item.ruleId === 'SEN-AGENT-001')
+
+    assert.ok(finding, file)
+    assert.equal(finding.crossFile, true)
+    assert.deepEqual(finding.modulePath, [file, target])
+    assert.deepEqual(finding.flowSteps, ['args.command', 'run(command)', 'exec'])
+    assert.equal(result.attackChains.length, 1, file)
+    assert.equal(result.complete, true, file)
+  }
+})
+
+test('require.resolve and unresolved dynamic targets do not invent attack chains', () => {
+  const resolveGraph = buildModuleGraph(dynamicRoot, ['recoverable/resolve.cjs'])
+  const resolveTaint = analyzeCrossFileTaint(dynamicRoot, resolveGraph)
+  assert.equal(resolveGraph.edges.length, 2)
+  assert.equal(resolveTaint.findings.length, 0)
+  assert.equal(resolveTaint.attackChains.length, 0)
+
+  const warningGraph = buildModuleGraph(dynamicRoot, [
+    'warning/obfuscated.js',
+    'warning/partial.js',
+    'warning/computed.js',
+    'warning/ambiguous.js',
+  ])
+  const warningTaint = analyzeCrossFileTaint(dynamicRoot, warningGraph)
+  assert.equal(warningGraph.edges.length, 0)
+  assert.equal(warningTaint.findings.length, 0)
+  assert.equal(warningTaint.attackChains.length, 0)
+  assert.equal(warningTaint.complete, true)
+})
+
+test('scan report keeps recovered dynamic reachability distinct from warnings', async () => {
+  const report = await scan(dynamicRoot)
+
+  assert.equal(report.summary.scanComplete, true)
+  assert.equal(report.analysisLayers.moduleGraph.crossFile.complete, true)
+  assert.ok(report.attackChains.some((chain) => chain.modulePath[0] === 'recoverable/entry.js'
+    && chain.modulePath[1] === 'lib/runner.js'))
+  assert.ok(report.attackChains.some((chain) => chain.modulePath[0] === 'static/entry.js'
+    && chain.modulePath[1] === 'lib/runner.js'))
+  assert.ok(report.attackChains.some((chain) => chain.modulePath[0] === 'typed/indirect.cts'
+    && chain.modulePath[1] === 'lib/typed-runner.ts'))
+  assert.equal(report.attackChains.some((chain) => String(chain.modulePath[0]).startsWith('warning/')), false)
+  assert.ok(report.coverageSkips.some((skip) => skip.reason === 'dynamic-module-specifier'
+    && skip.path === 'warning/partial.js'))
 })
 
 test('scan report includes cross-file findings and attack chains', async () => {
