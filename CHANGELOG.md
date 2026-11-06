@@ -4,6 +4,9 @@
 
 ### Added
 
+- 有界跨文件 reachability 扩展:已建模 source 形态 API 的回调桥接(如 `readFile(path, (err, data) => ...)`)、数组/元素已带污点时的 `forEach` / `map` 迭代回调、同一导入方内“导出 setter 写入模块级绑定 → 导出 getter 读取该绑定”的闭包链,以及静态对象字面量/类实例/`prototype` 方法(`runner.run(...)`、`new Runner().run(...)`)。
+- 无法证明的回调或方法接收者(未知高阶函数、`obj[computed](...)`、未知方法)现在进入 `coverageSkips`,使用 `cross-file-callback-unresolved` / `cross-file-method-unresolved`;它们不是 failure,不会伪造模块边,也不会单独把扫描判为不完整。
+- 跨文件 AST 污点新增 `cross-file-*` 证据:回调/方法/闭包链沿用 `modulePath`、`flowSteps`、`attackChainId`;未知调用(如 `sanitize(args.x)`)不会被当作纯 passthrough。
 - 原生 TypeScript parser:`.ts` / `.tsx` / `.mts` / `.cts` / `.d.ts` 使用 `oxc-parser` 0.157.0 的 ESTree AST,JS 继续使用 Acorn。模块图、单文件污点与跨文件污点均优先消费 TS AST;`import type`、`export type`、inline `type` specifier 与 type-only `import = require` 不建运行时边,混合 import 只保留运行时 specifier。
 - TypeScript 动态 `import()` / `require()` / `require.resolve()` 现在支持 AST 级 `const` 标识符折叠,并保留 `.js` → `.ts` 回退;类型位置的 `import()`(`typeof import(...)` / 类型注解)由 AST 天然排除。
 - 可静态还原的动态 `import()` / `require()` / `require.resolve()` 模块图边:字面量、字符串拼接、仅含字面量插值的模板,以及文件内无歧义且未再赋值的 `const` 字符串。
@@ -22,7 +25,8 @@
 - 仓库递归自扫描显式报告 `engine/**`、`test/**`、`scripts/**` 排除范围；核心引擎改由 CodeQL 独立覆盖。
 - 动态模块目标现在作为结构化 warning 报告，不再静默忽略或猜测依赖边；TypeScript 解析失败时仍保留静态 import/export/require recovery。
 - TypeScript 解析失败(语法错误或 oxc-parser 不可用)不再静默降级:节点标记 `parser: unparsed`,warning 携带 parser/错误信息/恢复条目数,并进入 `coverageSkips`;JS 仍走 Acorn,parse-error 仍影响完整性。
-- 跨文件 AST 污点采用保守变量传播,不穿过未知函数调用(避免把 sanitizer 或路径归一化误判为污点),同时支持 TS 类型标注、ESM/CommonJS 导出函数与箭头函数。
+- 跨文件 AST 污点采用保守变量传播,不穿过未知函数调用(避免把 sanitizer 或路径归一化误判为污点),同时支持 TS 类型标注、ESM/CommonJS 导出函数与箭头函数、有界回调/数组迭代、同导入方闭包 setter/getter,以及静态对象/类/原型方法。
+- member `.exec` 现在必须证明 receiver 绑定到 `child_process`(命名空间/解构/cp 变量),避免把 `RegExp.prototype.exec` 误判为 shell sink;裸 `exec`、`cp.exec` 与 `child_process.exec` 行为保持不变。
 - pnpm v9、Yarn 与 Bun direct/transitive 依赖统计改为读取规范化图；图失败时返回零计数和显式不完整原因，不再使用缩进/正则估算。
 - 报告 `supplyChain.dependencyGraph` 补齐 `ecosystem`、`lockfileVersion`、`failures`、`installScriptEvidence` 与 `degraded`，辅助层失败仍不误判核心扫描不完整。
 
@@ -40,8 +44,8 @@
 
 ### Verification
 
-- 441 项测试:436 pass / 0 fail / 5 skip;含新增原生 TS parser、type-only、TSX、解析失败降级、TS 单文件/跨文件污点用例。
-- 33 项 benchmark:rule precision 0.955 / recall 1.000 / F1 0.977;finding precision 0.919 / recall 1.000 / F1 0.958;flow precision/recall/F1 1.000;hardening edge 组 17 项全 1.000。
+- 451 项测试:446 pass / 0 fail / 5 skip;含新增原生 TS parser、type-only、TSX、解析失败降级、TS 单文件/跨文件污点,以及回调/数组迭代/闭包/对象/类/原型链 reachability 与 safe negative 用例。
+- 33 项 benchmark:rule precision 0.955 / recall 1.000 / F1 0.977;finding precision 0.919 / recall 1.000 / F1 0.958;flow precision/recall/F1 1.000;hardening edge 组 17 项全 1.000(与 v0.5 基线持平)。
 
 ## 0.4.4 (2026-08-23) — Professional Scanner Release
 

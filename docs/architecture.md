@@ -148,24 +148,30 @@ profile package.json direct dependencies
 - SSRF 目标细化:云元数据端点 → critical
 - 有界跨文件污点流:ESM、可静态证明的 CommonJS `require` / `require.resolve`,以及能折叠成静态字符串的动态 `import()` / `require()` / `require.resolve()` 边上的参数传递与攻击链聚合
 - CommonJS 与动态 `import()` / `require()` 的解构绑定(`const {run} = await import('./runner.js')`)到 `exports.run` / `module.exports.run` / `export function` 的函数或箭头函数跨文件 source → sink 追踪
+- 有界回调桥接:已建模的 source 形态 API(如 `readFile(path, (err, data) => ...)`)只把其数据参数标记为 read 污点;数组/元素已带污点时,`forEach` / `map` 等迭代回调参数继承该污点;导入方回调只在被调用方实际以污点参数调用时继续分析
+- 有界闭包 reachability:同一导入方先调用导出的 setter(把污点写入模块级绑定),再调用读取该绑定的导出 getter 时形成 source → sink 链;不同导入方之间不共享闭包状态
+- 有限原型/方法 reachability:导出对象字面量方法、类实例方法(`new Runner().run(...)`)、`Class.prototype.method` 赋值在接收者与属性静态可知时解析;`obj[computed](...)` 或未知方法只记 `cross-file-method-unresolved`
 - 动态说明符折叠范围:字符串字面量、`+` 拼接、模板中每个插值也都是静态字符串,以及全文件唯一、未被赋值/参数遮蔽的 `const`
 - TypeScript/TSX/MTS/CTS 使用 oxc-parser 原生 AST(ESTree 兼容);JS 继续使用 Acorn。
   `import type`、`export type`、inline `type` specifier 与 type-only `import = require`
   在编译期被擦除,不建运行时边、不确认 sink 绑定;混合 import 只保留运行时 specifier。
 - TypeScript `.js` specifier → `.ts/.tsx/.mts/.cts` 源文件回退;声明文件与开发入口降级为 warning
 - 无法折叠的动态目标记 `dynamic-module-specifier` 警告,并进入报告 `coverageSkips`;该警告不是 failure,不单独把 `scanComplete` 打成 false
+- 无法证明的跨文件回调/方法接收者记 `cross-file-callback-unresolved` / `cross-file-method-unresolved` 到 `coverageSkips`;同样不是 failure
 - TypeScript 解析失败或 oxc-parser 不可用时,节点标记 `parser: unparsed`,静态 recovery 仍保留可证明的
   import/export/require 边,并记录 `parser-unparsed` warning 与 `coverageSkips`;该降级不伪造边。
 
 不支持(已知限制):
 - 条件表达式、计算属性、函数返回值、数组下标、解码/`join` 等才能确定的动态 import/require;这些只保留 warning,不猜测边
 - 同一标识符存在重复 `const`、`let`/`var`、参数或赋值时不做常量折叠
-- 动态 import 的命名空间成员调用(`.then` 回调、闭包捕获、原型链)以及 `require.resolve` 返回的路径字符串;这些不进入攻击链
+- 未知高阶函数、未被识别的回调 API、动态 `import()` 结果的异步 `.then` 链、任意回调组合,以及 `require.resolve` 返回的路径字符串;这些不进入攻击链,必要时记 `cross-file-callback-unresolved`
+- 动态属性/计算成员(`obj[method](...)`)、运行时改写原型、`Proxy`、`eval` / `Function` 构造函数生成的边;这些只记 `cross-file-method-unresolved` 或保持 warning,绝不猜测方法
+- 跨文件闭包只做有界的模块级 setter/getter 关联,不做完整控制流、调用顺序、异步交错或跨导入方状态共享
 - 间接 `import`(`(0, import)(...)`)是语法错误,整文件按 parse failure 处理,不从失败解析里猜边
 - TypeScript 类型位置的 `import()`（`type` / `typeof` / 参数或返回类型）不是运行时依赖,AST 与降级路径都不建边
 - TS 解析失败(语法错误、oxc native/WASI 均不可用、未知 TS 新语法)时只能静态 recovery;
   该文件的 AST 级污点退回正则 `medium`,并保留显式 warning/coverageSkip
-- 跨文件 AST 污点只做保守变量传播,不穿过未知函数调用(可能是 sanitizer 或 `resolve()` 路径归一化)
+- 跨文件 AST 污点只做保守变量传播,不穿过未知函数调用(可能是 sanitizer 或 `resolve()` 路径归一化);`sanitize(args.x)` 不会被当作 passthrough
 - 非 JS 语言的语义(走正则)
 
 ## 7. 供应链审计
