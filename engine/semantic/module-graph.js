@@ -11,7 +11,14 @@
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, extname, join, relative, resolve } from 'node:path'
-import { parseJavaScript, walk, staticString } from './ast.js'
+import {
+  TYPESCRIPT_EXT,
+  exportDeclarationHasRuntimeBinding,
+  importDeclarationHasRuntimeBinding,
+  parseSource,
+  staticString,
+  walk,
+} from './ast.js'
 import { resolveInside } from '../path-safety.js'
 import {
   bindingsForImportCall,
@@ -25,8 +32,11 @@ import {
 
 const SOURCE_EXTENSIONS = ['.js', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts', '.jsx']
 
-/** TypeScript 变体:acorn 无法解析,属能力边界(降级而非完整性失败)。 */
-const TS_EXT = /\.(?:tsx?|mts|cts|d\.ts)$/i
+/**
+ * TypeScript 变体由 oxc-parser 解析。若解析器不可用或源码语法错误,降级为
+ * 静态 specifier recovery 并记录 warning,不伪造模块边。
+ */
+const TS_EXT = TYPESCRIPT_EXT
 
 /** 测试路径:测试文件引用构建产物/外部脚本是开发态常态,其模块图缺口降级为警告。 */
 const TEST_PATH = /(^|[\\/])(?:test|tests|__tests__|spec|e2e)([\\/]|\.)|\.(?:spec|test|e2e)\./i
@@ -128,13 +138,40 @@ function importSpecifiers(ast) {
   const lookup = buildConstStringLookup(ast)
   const parents = parentMap(ast)
   const out = []
+  const dynamicBindings = (node) => {
+    // `const { run } = await import(...)` / `const run = require(...).run`
+    let parent = parents.get(node)
+    if (parent?.type === 'MemberExpression' && parent.object === node) {
+      const declarator = parents.get(parent)
+      if (declarator?.type === 'VariableDeclarator' && declarator.init === parent && declarator.id?.type === 'Identifier') {
+        const imported = parent.computed ? recoverStaticSpecifier(parent.property, lookup) : parent.property?.name
+        if (typeof imported === 'string') return [{ imported, local: declarator.id.name }]
+      }
+    }
+    return bindingsForImportCall(node, parents, lookup)
+  }
   walk(ast, (node) => {
     if (node.type === 'ImportDeclaration') {
+      if (!importDeclarationHasRuntimeBinding(node)) return
       const specifier = staticString(node.source)
       if (specifier !== null) out.push({ specifier, start: node.source.start, kind: 'static-import' })
     } else if (node.type === 'ExportNamedDeclaration' || node.type === 'ExportAllDeclaration') {
+      if (!exportDeclarationHasRuntimeBinding(node)) return
       const specifier = staticString(node.source)
       if (specifier !== null) out.push({ specifier, start: node.source.start, kind: 'static-import' })
+    } else if (node.type === 'TSImportEqualsDeclaration') {
+      // `import fs = require('node:fs')` 是运行时 require;`import type ...` 被擦除。
+      if (node.importKind === 'type') return
+      const specifier = staticString(node.moduleReference?.expression)
+      if (specifier !== null) {
+        out.push({
+          specifier,
+          start: node.moduleReference.expression.start ?? node.start,
+          kind: 'static-require',
+          fromCall: true,
+          bindings: node.id?.name ? [{ imported: 'default', local: node.id.name }] : [],
+        })
+      }
     } else if (node.type === 'ImportExpression') {
       const specifier = recoverStaticSpecifier(node.source, lookup)
       out.push({
@@ -160,7 +197,7 @@ function importSpecifiers(ast) {
         start: arg.start,
         kind: specifier === null ? dynamicKind : staticKind,
         fromCall: true,
-        bindings: specifier === null || callKind === 'resolve' ? [] : bindingsForImportCall(node, parents, lookup),
+        bindings: specifier === null || callKind === 'resolve' ? [] : dynamicBindings(node),
       })
     }
   })
@@ -385,6 +422,7 @@ function scanCallSpecifiers(source, code) {
     const keywordOffset = match[0].search(/\b(?:require|import)\b/)
     if (keywordOffset < 0 || code[match.index + keywordOffset] !== 1) continue
     if (match[1] === 'import' && isTypePositionImport(source, match.index + keywordOffset)) continue
+    if (!match[1].startsWith('import') && isTypeOnlyImportEquals(source, match.index + keywordOffset)) continue
     const open = match.index + match[0].length - 1
     const isImport = match[1] === 'import'
     const isResolve = !isImport && /\bresolve\b/.test(match[1])
@@ -409,20 +447,40 @@ function scanCallSpecifiers(source, code) {
   return found
 }
 
-/** Conservative ESM import/export recovery for TypeScript Acorn cannot parse. */
+/** True when a fallback import/export clause has only named `type` specifiers. */
+function typeOnlyNamedClause(clause) {
+  const brace = clause.indexOf('{')
+  if (brace < 0) return false
+  const prefix = clause.slice(0, brace).replace(/,\s*$/, '').trim()
+  if (prefix.length > 0) return false // default/namespace binding is runtime
+  const close = clause.indexOf('}', brace + 1)
+  if (close < 0) return false
+  const parts = splitTopLevel(clause.slice(brace + 1, close), ',').map((part) => part.trim()).filter(Boolean)
+  return parts.length > 0 && parts.every((part) => /^type\s+/.test(part))
+}
+
+function isTypeOnlyImportEquals(source, keywordIndex) {
+  const lineStart = source.lastIndexOf('\n', keywordIndex - 1) + 1
+  return /\bimport\s+type\b[\s\S]*=\s*$/.test(source.slice(lineStart, keywordIndex))
+}
+
+/** Conservative ESM import/export recovery when the native parser is unavailable. */
 function fallbackImportSpecifiers(content) {
   const source = withoutComments(content)
   const code = codePositions(source)
   const found = []
   const patterns = [
+    // Side-effect import：`import './x'`
     { pattern: /(?:^|[;\r\n])\s*import\s*(['"])([^'"\r\n]+)\1/g, keyword: /\bimport\b/, kind: 'static-import', specifierGroup: 2 },
-    { pattern: /(?:^|[;\r\n])\s*(?:import|export)\s+(?:type\s+)?[^;]{0,2000}?\bfrom\s*(['"])([^'"\r\n]+)\1/g, keyword: /\b(?:import|export)\b/, kind: 'static-import', specifierGroup: 2 },
+    // `import` / `export ... from`，排除 `import type` / `export type`
+    { pattern: /(?:^|[;\r\n])\s*(?:import|export)\s+(?!type\b)([^;]{0,2000}?)\bfrom\s*(['"])([^'"\r\n]+)\2/g, keyword: /\b(?:import|export)\b/, kind: 'static-import', specifierGroup: 3, clauseGroup: 1 },
   ]
-  for (const { pattern, keyword, kind, specifierGroup } of patterns) {
+  for (const { pattern, keyword, kind, specifierGroup, clauseGroup } of patterns) {
     let match
     while ((match = pattern.exec(source)) !== null) {
       const keywordOffset = match[0].search(keyword)
       if (keywordOffset < 0 || code[match.index + keywordOffset] !== 1) continue
+      if (clauseGroup && typeOnlyNamedClause(match[clauseGroup])) continue
       const specifier = specifierGroup ? match[specifierGroup] : null
       const start = specifier === null
         ? match.index + match[0].length
@@ -442,13 +500,23 @@ function fallbackImportSpecifiers(content) {
     })
 }
 
-function nodeFor(root, abs, content, ast) {
+function nodeFor(root, abs, content, parsed) {
   return {
     path: relPath(root, abs),
     bytes: Buffer.byteLength(content),
     sha256: hash(content),
-    parser: ast ? 'acorn' : 'unparsed',
-    imports: ast ? importSpecifiers(ast).map((x) => x.specifier).filter((value) => value !== null) : [],
+    parser: parsed.ast ? parsed.parser : 'unparsed',
+    imports: parsed.ast ? importSpecifiers(parsed.ast).map((x) => x.specifier).filter((value) => value !== null) : [],
+  }
+}
+
+function coverageSkip(warning) {
+  return {
+    stage: 'module-graph',
+    reason: warning.reason,
+    path: warning.path,
+    ...(warning.kind ? { kind: warning.kind } : {}),
+    ...(Number.isInteger(warning.start) ? { start: warning.start } : {}),
   }
 }
 
@@ -456,13 +524,28 @@ function nodeFor(root, abs, content, ast) {
 export function dynamicModuleCoverageSkips(graph) {
   return (graph?.warnings ?? [])
     .filter((warning) => warning?.reason === 'dynamic-module-specifier')
-    .map((warning) => ({
-      stage: 'module-graph',
-      reason: warning.reason,
-      path: warning.path,
-      kind: warning.kind,
-      ...(Number.isInteger(warning.start) ? { start: warning.start } : {}),
-    }))
+    .map(coverageSkip)
+}
+
+/** Parser fallbacks are explicit coverage gaps, not invented module edges. */
+export function parserCoverageSkips(graph) {
+  return (graph?.warnings ?? [])
+    .filter((warning) => warning?.reason === 'parser-unparsed')
+    .map(coverageSkip)
+}
+
+/** All module-graph coverage gaps that callers should surface in coverageSkips. */
+export function moduleGraphCoverageSkips(graph) {
+  return (graph?.warnings ?? [])
+    .filter((warning) => warning?.reason === 'dynamic-module-specifier' || warning?.reason === 'parser-unparsed')
+    .map(coverageSkip)
+}
+
+/** JS parse failures + explicit TS parser fallbacks, for scanCoverage.parseFailures. */
+export function moduleGraphParseFailures(graph) {
+  const jsFailures = (graph?.failures ?? []).filter((failure) => failure?.reason === 'parse-error').length
+  const parserFallbacks = (graph?.warnings ?? []).filter((warning) => warning?.reason === 'parser-unparsed').length
+  return jsFailures + parserFallbacks
 }
 
 /**
@@ -508,22 +591,32 @@ export function buildModuleGraph(root, files = []) {
       failures.push({ path: rel, reason: 'read-error', detail: error?.code ?? error?.message })
       continue
     }
-    const ast = parseJavaScript(content)
-    const node = nodeFor(rootAbs, abs, content, ast)
+    const parsed = parseSource(content, rel)
+    const node = nodeFor(rootAbs, abs, content, parsed)
     nodes.push(node)
     let imports
-    if (ast) imports = importSpecifiers(ast)
+    if (parsed.ast) imports = importSpecifiers(parsed.ast)
     else {
-      // TS/TSX/DTS 是 acorn 的能力边界:节点已带 parser:'unparsed' 降级标记,
-      // 不记 failures(与语义引擎"AST 失败走兜底、不判完整性失败"的策略一致)。
-      // 只有真正的 JS parse-error 才构成完整性信号。
+      // TS/TSX/MTS/CTS/DTS 解析失败(解析器缺失或源码语法错误)时显式降级:
+      // 节点带 parser:'unparsed',保留结构 warning + coverageSkip,绝不猜测边。
+      // JS parse-error 仍是完整性信号;TS 语法/解析器边界不单方面把扫描判为 incomplete。
       if (!TS_EXT.test(rel)) {
         failures.push({ path: rel, reason: 'parse-error' })
         continue
       }
       imports = fallbackImportSpecifiers(content)
       node.imports = imports.map((item) => item.specifier).filter((value) => value !== null)
-      warnings.push({ path: rel, reason: 'parser-unparsed', fallback: 'static-module-specifiers', importsRecovered: imports.length })
+      const firstError = parsed.errors?.[0]
+      warnings.push({
+        path: rel,
+        reason: 'parser-unparsed',
+        parser: parsed.parser,
+        fallback: 'static-module-specifiers',
+        importsRecovered: imports.length,
+        parseErrors: parsed.errors?.length ?? 0,
+        ...(firstError?.message ? { error: firstError.message } : {}),
+        ...(parsed.available === false ? { unavailable: true } : {}),
+      })
     }
     for (const item of imports) {
       if (item.specifier === null) {

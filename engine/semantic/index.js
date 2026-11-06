@@ -8,14 +8,15 @@
  */
 
 import { CODE_EXT } from '../rules.js'
-import { parseJavaScript } from './ast.js'
+import { AST_SOURCE_EXT, parseSource } from './ast.js'
 import { astTaintScan } from './taint.js'
 import { enrichHarnessFindings, scanPromptPoisoning, scanCapabilityMismatch } from './harness.js'
 
 /** 语义扫描入口(taint + harness 专属 + poisoning + mismatch)。 */
 export function semanticScan(content, relPath) {
   if (!CODE_EXT.test(relPath)) return []
-  const ast = parseJavaScript(content)
+  // 只有 JS/TS 家族进入 AST;Python/PowerShell 等继续走正则语义规则。
+  const ast = AST_SOURCE_EXT.test(String(relPath)) ? parseSource(content, relPath).ast : null
   let findings = []
   if (ast !== null) {
     try {
@@ -97,6 +98,7 @@ export function collectAliasesForRegex(content) {
   while ((m = importRe.exec(content)) !== null) {
     for (const part of m[1].split(',')) {
       const t = part.trim()
+      if (!t || /^type\s+/.test(t)) continue // `import { type exec }` 是类型位置
       const mm = /([A-Za-z_$][\w$]*)\s*(?:as\s+([A-Za-z_$][\w$]*))?/.exec(t)
       if (mm) aliases.set(mm[2] ?? mm[1], mm[1])
     }

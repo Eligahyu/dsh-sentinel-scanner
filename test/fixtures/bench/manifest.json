@@ -69,6 +69,9 @@
   { "file": "edge/edge-ts-tool.ts", "expects": ["SEN-AGENT-001", "SEN-EXEC-002"],
     "findings": [{ "id": "SEN-AGENT-001", "line": 6 }],
     "flows": [{ "id": "SEN-AGENT-001", "source": "args.command", "sink": "exec" }] },
+  { "file": "edge/edge-ts-native-mixed.ts", "expects": ["SEN-AGENT-001", "SEN-EXEC-002"],
+    "findings": [{ "id": "SEN-AGENT-001", "line": 8 }],
+    "flows": [{ "id": "SEN-AGENT-001", "source": "args.command", "sink": "exec" }] },
   { "file": "edge/edge-two-same-flows.js", "expects": ["SEN-AGENT-004", "SEN-TAINT-001", "SEN-CRED-002", "SEN-EXFIL-002"],
     "findings": [{ "id": "SEN-TAINT-001", "line": 5 }, { "id": "SEN-AGENT-004", "line": 5 }],
     "flows": [

@@ -30,6 +30,6 @@
 
 ## 已知边界
 
-- TypeScript 当前采用保守降级：模块图恢复静态 import/export/require，节点标记为 `parser: unparsed` 并给出 warning，不因 Acorn 无法解析类型语法而把扫描判为 incomplete。
+- TypeScript/TSX/MTS/CTS 使用 `oxc-parser` 原生 AST：type-only import/export 被擦除，不建运行时边；类型标注不会再把整个文件推入静态 recovery。解析器缺失或源码语法错误时，节点标记 `parser: unparsed`、保留可证明的静态 import/export/require 边，并写入 `parser-unparsed` warning 与 `coverageSkips`。
 - 辅助层（依赖图、SBOM、provenance、能力图）失败会报告 warning；核心文件遍历、读取、模块图路径逃逸与跨文件分析失败仍会影响完整性。
 - 风险分用于排序人工复核优先级，不能替代沙箱、签名、来源验证、动态行为分析或人工代码审计。

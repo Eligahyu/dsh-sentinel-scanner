@@ -32,10 +32,12 @@ engine/
   redact.js                secret 脱敏(永远开启)
   config.js                sentinel.config.json 加载与 CLI 覆盖
   semantic/
-    ast.js                 acorn 解析(含 vendored 回退)+ callee/别名/常量拼接
+    ast.js                 JS: Acorn(含 vendored 回退);TS/TSX/MTS/CTS: oxc-parser;
+                           callee/别名/常量拼接 + type-only 语义
     taint.js               AST 污点流:source → propagation → sink,跨函数 MVP
     harness.js             defineTool 识别、SSRF 细化、prompt 投毒分级、能力不匹配证据
-    module-graph.js        有界 JS/TS 模块图、扩展名回退、containment 与 warning/failure
+    module-graph.js        有界 JS/TS 模块图、原生 TS AST、type-only 擦除、
+                           扩展名回退、containment 与 warning/failure
     cross-file-taint.js    基于模块图的有界跨文件 source → sink 分析与攻击链
     capability-graph.js    从 finding 归一化工具能力与策略不匹配
     index.js               语义入口 + 正则兜底
@@ -147,16 +149,23 @@ profile package.json direct dependencies
 - 有界跨文件污点流:ESM、可静态证明的 CommonJS `require` / `require.resolve`,以及能折叠成静态字符串的动态 `import()` / `require()` / `require.resolve()` 边上的参数传递与攻击链聚合
 - CommonJS 与动态 `import()` / `require()` 的解构绑定(`const {run} = await import('./runner.js')`)到 `exports.run` / `module.exports.run` / `export function` 的函数或箭头函数跨文件 source → sink 追踪
 - 动态说明符折叠范围:字符串字面量、`+` 拼接、模板中每个插值也都是静态字符串,以及全文件唯一、未被赋值/参数遮蔽的 `const`
+- TypeScript/TSX/MTS/CTS 使用 oxc-parser 原生 AST(ESTree 兼容);JS 继续使用 Acorn。
+  `import type`、`export type`、inline `type` specifier 与 type-only `import = require`
+  在编译期被擦除,不建运行时边、不确认 sink 绑定;混合 import 只保留运行时 specifier。
 - TypeScript `.js` specifier → `.ts/.tsx/.mts/.cts` 源文件回退;声明文件与开发入口降级为 warning
 - 无法折叠的动态目标记 `dynamic-module-specifier` 警告,并进入报告 `coverageSkips`;该警告不是 failure,不单独把 `scanComplete` 打成 false
+- TypeScript 解析失败或 oxc-parser 不可用时,节点标记 `parser: unparsed`,静态 recovery 仍保留可证明的
+  import/export/require 边,并记录 `parser-unparsed` warning 与 `coverageSkips`;该降级不伪造边。
 
 不支持(已知限制):
 - 条件表达式、计算属性、函数返回值、数组下标、解码/`join` 等才能确定的动态 import/require;这些只保留 warning,不猜测边
-- 同一标识符存在重复 `const`、`let`/`var`、参数或赋值时不做常量折叠;TypeScript 降级路径不折叠标识符(需要原生 TypeScript parser)
+- 同一标识符存在重复 `const`、`let`/`var`、参数或赋值时不做常量折叠
 - 动态 import 的命名空间成员调用(`.then` 回调、闭包捕获、原型链)以及 `require.resolve` 返回的路径字符串;这些不进入攻击链
 - 间接 `import`(`(0, import)(...)`)是语法错误,整文件按 parse failure 处理,不从失败解析里猜边
-- TypeScript 类型位置的 `import()`（`type` / `typeof` / 参数或返回类型）不是运行时依赖,降级路径跳过,不建边也不记 dynamic warning
-- 完整 TypeScript 类型语法 AST;超出 Acorn 能力时使用静态 import/export/require 与可还原动态调用降级
+- TypeScript 类型位置的 `import()`（`type` / `typeof` / 参数或返回类型）不是运行时依赖,AST 与降级路径都不建边
+- TS 解析失败(语法错误、oxc native/WASI 均不可用、未知 TS 新语法)时只能静态 recovery;
+  该文件的 AST 级污点退回正则 `medium`,并保留显式 warning/coverageSkip
+- 跨文件 AST 污点只做保守变量传播,不穿过未知函数调用(可能是 sanitizer 或 `resolve()` 路径归一化)
 - 非 JS 语言的语义(走正则)
 
 ## 7. 供应链审计

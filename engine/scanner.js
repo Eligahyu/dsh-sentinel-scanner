@@ -26,7 +26,7 @@ import { readdirSync, readFileSync, lstatSync, statSync, openSync, readSync, clo
 import { join, relative, sep, dirname } from 'node:path'
 import { createHash } from 'node:crypto'
 import { RULES, CODE_EXT, SEVERITY_ORDER, CATEGORIES, severityWeight } from './rules.js'
-import { buildModuleGraph } from './semantic/module-graph.js'
+import { buildModuleGraph, moduleGraphParseFailures } from './semantic/module-graph.js'
 import { resolveInside, PathEscapeError } from './path-safety.js'
 import { isTestPath, isDevelopmentPath, scoredSeverity, OVERLAP_SUPPRESSION } from './report.js'
 import { semanticScan } from './semantic/index.js'
@@ -801,7 +801,7 @@ export async function scanTree(root, opts = {}) {
       buildFiles,
       binaryFiles: binaries.slice(0, binaryLimit).length,
       largeFiles: largeFiles.length,
-      parseFailures: 0,
+      parseFailures: moduleGraphParseFailures(moduleGraph),
       hardSkippedFiles: hardSkipped.length,
       binarySkippedFiles: binarySkippedCount,
       readFailures,

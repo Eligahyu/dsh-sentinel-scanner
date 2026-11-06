@@ -4,7 +4,9 @@
 
 ### Added
 
-- 可静态还原的动态 `import()` / `require()` / `require.resolve()` 模块图边:字面量、字符串拼接、仅含字面量插值的模板,以及文件内无歧义且未再赋值的 `const` 字符串。TypeScript 降级路径同样还原这些写法(不含标识符折叠),并沿用 `.js` → `.ts` 回退。
+- 原生 TypeScript parser:`.ts` / `.tsx` / `.mts` / `.cts` / `.d.ts` 使用 `oxc-parser` 0.157.0 的 ESTree AST,JS 继续使用 Acorn。模块图、单文件污点与跨文件污点均优先消费 TS AST;`import type`、`export type`、inline `type` specifier 与 type-only `import = require` 不建运行时边,混合 import 只保留运行时 specifier。
+- TypeScript 动态 `import()` / `require()` / `require.resolve()` 现在支持 AST 级 `const` 标识符折叠,并保留 `.js` → `.ts` 回退;类型位置的 `import()`(`typeof import(...)` / 类型注解)由 AST 天然排除。
+- 可静态还原的动态 `import()` / `require()` / `require.resolve()` 模块图边:字面量、字符串拼接、仅含字面量插值的模板,以及文件内无歧义且未再赋值的 `const` 字符串。
 - 跨文件污点与攻击链沿这些已还原动态边跟踪解构绑定。无法静态还原的动态目标仍只记 `dynamic-module-specifier` 警告,并复制到 `coverageSkips`;不猜测边,也不因此把扫描判为不完整。
 - 独立 CodeQL 工作流覆盖自扫描必须排除的规则引擎源码。
 - Dependabot、CODEOWNERS、贡献指南、行为准则，以及结构化 Issue / Pull Request 模板。
@@ -18,7 +20,9 @@
 
 - CI 改为执行 `package.json` 中的完整测试契约，并升级到 Node 24 运行时的官方 Actions。
 - 仓库递归自扫描显式报告 `engine/**`、`test/**`、`scripts/**` 排除范围；核心引擎改由 CodeQL 独立覆盖。
-- 动态模块目标现在作为结构化 warning 报告，不再静默忽略或猜测依赖边；TypeScript fallback 可恢复字面量 CommonJS 引用。
+- 动态模块目标现在作为结构化 warning 报告，不再静默忽略或猜测依赖边；TypeScript 解析失败时仍保留静态 import/export/require recovery。
+- TypeScript 解析失败(语法错误或 oxc-parser 不可用)不再静默降级:节点标记 `parser: unparsed`,warning 携带 parser/错误信息/恢复条目数,并进入 `coverageSkips`;JS 仍走 Acorn,parse-error 仍影响完整性。
+- 跨文件 AST 污点采用保守变量传播,不穿过未知函数调用(避免把 sanitizer 或路径归一化误判为污点),同时支持 TS 类型标注、ESM/CommonJS 导出函数与箭头函数。
 - pnpm v9、Yarn 与 Bun direct/transitive 依赖统计改为读取规范化图；图失败时返回零计数和显式不完整原因，不再使用缩进/正则估算。
 - 报告 `supplyChain.dependencyGraph` 补齐 `ecosystem`、`lockfileVersion`、`failures`、`installScriptEvidence` 与 `degraded`，辅助层失败仍不误判核心扫描不完整。
 
@@ -33,6 +37,11 @@
 - 重写不受信源码的 child-process 别名提取、patch 行解析和开发 runner 识别，消除多项 polynomial ReDoS 路径；动态别名进入正则前执行完整元字符转义。
 - malformed pnpm YAML、workspace importer 路径逃逸、oversized lockfile 和未知 pnpm 版本均保留明确 dependency-layer failure；`requiresBuild` 不再被误称为已知安装脚本。
 - malformed Yarn/Bun lock、workspace 路径逃逸、未知 Yarn/Bun 版本、无法解析的依赖描述符和对不上的依赖边均保留明确失败,不再静默猜成 0 条或估算条数。
+
+### Verification
+
+- 441 项测试:436 pass / 0 fail / 5 skip;含新增原生 TS parser、type-only、TSX、解析失败降级、TS 单文件/跨文件污点用例。
+- 33 项 benchmark:rule precision 0.955 / recall 1.000 / F1 0.977;finding precision 0.919 / recall 1.000 / F1 0.958;flow precision/recall/F1 1.000;hardening edge 组 17 项全 1.000。
 
 ## 0.4.4 (2026-08-23) — Professional Scanner Release
 

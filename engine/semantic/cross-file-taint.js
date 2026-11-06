@@ -11,6 +11,18 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import {
+  calleeName,
+  collectImports,
+  importDeclarationHasRuntimeBinding,
+  parseSource,
+  referencedIdentifiers,
+  staticString,
+  unwrapExpression,
+  walk,
+} from './ast.js'
+import { namedBindingsFromObjectPattern, requireCallKind } from './static-specifier.js'
+import { bindingConfirmsBuiltin } from './taint.js'
 
 const SINKS = [
   { names: ['exec', 'execSync', 'spawn', 'spawnSync', 'execFile', 'execFileSync', 'fork'], type: 'shell', ruleId: 'SEN-AGENT-001', severity: 'critical', module: 'child_process' },
@@ -19,6 +31,7 @@ const SINKS = [
   { names: ['fetch', 'axios', 'WebSocket', 'sendBeacon'], type: 'network', ruleId: 'SEN-AGENT-004', severity: 'high', module: null },
 ]
 
+const SINK_NAMES = new Set(SINKS.flatMap((sink) => sink.names))
 const escapeRe = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 function braceEnd(text, open) {
@@ -128,10 +141,271 @@ function dedupeBindings(bindings) {
   return out
 }
 
-function bindingsForEdge(content, edge) {
+function astBindingsForSpecifier(ast, specifier) {
+  const out = []
+  if (!ast || typeof specifier !== 'string') return out
+  walk(ast, (node) => {
+    if (node.type === 'ImportDeclaration') {
+      if (!importDeclarationHasRuntimeBinding(node)) return
+      if (staticString(node.source) !== specifier) return
+      for (const spec of node.specifiers ?? []) {
+        if (spec.importKind === 'type') continue
+        if (spec.type === 'ImportSpecifier') out.push({ imported: staticString(spec.imported) ?? spec.imported.name, local: spec.local.name })
+        else if (spec.type === 'ImportDefaultSpecifier') out.push({ imported: 'default', local: spec.local.name })
+      }
+      return
+    }
+    if (node.type === 'TSImportEqualsDeclaration') {
+      if (node.importKind === 'type') return
+      if (staticString(node.moduleReference?.expression) !== specifier) return
+      if (node.id?.name) out.push({ imported: 'default', local: node.id.name })
+      return
+    }
+    if (node.type !== 'VariableDeclarator' || !node.init) return
+    const init = unwrapExpression(node.init)
+    if (init?.type === 'CallExpression' && requireCallKind(init.callee) === 'require'
+      && staticString(init.arguments?.[0]) === specifier) {
+      if (node.id?.type === 'ObjectPattern') out.push(...namedBindingsFromObjectPattern(node.id))
+      else if (node.id?.type === 'Identifier') out.push({ imported: 'default', local: node.id.name })
+      return
+    }
+    // `const run = require('./runner').run`
+    if (init?.type === 'MemberExpression' && node.id?.type === 'Identifier') {
+      const object = unwrapExpression(init.object)
+      if (object?.type === 'CallExpression' && requireCallKind(object.callee) === 'require'
+        && staticString(object.arguments?.[0]) === specifier) {
+        const imported = init.computed ? staticString(init.property) : init.property?.name
+        if (typeof imported === 'string') out.push({ imported, local: node.id.name })
+      }
+    }
+  })
+  return out
+}
+
+function bindingsForEdge(content, edge, ast) {
   if (edge?.kind === 'static-require-resolve') return []
-  if (Array.isArray(edge?.bindings)) return dedupeBindings(edge.bindings)
+  // Dynamic edges already carry the exact binding from their call site. Using
+  // unrelated static imports of the same specifier would contaminate the chain.
+  if (Array.isArray(edge?.bindings)) {
+    const fromEdge = dedupeBindings(edge.bindings)
+    if (fromEdge.length > 0) return fromEdge
+    if (edge.fromCall) return []
+  }
+  // Static import/export edges are re-read from the importer AST so type-only
+  // bindings never become sources.
+  const fromAst = astBindingsForSpecifier(ast, edge?.specifier)
+  if (fromAst.length > 0) return dedupeBindings(fromAst)
   return dedupeBindings(importsForSpecifier(content, edge?.specifier))
+}
+
+function firstParamName(param) {
+  const target = unwrapExpression(param)
+  if (!target) return null
+  if (target.type === 'Identifier') return target.name
+  if (target.type === 'AssignmentPattern') return firstParamName(target.left)
+  if (target.type === 'RestElement') return firstParamName(target.argument)
+  return null
+}
+
+function functionEntry(node) {
+  const fn = unwrapExpression(node)
+  if (!fn) return null
+  if (!['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(fn.type)) return null
+  if (!fn.body) return null // TS overload signature
+  const body = fn.body.type === 'BlockStatement'
+    ? fn.body
+    : { type: 'BlockStatement', body: [{ type: 'ExpressionStatement', expression: fn.body, start: fn.body.start, end: fn.body.end }] }
+  return { param: firstParamName(fn.params?.[0]), body, start: fn.start }
+}
+
+function assignmentExportName(left) {
+  const name = calleeName(left)
+  if (name === 'module.exports') return 'default'
+  if (name?.startsWith('module.exports.')) return name.slice('module.exports.'.length)
+  if (name?.startsWith('exports.')) return name.slice('exports.'.length)
+  return null
+}
+
+function indexExports(ast) {
+  const functions = new Map()
+  const refs = new Map()
+  const addFunction = (name, init) => {
+    const entry = functionEntry(init)
+    if (name && entry) functions.set(name, entry)
+  }
+  const addRef = (exported, value) => {
+    if (!exported) return
+    refs.set(exported, value)
+  }
+  const addDeclaration = (decl) => {
+    if (!decl) return
+    if (decl.type === 'FunctionDeclaration' && decl.id?.name) {
+      addFunction(decl.id.name, decl)
+      addRef(decl.id.name, { local: decl.id.name })
+    } else if (decl.type === 'VariableDeclaration') {
+      for (const item of decl.declarations ?? []) {
+        if (item.id?.type !== 'Identifier') continue
+        addFunction(item.id.name, item.init)
+        addRef(item.id.name, { local: item.id.name })
+      }
+    }
+  }
+  const addAssignedValue = (exported, value) => {
+    const target = unwrapExpression(value)
+    if (!target) return
+    if (['FunctionExpression', 'ArrowFunctionExpression', 'FunctionDeclaration'].includes(target.type)) {
+      addRef(exported, { node: target })
+      return
+    }
+    if (target.type === 'Identifier') {
+      addRef(exported, { local: target.name })
+      return
+    }
+    if (exported === 'default' && target.type === 'ObjectExpression') {
+      for (const prop of target.properties ?? []) {
+        if (prop?.type !== 'Property' || prop.computed) continue
+        const key = prop.key?.name ?? staticString(prop.key)
+        if (!key) continue
+        const valueNode = unwrapExpression(prop.value)
+        if (valueNode?.type === 'Identifier') addRef(key, { local: valueNode.name })
+        else if (['FunctionExpression', 'ArrowFunctionExpression'].includes(valueNode?.type)) addRef(key, { node: valueNode })
+      }
+    }
+  }
+
+  for (const statement of ast?.body ?? []) {
+    if (statement.type === 'ExportNamedDeclaration') {
+      if (statement.exportKind === 'type') continue
+      const decl = statement.declaration
+      addDeclaration(decl)
+      for (const spec of statement.specifiers ?? []) {
+        if (spec.exportKind === 'type') continue
+        const exported = spec.exported?.name ?? staticString(spec.exported)
+        const local = spec.local?.name ?? staticString(spec.local)
+        if (exported && local) addRef(exported, { local })
+      }
+      continue
+    }
+    if (statement.type === 'ExportDefaultDeclaration') {
+      const decl = unwrapExpression(statement.declaration)
+      if (decl?.type === 'FunctionDeclaration' && decl.id?.name) {
+        addFunction(decl.id.name, decl)
+        addRef('default', { local: decl.id.name })
+      } else if (['FunctionExpression', 'ArrowFunctionExpression'].includes(decl?.type)) {
+        addRef('default', { node: decl })
+      } else if (decl?.type === 'Identifier') {
+        addRef('default', { local: decl.name })
+      }
+      continue
+    }
+    if (statement.type === 'TSExportAssignment') {
+      const expr = unwrapExpression(statement.expression)
+      if (expr?.type === 'Identifier') addRef('default', { local: expr.name })
+      continue
+    }
+    if (statement.type === 'FunctionDeclaration' && statement.id?.name) {
+      addFunction(statement.id.name, statement)
+      continue
+    }
+    if (statement.type === 'VariableDeclaration') {
+      for (const item of statement.declarations ?? []) {
+        if (item.id?.type === 'Identifier') addFunction(item.id.name, item.init)
+      }
+      continue
+    }
+    if (statement.type !== 'ExpressionStatement' || statement.expression?.type !== 'AssignmentExpression') continue
+    const exported = assignmentExportName(statement.expression.left)
+    if (!exported) continue
+    addAssignedValue(exported, statement.expression.right)
+  }
+
+  return { functions, refs }
+}
+
+function exportedFunctionAst(ast, exportedName) {
+  const { functions, refs } = indexExports(ast)
+  const ref = refs.get(exportedName)
+  if (ref?.local) return functions.get(ref.local) ?? null
+  if (ref?.node) return functionEntry(ref.node)
+  return null
+}
+
+function referencesAny(node, names) {
+  if (names.size === 0) return false
+  for (const name of referencedIdentifiers(node)) if (names.has(name)) return true
+  return false
+}
+
+function resolveCrossFileSink(raw, collected) {
+  if (SINK_NAMES.has(raw)) return raw
+  if (collected.aliases.has(raw) && SINK_NAMES.has(collected.aliases.get(raw))) return collected.aliases.get(raw)
+  const tail = raw.slice(raw.lastIndexOf('.') + 1)
+  return SINK_NAMES.has(tail) ? tail : null
+}
+
+function boundSinkAst(body, param, ast) {
+  if (!param) return null
+  const collected = collectImports(ast)
+  const tainted = new Set([param])
+  let changed = true
+  let rounds = 0
+  while (changed && rounds < 5) {
+    changed = false
+    rounds += 1
+    walk(body, (node) => {
+      if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier' && node.init
+        && !tainted.has(node.id.name) && referencesAny(node.init, tainted)) {
+        // 跨文件层只做保守传播:不穿过未知函数调用(可能是 sanitizer,也可能是
+        // resolve() 之类的路径归一化)。直接赋值/模板/字符串拼接仍然传播。
+        const init = unwrapExpression(node.init)
+        if (init?.type !== 'CallExpression' && init?.type !== 'NewExpression') {
+          tainted.add(node.id.name)
+          changed = true
+        }
+      }
+      if (node.type === 'AssignmentExpression' && node.left?.type === 'Identifier'
+        && !tainted.has(node.left.name) && referencesAny(node.right, tainted)) {
+        tainted.add(node.left.name)
+        changed = true
+      }
+    })
+  }
+
+  let hit = null
+  walk(body, (node) => {
+    if (hit || node.type !== 'CallExpression') return
+    const raw = calleeName(node.callee)
+    if (!raw) return
+    const sinkName = resolveCrossFileSink(raw, collected)
+    if (!sinkName) return
+    const sink = SINKS.find((item) => item.names.includes(sinkName))
+    if (!sink) return
+    if (sink.module && !bindingConfirmsBuiltin(raw, collected)) return
+    if (!(node.arguments ?? []).some((arg) => referencesAny(arg, tainted))) return
+    hit = { ...sink, callee: sinkName, start: node.start }
+  })
+  return hit
+}
+
+function sourceInvocationAst(ast, local) {
+  let found = null
+  walk(ast, (node) => {
+    if (found || node.type !== 'CallExpression' || calleeName(node.callee) !== local) return
+    for (const arg of node.arguments ?? []) {
+      let source = null
+      walk(arg, (child) => {
+        if (source) return
+        if (child.type === 'MemberExpression' && child.object?.type === 'Identifier' && child.object.name === 'args') {
+          source = calleeName(child)
+        }
+      })
+      if (source) {
+        found = { source, start: node.start }
+        return
+      }
+    }
+  })
+  return found
 }
 
 function chainId(chain) {
@@ -152,7 +426,8 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
   const sourceByPath = new Map()
   for (const node of graph?.nodes ?? []) {
     try {
-      sourceByPath.set(node.path, readFileSync(join(root, node.path), 'utf8'))
+      const content = readFileSync(join(root, node.path), 'utf8')
+      sourceByPath.set(node.path, { content, ast: parseSource(content, node.path).ast })
     } catch (error) {
       failures.push({ path: node.path, reason: 'read-error', detail: error?.code ?? error?.message })
     }
@@ -166,12 +441,17 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
     const from = sourceByPath.get(edge.from)
     const to = sourceByPath.get(edge.to)
     if (!from || !to) continue
-    for (const binding of bindingsForEdge(from, edge)) {
-      const invocation = sourceInvocation(from, binding.local)
+    for (const binding of bindingsForEdge(from.content, edge, from.ast)) {
+      const invocation = from.ast ? sourceInvocationAst(from.ast, binding.local) : sourceInvocation(from.content, binding.local)
       if (!invocation) continue
-      const exported = exportedFunction(to, binding.imported === 'default' ? binding.local : binding.imported)
+      const fallbackName = binding.imported === 'default' ? binding.local : binding.imported
+      let exported = to.ast ? exportedFunctionAst(to.ast, binding.imported === 'default' ? 'default' : binding.imported) : null
+      if (!exported && to.ast && binding.imported === 'default') exported = exportedFunctionAst(to.ast, binding.local)
+      if (!exported && !to.ast) exported = exportedFunction(to.content, fallbackName)
       if (!exported) continue
-      const sink = boundSink(exported.body, exported.param, to)
+      const sink = to.ast
+        ? boundSinkAst(exported.body, exported.param, to.ast)
+        : boundSink(exported.body, exported.param, to.content)
       if (!sink) continue
       const chain = {
         source: invocation.source,
@@ -180,6 +460,9 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
         sink: sink.callee,
       }
       const attackChainId = chainId(chain)
+      const sinkOffset = Number.isInteger(sink.start) ? sink.start : exported.start
+      const sinkLine = (to.content.slice(0, sinkOffset).match(/\n/g) ?? []).length + 1
+      const sinkSnippet = (to.content.split('\n')[sinkLine - 1] ?? '').replace(/\s+/g, ' ').trim()
       attackChains.push({ id: attackChainId, ...chain, confidence: 'high' })
       findings.push({
         ruleId: sink.ruleId,
@@ -188,8 +471,8 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
         confidence: 'high',
         message: `跨文件污点流:${invocation.source} → ${sink.callee}`,
         file: edge.to,
-        line: (to.slice(0, exported.start).match(/\n/g) ?? []).length + 1,
-        snippet: exported.body.trim().split('\n')[0].slice(0, 240),
+        line: sinkLine,
+        snippet: sinkSnippet.length > 240 ? `${sinkSnippet.slice(0, 239)}…` : sinkSnippet,
         recommendation: sink.type === 'shell'
           ? '跨文件调用链仍接收模型输入;对工具输入做白名单校验并避免 shell 解释。'
           : '跨文件调用链必须限制目标与路径,并验证数据不会越权流出。',
