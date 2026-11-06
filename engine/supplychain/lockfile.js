@@ -25,15 +25,14 @@ export function detectLockfile(dir) {
 /**
  * 统计 lockfile 中的直接/传递依赖数量。
  * package-lock/shrinkwrap:精确(依赖 lockfile packages 图);
- * pnpm v9:精确(来自规范化 importers/packages/snapshots 图)。
- * yarn/bun:条目级估算(文档注明为估算值)。
+ * pnpm v9 / yarn / bun:精确来自规范化依赖图;图失败时显式返回零计数和原因,
+ * 绝不以缩进/正则估算冒充精确值。
  * @returns {{directDependencies: number, transitiveDependencies: number, dependencyCountComplete?: boolean, dependencyCountReason?: string}}
  */
 export function countDependencies(dir, lockfileName) {
-  const read = () => readFileSync(join(dir, lockfileName), 'utf8')
   try {
     if (lockfileName === 'package-lock.json' || lockfileName === 'npm-shrinkwrap.json') {
-      const doc = JSON.parse(read())
+      const doc = JSON.parse(readFileSync(join(dir, lockfileName), 'utf8'))
       const packages = doc.packages ?? {}
       const root = packages[''] ?? {}
       const direct =
@@ -44,12 +43,8 @@ export function countDependencies(dir, lockfileName) {
       const total = Object.keys(packages).filter((k) => k !== '').length
       return { directDependencies: direct, transitiveDependencies: Math.max(0, total - direct) }
     }
-    if (lockfileName === 'yarn.lock') {
-      const text = read()
-      const entries = (text.match(/^[^\s#][^:]*:$/gm) ?? []).length
-      return { directDependencies: 0, transitiveDependencies: entries }
-    }
-    if (lockfileName === 'pnpm-lock.yaml') {
+    if (lockfileName === 'pnpm-lock.yaml' || lockfileName === 'yarn.lock'
+      || lockfileName === 'bun.lock' || lockfileName === 'bun.lockb') {
       const graph = buildDependencyGraph(dir, { lockfileName })
       if (graph.complete !== true) {
         return {
@@ -67,14 +62,19 @@ export function countDependencies(dir, lockfileName) {
         dependencyCountComplete: true,
       }
     }
-    if (lockfileName === 'bun.lock') {
-      const text = read()
-      const entries = (text.match(/^[^\s#"][^:]*\{/gm) ?? []).length
-      return { directDependencies: 0, transitiveDependencies: entries }
-    }
   } catch {
-    // unreadable / unparseable — 返回 0,不抛错(仅识别不阻塞)
+    // 不可读 / 不可解析:返回显式不完整,不抛错、不伪造计数。
+    return {
+      directDependencies: 0,
+      transitiveDependencies: 0,
+      dependencyCountComplete: false,
+      dependencyCountReason: 'read-or-parse-error',
+    }
   }
-  // bun.lockb(二进制):只识别,统计为 0
-  return { directDependencies: 0, transitiveDependencies: 0 }
+  return {
+    directDependencies: 0,
+    transitiveDependencies: 0,
+    dependencyCountComplete: false,
+    dependencyCountReason: 'unsupported-lockfile',
+  }
 }

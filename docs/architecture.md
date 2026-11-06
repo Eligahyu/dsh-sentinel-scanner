@@ -51,7 +51,10 @@ engine/
     entropy.js             Shannon entropy
   supplychain/
     lockfile.js            lockfile 识别与依赖统计
-    dependency-graph.js    package-lock 标准化依赖节点/边;其他格式显式降级
+    dependency-graph.js    lockfile 调度 + npm 标准化;统一节点/边/失败契约
+    yarn-lock.js           yarn classic v1 / Berry 规范化
+    bun-lock.js            bun.lock JSONC 规范化;bun.lockb 显式降级
+    lockfile-graph-utils.js  共享路径/失败/证据链工具
     sbom.js                CycloneDX 1.6 / SPDX 2.3 确定性序列化
     provenance.js          metadata-only provenance 证据校验
     osv.js                 OSV 查询(默认关闭)
@@ -157,10 +160,13 @@ profile package.json direct dependencies
 - integrity:sha512 base64 与实际 tarball 比对;不匹配 → SEN-SUPPLY-004 + 至少 REVIEW
 - 解包被阻止 → SEN-SUPPLY-005 + BLOCK-RECOMMENDED + scanComplete=false
 - quarantine 目录在任何 success/failure/exception 路径都 finally cleanup
-- lockfile 识别(package-lock/shrinkwrap/pnpm/yarn/bun)+ 依赖统计; npm 与 pnpm v9 使用规范化图,
-  pnpm v9 解析 `importers/packages/snapshots`、workspace containment、peer-suffixed 实例和
-  `requiresBuild` 证据路径; malformed/escape/unresolved/unsupported/oversized 输入显式降级,
-  不猜测 direct/transitive 数量; yarn/bun 当前仅识别并报告 unsupported/degraded
+- lockfile 识别(package-lock/shrinkwrap/pnpm/yarn/bun)+ 依赖统计; npm、pnpm v9、
+  yarn classic v1、yarn Berry(format 4–8)与 bun 文本 lock 使用规范化图,
+  pnpm v9 解析 `importers/packages/snapshots`,yarn/bun 解析 workspace / 嵌套实例 / 别名;
+  `requiresBuild` / `hasInstallScript` / lifecycle scripts 在 lockfile 显式存在时生成证据链,
+  yarn/bun 格式本身不记录依赖脚本时明确标注 `installScriptEvidence.status=unavailable`;
+  `bun.lockb` 二进制识别魔数后显式 `unsupported-binary-lockfile` 降级;
+  malformed/escape/unresolved/unsupported/oversized 输入显式降级,不猜测 direct/transitive 数量
 
 ## 8. 报告 schema v2
 

@@ -379,10 +379,18 @@ export async function scan(target, opts = {}) {
       supplyChain: dependencyGraph ? {
         dependencyGraph: {
           lockfile: dependencyGraph.lockfile,
+          ecosystem: dependencyGraph.ecosystem,
+          lockfileVersion: dependencyGraph.lockfileVersion ?? null,
           nodes: dependencyGraph.nodes.length,
           edges: dependencyGraph.edges.length,
           complete: dependencyGraph.complete,
+          failures: dependencyGraph.failures ?? [],
           buildRequirements: dependencyGraph.buildRequirements ?? [],
+          ...(dependencyGraph.installScriptEvidence
+            ? { installScriptEvidence: dependencyGraph.installScriptEvidence }
+            : {}),
+          ...(dependencyGraph.degraded ? { degraded: true } : {}),
+          ...(dependencyGraph.format ? { format: dependencyGraph.format } : {}),
         },
       } : {},
     },

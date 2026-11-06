@@ -4,12 +4,23 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join, posix } from 'node:path'
 import { parseAllDocuments } from 'yaml'
 import { resolveInside } from '../path-safety.js'
+import { buildBunGraph } from './bun-lock.js'
+import {
+  LOCKFILE_FAILURE_LIMIT,
+  LOCKFILE_GRAPH_MAX_EDGES,
+  LOCKFILE_GRAPH_MAX_LINES,
+  LOCKFILE_GRAPH_MAX_NODES,
+  buildShortestPathIndex,
+  makeFailureRecorder,
+  shortestDependencyPath,
+} from './lockfile-graph-utils.js'
+import { buildYarnGraph } from './yarn-lock.js'
 
 export const DEPENDENCY_LOCKFILE_MAX_BYTES = 64 * 1024 * 1024
-export const PNPM_FAILURE_LIMIT = 1000
-export const PNPM_GRAPH_MAX_NODES = 20_000
-export const PNPM_GRAPH_MAX_EDGES = 100_000
-export const PNPM_LOCKFILE_MAX_LINES = 100_000
+export const PNPM_FAILURE_LIMIT = LOCKFILE_FAILURE_LIMIT
+export const PNPM_GRAPH_MAX_NODES = LOCKFILE_GRAPH_MAX_NODES
+export const PNPM_GRAPH_MAX_EDGES = LOCKFILE_GRAPH_MAX_EDGES
+export const PNPM_LOCKFILE_MAX_LINES = LOCKFILE_GRAPH_MAX_LINES
 
 function readJson(file) {
   try {
@@ -52,13 +63,6 @@ function candidateKeys(parentKey, dependency) {
   }
   out.push(`node_modules/${dependency}`)
   return [...new Set(out)]
-}
-
-function unsupportedLockfile(dir) {
-  for (const name of ['pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb']) {
-    if (existsSync(join(dir, name))) return name
-  }
-  return null
 }
 
 function isPlainMap(value) {
@@ -143,23 +147,6 @@ function readPnpmDocument(file, { maxLines = PNPM_LOCKFILE_MAX_LINES } = {}) {
   return { error: { reason: 'parse-error', path: 'pnpm-lock.yaml' } }
 }
 
-function makeFailureRecorder(limit = PNPM_FAILURE_LIMIT) {
-  const failures = []
-  let dropped = 0
-  return {
-    add(failure) {
-      if (failures.length < Math.max(0, limit - 1)) failures.push(failure)
-      else dropped += 1
-    },
-    finish() {
-      if (dropped > 0) {
-        failures.push({ reason: 'failure-truncated', path: 'pnpm-lock.yaml', dropped, maxFailures: limit })
-      }
-      return failures
-    },
-  }
-}
-
 function pnpmPackageIdentity(key, entry = {}) {
   const withoutPeers = String(key).split('(')[0]
   const separator = withoutPeers.lastIndexOf('@')
@@ -240,44 +227,6 @@ function countPnpmEdges(doc) {
   return edges
 }
 
-function pathLabel(node) {
-  return node.peer ? node.id : `${node.name}@${node.version}`
-}
-
-function buildShortestPathIndex(graph) {
-  const nodeById = new Map(graph.nodes.map((node) => [node.id, node]))
-  const predecessor = new Map()
-  const distance = new Map()
-  const queue = []
-  for (const node of graph.nodes.filter((item) => item.direct).sort((a, b) => a.id.localeCompare(b.id))) {
-    distance.set(node.id, 0)
-    predecessor.set(node.id, null)
-    queue.push(node.id)
-  }
-  for (let head = 0; head < queue.length; head += 1) {
-    const id = queue[head]
-    const node = nodeById.get(id)
-    for (const child of [...(node?.children ?? [])].sort()) {
-      if (distance.has(child)) continue
-      distance.set(child, distance.get(id) + 1)
-      predecessor.set(child, id)
-      queue.push(child)
-    }
-  }
-  return { nodeById, predecessor, distance }
-}
-
-function shortestDependencyPath(index, targetId, root) {
-  if (!index.distance.has(targetId)) return []
-  const ids = []
-  for (let current = targetId; current !== null; current = index.predecessor.get(current)) {
-    ids.push(current)
-  }
-  const labels = ids.reverse().map((id) => pathLabel(index.nodeById.get(id)))
-  if (root?.name) labels.unshift(`${root.name}@${root.version ?? ''}`)
-  return labels
-}
-
 function buildPnpmGraph(dir, { maxNodes = PNPM_GRAPH_MAX_NODES, maxEdges = PNPM_GRAPH_MAX_EDGES, maxLines = PNPM_LOCKFILE_MAX_LINES } = {}) {
   const lockfile = 'pnpm-lock.yaml'
   const loaded = readPnpmDocument(join(dir, lockfile), { maxLines })
@@ -310,7 +259,7 @@ function buildPnpmGraph(dir, { maxNodes = PNPM_GRAPH_MAX_NODES, maxEdges = PNPM_
   const snapshots = Object.entries(doc.snapshots)
   const snapshotReferenceIndex = buildPnpmReferenceIndex(snapshots.map(([id]) => id))
   const directById = new Map()
-  const failureRecorder = makeFailureRecorder()
+  const failureRecorder = makeFailureRecorder(PNPM_FAILURE_LIMIT, lockfile)
   const rootDirectNames = new Set()
   const workspaceDescriptors = new Map()
   for (const importerId of Object.keys(doc.importers)) {
@@ -458,68 +407,32 @@ function buildPnpmGraph(dir, { maxNodes = PNPM_GRAPH_MAX_NODES, maxEdges = PNPM_
   return graph
 }
 
-/**
- * Build an exact npm package-lock v2/v3 graph. Unsupported lockfiles return
- * an explicit incomplete result instead of fabricated dependency counts.
- */
-export function buildDependencyGraph(dir, {
-  maxBytes = DEPENDENCY_LOCKFILE_MAX_BYTES,
-  lockfileName = null,
-  maxNodes = PNPM_GRAPH_MAX_NODES,
-  maxEdges = PNPM_GRAPH_MAX_EDGES,
-  maxLines = PNPM_LOCKFILE_MAX_LINES,
-} = {}) {
-  const lockPath = join(dir, 'package-lock.json')
-  const tooLarge = (path, lockfile, ecosystem) => {
-    try {
-      const bytes = statSync(path).size
-      if (bytes > maxBytes) {
-        return {
-          ecosystem,
-          lockfile,
-          nodes: [],
-          edges: [],
-          failures: [{ reason: 'lockfile-too-large', path: lockfile, bytes, maxBytes }],
-          complete: false,
-        }
-      }
-    } catch {
-      // The parser reports an explicit read/parse failure below.
-    }
-    return null
-  }
-  if (lockfileName === 'pnpm-lock.yaml') {
-    const pnpmPath = join(dir, 'pnpm-lock.yaml')
-    if (!existsSync(pnpmPath)) {
-      return { ecosystem: 'pnpm', lockfile: 'pnpm-lock.yaml', nodes: [], edges: [], failures: [{ reason: 'missing-lockfile', path: 'pnpm-lock.yaml' }], complete: false }
-    }
-    return tooLarge(pnpmPath, 'pnpm-lock.yaml', 'pnpm') ?? buildPnpmGraph(dir, { maxNodes, maxEdges, maxLines })
-  }
-  if (!existsSync(lockPath)) {
-    const pnpmPath = join(dir, 'pnpm-lock.yaml')
-    if (existsSync(pnpmPath)) {
-      return tooLarge(pnpmPath, 'pnpm-lock.yaml', 'pnpm') ?? buildPnpmGraph(dir, { maxNodes, maxEdges, maxLines })
-    }
-    const unsupported = unsupportedLockfile(dir)
-    return {
-      ecosystem: unsupported?.startsWith('bun') ? 'bun' : unsupported?.startsWith('pnpm') ? 'pnpm' : 'yarn',
-      lockfile: unsupported,
-      nodes: [],
-      edges: [],
-      failures: [{ reason: unsupported ? 'unsupported-lockfile' : 'missing-lockfile', path: unsupported ?? 'package-lock.json' }],
-      complete: false,
-    }
-  }
-  const sizeFailure = tooLarge(lockPath, 'package-lock.json', 'npm')
-  if (sizeFailure) return sizeFailure
-  const doc = readJson(lockPath)
+function buildNpmGraph(dir, lockfile, { maxNodes = PNPM_GRAPH_MAX_NODES, maxEdges = PNPM_GRAPH_MAX_EDGES } = {}) {
+  const doc = readJson(join(dir, lockfile))
   if (!doc || ![2, 3].includes(doc.lockfileVersion) || !doc.packages || typeof doc.packages !== 'object') {
-    return { ecosystem: 'npm', lockfile: 'package-lock.json', nodes: [], edges: [], failures: [{ reason: 'parse-error', path: 'package-lock.json' }], complete: false }
+    return { ecosystem: 'npm', lockfile, nodes: [], edges: [], failures: [{ reason: 'parse-error', path: lockfile }], complete: false }
   }
-
   const root = doc.packages[''] ?? readJson(join(dir, 'package.json')) ?? {}
   const entries = Object.entries(doc.packages).filter(([key]) => key !== '')
+  if (entries.length > maxNodes) {
+    return {
+      ecosystem: 'npm', lockfile, lockfileVersion: doc.lockfileVersion, nodes: [], edges: [],
+      failures: [{ reason: 'graph-node-limit', path: lockfile, nodes: entries.length, maxNodes }], complete: false,
+    }
+  }
   const byKey = new Map(entries.map(([key]) => [key, { key, ...doc.packages[key] }]))
+  let edgeCount = 0
+  for (const entry of byKey.values()) {
+    edgeCount += Object.keys(entry.dependencies ?? {}).length
+    edgeCount += Object.keys(entry.optionalDependencies ?? {}).length
+    edgeCount += Object.keys(entry.peerDependencies ?? {}).length
+  }
+  if (edgeCount > maxEdges) {
+    return {
+      ecosystem: 'npm', lockfile, lockfileVersion: doc.lockfileVersion, nodes: [], edges: [],
+      failures: [{ reason: 'graph-edge-limit', path: lockfile, edges: edgeCount, maxEdges }], complete: false,
+    }
+  }
   const nodes = entries.map(([key, entry]) => {
     const name = entry.name ?? packageNameFromKey(key)
     const kinds = dependencyKinds(root, name)
@@ -565,7 +478,7 @@ export function buildDependencyGraph(dir, {
   }
   const graph = {
     ecosystem: 'npm',
-    lockfile: 'package-lock.json',
+    lockfile,
     lockfileVersion: doc.lockfileVersion,
     root: { name: root.name ?? '', version: String(root.version ?? ''), directDependencies: directNames(root).size },
     nodes,
@@ -584,6 +497,102 @@ export function buildDependencyGraph(dir, {
       dependencyPaths: [shortestDependencyPath(pathIndex, node.id, graph.root)].filter((path) => path.length > 0),
     }))
   return graph
+}
+
+const SUPPORTED_LOCKFILES = [
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+  'bun.lock',
+  'bun.lockb',
+]
+
+function ecosystemForLockfile(lockfile) {
+  if (lockfile === 'package-lock.json' || lockfile === 'npm-shrinkwrap.json') return 'npm'
+  if (lockfile === 'pnpm-lock.yaml') return 'pnpm'
+  if (lockfile === 'yarn.lock') return 'yarn'
+  return 'bun'
+}
+
+function emptyLockfileGraph(ecosystem, lockfile, failure, extra = {}) {
+  return {
+    ecosystem,
+    lockfile,
+    nodes: [],
+    edges: [],
+    failures: [failure],
+    complete: false,
+    buildRequirements: [],
+    ...extra,
+  }
+}
+
+/**
+ * Build an exact npm/pnpm/yarn/bun dependency graph. Unsupported or malformed
+ * lockfiles return an explicit incomplete result instead of fabricated counts.
+ */
+export function buildDependencyGraph(dir, {
+  maxBytes = DEPENDENCY_LOCKFILE_MAX_BYTES,
+  lockfileName = null,
+  maxNodes = PNPM_GRAPH_MAX_NODES,
+  maxEdges = PNPM_GRAPH_MAX_EDGES,
+  maxLines = PNPM_LOCKFILE_MAX_LINES,
+} = {}) {
+  const tooLarge = (path, lockfile, ecosystem) => {
+    try {
+      const bytes = statSync(path).size
+      if (bytes > maxBytes) {
+        return {
+          ecosystem,
+          lockfile,
+          nodes: [],
+          edges: [],
+          failures: [{ reason: 'lockfile-too-large', path: lockfile, bytes, maxBytes }],
+          complete: false,
+          buildRequirements: [],
+        }
+      }
+    } catch {
+      // The parser reports an explicit read/parse failure below.
+    }
+    return null
+  }
+  const build = (lockfile) => {
+    const path = join(dir, lockfile)
+    const ecosystem = ecosystemForLockfile(lockfile)
+    const sizeFailure = tooLarge(path, lockfile, ecosystem)
+    if (sizeFailure) return sizeFailure
+    if (lockfile === 'package-lock.json' || lockfile === 'npm-shrinkwrap.json') {
+      return buildNpmGraph(dir, lockfile, { maxNodes, maxEdges })
+    }
+    if (lockfile === 'pnpm-lock.yaml') return buildPnpmGraph(dir, { maxNodes, maxEdges, maxLines })
+    if (lockfile === 'yarn.lock') return buildYarnGraph(dir, { maxNodes, maxEdges, maxLines })
+    if (lockfile === 'bun.lock' || lockfile === 'bun.lockb') {
+      return buildBunGraph(dir, { lockfileName: lockfile, maxNodes, maxEdges, maxLines })
+    }
+    return emptyLockfileGraph(ecosystem, lockfile, { reason: 'unsupported-lockfile', path: lockfile })
+  }
+
+  if (lockfileName !== null) {
+    if (!SUPPORTED_LOCKFILES.includes(lockfileName)) {
+      return emptyLockfileGraph('unknown', lockfileName, { reason: 'unsupported-lockfile', path: lockfileName })
+    }
+    if (!existsSync(join(dir, lockfileName))) {
+      return emptyLockfileGraph(
+        ecosystemForLockfile(lockfileName),
+        lockfileName,
+        { reason: 'missing-lockfile', path: lockfileName },
+      )
+    }
+    return build(lockfileName)
+  }
+
+  const selected = SUPPORTED_LOCKFILES.find((name) => existsSync(join(dir, name)))
+  if (!selected) {
+    return emptyLockfileGraph('npm', 'package-lock.json', { reason: 'missing-lockfile', path: 'package-lock.json' })
+  }
+  return build(selected)
 }
 
 export function dependencyPaths(graph, targetName) {

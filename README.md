@@ -92,7 +92,7 @@ dsh-sentinel is designed for two audiences:
 | DSH manifest validation | Audits `dsh.bundle`, `cordis.patch.yml`, package entry contracts, and lexical/realpath/symlink containment. Escaping paths trigger `SEN-MAN-009`. |
 | Scan modes | `source` skips generated build trees by default; `package` includes distributable output such as `dist` and `build`; `profile` discovers and audits installed DSH plugins. |
 | Pre-install quarantine | Safely extracts npm tarballs while blocking traversal, absolute paths, drive paths, symlink/hardlink entries, and tar bombs. Verifies sha512 integrity and cleans up all artifacts. |
-| Supply-chain analysis | Inspects lifecycle scripts, npm and pnpm v9 normalized lockfile graphs, package metadata, optional OSV advisories, optional provenance, and source-versus-package drift. Unsupported lockfile formats remain explicit warnings. |
+| Supply-chain analysis | Inspects lifecycle scripts, npm, pnpm v9, Yarn classic/Berry, and Bun normalized lockfile graphs, package metadata, optional OSV advisories, optional provenance, and source-versus-package drift. Binary or otherwise unsupported lockfile formats remain explicit warnings. |
 | Native artifacts | Audits `.wasm`, `.exe`, `.dll`, `.so`, `.node`, and related files using magic bytes, size, SHA-256, entropy, and printable strings. Binaries are never executed. |
 | Professional report layers | Stable report schema v2 with module graph, dependency graph, capability graph, SBOM, provenance, attack chains, coverage, and failure metadata. |
 | Output and CI | Text, JSON, SARIF 2.1.0, standalone HTML, CycloneDX, and SPDX output; stable fingerprints, baselines, threshold exits, and incomplete-scan enforcement. |
@@ -108,7 +108,7 @@ Scan completeness distinguishes security-critical coverage from optional enrichm
 - dependency graph, SBOM, provenance, and capability-graph failures are preserved
   as warnings and degraded output rather than falsely claiming source files were
   not scanned;
-- unsupported or complex lockfile formats are reported instead of producing
+- unsupported or binary lockfile formats are reported instead of producing
   guessed dependency data.
 
 ## Dynamic Analysis (Phase B)
@@ -241,36 +241,56 @@ only when `--fail-on-incomplete` or `--strict-exit-codes` is set. Without either
 strict flag, the deep-layer result remains visible but does not by itself fail
 CI. This policy applies independently of static completeness.
 
-### pnpm v9 dependency intelligence
+### Lockfile dependency intelligence
 
-dsh-sentinel supports the pnpm v9 lockfile layout as a read-only, normalized
-dependency graph. It parses `importers`, `packages`, and `snapshots` with a
-standards-aware YAML parser, preserves peer-suffixed package instances, resolves
-`workspace:` / `link:` importer relationships, and keeps npm aliases attached to
-the installed package identity. Workspace importer paths are containment-checked;
-malformed YAML, path escapes, unresolved references, oversized lockfiles, and
-unsupported pnpm lockfile versions are reported as explicit dependency-layer
-failures rather than converted into guessed nodes.
+dsh-sentinel builds read-only, normalized dependency graphs from
+`package-lock.json` / `npm-shrinkwrap.json` v2-v3, pnpm v9, Yarn classic v1,
+Yarn Berry (lockfile format 4-8), and Bun text `bun.lock` v1-v2. Each graph keeps
+direct versus transitive package instances, workspace containment, aliases,
+optional/dev/peer flags, integrity or checksum metadata, dependency edges, and
+explicit failure records.
 
-The graph separates root direct dependencies from transitive package instances.
-The dependency summary uses this normalized graph for pnpm v9, so its direct and
-transitive counts are reproducible from the lockfile rather than inferred from
-indentation or regular-expression matches. If normalization fails, the summary
-returns zero counts with an explicit incomplete reason; it never presents a
-partial count as exact.
+The summary counts are reproducible from the normalized graph instead of being
+inferred from indentation or regular-expression matches. If normalization fails,
+the summary returns zero counts with an explicit incomplete reason; it never
+presents a partial count as exact. Malformed input, path escapes, unresolved
+references, oversized lockfiles, and unsupported lockfile versions are preserved
+as dependency-layer failures.
 
-pnpm's `requiresBuild: true` field is retained as build evidence. It means pnpm
-recorded that the package requires a build step in the install plan; it does not
-prove that a specific lifecycle script is present, and dsh-sentinel deliberately
-does not label it as a known install script. Each such package can include a
-shortest root-to-package dependency path in the report. The same evidence is
-carried into CycloneDX and SPDX exports, with unique component references for
-peer-suffixed instances. SBOM output remains a serialization of observed graph
-metadata, not a claim that package code was executed or installed.
+#### npm and pnpm v9
 
-The current exact lockfile graph support is pnpm v9. Yarn and Bun lockfiles are
-recognized and reported with an explicit unsupported/degraded state; they are
-not counted as if their formats were fully normalized.
+npm package-lock v2/v3 uses the physical `packages` tree, including
+`hasInstallScript`. pnpm v9 parses `importers`, `packages`, and `snapshots`,
+preserves peer-suffixed instances, resolves `workspace:` / `link:` relationships,
+and keeps npm aliases attached to the installed package identity. pnpm's
+`requiresBuild: true` field is retained as build evidence: it means pnpm recorded
+that the package requires a build step, not that a specific lifecycle script is
+known. Each such package includes a shortest root-to-package dependency path.
+SBOM output carries the same evidence, with unique component references for
+peer-suffixed instances.
+
+#### Yarn classic and Berry
+
+Yarn classic v1 is parsed with its indentation-sensitive format. Yarn Berry v2-v4
+is parsed as YAML and validated against `__metadata.version` 4-8. Both variants
+resolve multi-selector entries, npm aliases, workspace links, and dependency
+chains. Workspace paths are containment-checked; `workspace:../outside`-style
+paths are reported as `workspace-path-error` instead of reading outside the scan
+root. Yarn lockfiles do not record dependency lifecycle scripts, so the graph
+reports `installScriptEvidence.status: "unavailable"` and does not fabricate
+`buildRequirements`. If an explicit `hasInstallScript`, `requiresBuild`, or
+lifecycle `scripts` field is present, the same evidence chain contract as pnpm is
+used.
+
+#### Bun
+
+Text `bun.lock` is JSONC (comments and trailing commas) and is normalized into
+workspaces, package instances, nested version keys, aliases, and dependencies.
+Bun text lockfiles also do not record dependency lifecycle scripts; explicit
+build metadata is honored when present, otherwise the evidence is marked
+unavailable. Binary `bun.lockb` is recognized by its
+`#!/usr/bin/env bun` / `bun-lockfile-format-v0` header and reported as an explicit
+`unsupported-binary-lockfile` degradation with no fabricated nodes or counts.
 
 ## Installation and quick start
 

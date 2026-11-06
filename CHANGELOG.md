@@ -8,13 +8,17 @@
 - Dependabot、CODEOWNERS、贡献指南、行为准则，以及结构化 Issue / Pull Request 模板。
 - 静态 CommonJS `require` / `require.resolve` 模块图边，以及 CommonJS 解构导入到导出函数/箭头函数的跨文件污点链。
 - pnpm v9 `importers` / `packages` / `snapshots` 规范化依赖图、workspace containment、peer 实例保留、`requiresBuild` 证据链和 CycloneDX / SPDX 组件引用。
+- Yarn classic v1 与 Yarn Berry(format 4–8)规范化依赖图:多 selector、npm alias、workspace containment、direct/transitive 统计和显式 dependency-layer failure。
+- Bun 文本 `bun.lock`(JSONC)规范化依赖图,支持 workspace、嵌套版本键、alias 与 optional 边;`bun.lockb` 识别二进制头后显式 `unsupported-binary-lockfile` 降级,不伪造节点或计数。
+- dependency graph 新增 `installScriptEvidence`:Yarn/Bun 格式不记录依赖脚本时明确 `unavailable`;存在显式 `requiresBuild` / `hasInstallScript` / lifecycle scripts 时生成与 pnpm 一致的证据路径。
 
 ### Changed
 
 - CI 改为执行 `package.json` 中的完整测试契约，并升级到 Node 24 运行时的官方 Actions。
 - 仓库递归自扫描显式报告 `engine/**`、`test/**`、`scripts/**` 排除范围；核心引擎改由 CodeQL 独立覆盖。
 - 动态模块目标现在作为结构化 warning 报告，不再静默忽略或猜测依赖边；TypeScript fallback 可恢复字面量 CommonJS 引用。
-- pnpm v9 direct/transitive 依赖统计改为读取规范化图；图失败时返回零计数和显式不完整原因，不再使用缩进正则猜测。
+- pnpm v9、Yarn 与 Bun direct/transitive 依赖统计改为读取规范化图；图失败时返回零计数和显式不完整原因，不再使用缩进/正则估算。
+- 报告 `supplyChain.dependencyGraph` 补齐 `ecosystem`、`lockfileVersion`、`failures`、`installScriptEvidence` 与 `degraded`，辅助层失败仍不误判核心扫描不完整。
 
 ### Fixed
 
@@ -26,6 +30,7 @@
 - CodeQL 明确覆盖 `engine` / `plugin` / `bin` 发布面；测试语料不再混入核心代码告警。
 - 重写不受信源码的 child-process 别名提取、patch 行解析和开发 runner 识别，消除多项 polynomial ReDoS 路径；动态别名进入正则前执行完整元字符转义。
 - malformed pnpm YAML、workspace importer 路径逃逸、oversized lockfile 和未知 pnpm 版本均保留明确 dependency-layer failure；`requiresBuild` 不再被误称为已知安装脚本。
+- malformed Yarn/Bun lock、workspace 路径逃逸、未知 Yarn/Bun 版本、无法解析的依赖描述符和对不上的依赖边均保留明确失败,不再静默猜成 0 条或估算条数。
 
 ## 0.4.4 (2026-08-23) — Professional Scanner Release
 
