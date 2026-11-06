@@ -1,17 +1,27 @@
 /**
  * Read-only JavaScript/TypeScript module graph.
  *
- * This module never imports a target module. It parses import declarations and
- * resolves only files contained by the scan root. External packages are kept
+ * This module never imports or executes a target module. It resolves static
+ * import/export declarations and dynamic import()/require()/require.resolve()
+ * calls whose specifiers fold to a static string. External packages are kept
  * as unresolved edges so callers can distinguish a graph gap from a package
- * boundary.
+ * boundary. Targets that cannot be folded stay warnings and never become edges.
  */
 
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, extname, join, relative, resolve } from 'node:path'
-import { parseJavaScript, walk, staticString, staticStringOf } from './ast.js'
+import { parseJavaScript, walk, staticString } from './ast.js'
 import { resolveInside } from '../path-safety.js'
+import {
+  bindingsForImportCall,
+  buildConstStringLookup,
+  evaluateStaticSpecifier,
+  parentMap,
+  readCallArgument,
+  recoverStaticSpecifier,
+  requireCallKind,
+} from './static-specifier.js'
 
 const SOURCE_EXTENSIONS = ['.js', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts', '.jsx']
 
@@ -115,6 +125,8 @@ export function resolveModuleSpecifier(root, importer, specifier) {
 }
 
 function importSpecifiers(ast) {
+  const lookup = buildConstStringLookup(ast)
+  const parents = parentMap(ast)
   const out = []
   walk(ast, (node) => {
     if (node.type === 'ImportDeclaration') {
@@ -124,27 +136,31 @@ function importSpecifiers(ast) {
       const specifier = staticString(node.source)
       if (specifier !== null) out.push({ specifier, start: node.source.start, kind: 'static-import' })
     } else if (node.type === 'ImportExpression') {
-      const specifier = staticStringOf(node.source)
+      const specifier = recoverStaticSpecifier(node.source, lookup)
       out.push({
         specifier,
-        start: node.source.start,
+        start: node.source?.start ?? node.start,
         kind: specifier === null ? 'dynamic-import' : 'static-import',
+        fromCall: true,
+        bindings: specifier === null ? [] : bindingsForImportCall(node, parents, lookup),
       })
-    } else if (node.type === 'CallExpression' && node.arguments.length === 1) {
-      const directRequire = node.callee?.type === 'Identifier' && node.callee.name === 'require'
-      const requireResolve = node.callee?.type === 'MemberExpression'
-        && node.callee.object?.type === 'Identifier'
-        && node.callee.object.name === 'require'
-        && ((!node.callee.computed && node.callee.property?.name === 'resolve')
-          || (node.callee.computed && staticStringOf(node.callee.property) === 'resolve'))
-      if (!directRequire && !requireResolve) return
-      const specifier = staticStringOf(node.arguments[0])
+    } else if (node.type === 'CallExpression') {
+      const callKind = requireCallKind(node.callee)
+      if (!callKind) return
+      const arg = node.arguments?.[0]
+      const dynamicKind = callKind === 'resolve' ? 'dynamic-require-resolve' : 'dynamic-require'
+      const staticKind = callKind === 'resolve' ? 'static-require-resolve' : 'static-require'
+      if (!arg) {
+        out.push({ specifier: null, start: node.start, kind: dynamicKind, fromCall: true, bindings: [] })
+        return
+      }
+      const specifier = recoverStaticSpecifier(arg, lookup)
       out.push({
         specifier,
-        start: node.arguments[0].start,
-        kind: specifier === null
-          ? (requireResolve ? 'dynamic-require-resolve' : 'dynamic-require')
-          : (requireResolve ? 'static-require-resolve' : 'static-require'),
+        start: arg.start,
+        kind: specifier === null ? dynamicKind : staticKind,
+        fromCall: true,
+        bindings: specifier === null || callKind === 'resolve' ? [] : bindingsForImportCall(node, parents, lookup),
       })
     }
   })
@@ -218,6 +234,181 @@ function codePositions(content) {
   return positions
 }
 
+function skipWs(source, index, end = source.length) {
+  let i = index
+  while (i < end && /\s/.test(source[i])) i += 1
+  return i
+}
+
+function matchDelim(source, openIndex, openChar, closeChar) {
+  if (source[openIndex] !== openChar) return -1
+  let depth = 1
+  let quote = null
+  let escaped = false
+  for (let i = openIndex + 1; i < source.length; i += 1) {
+    const ch = source[i]
+    if (quote) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') quote = ch
+    else if (ch === openChar) depth += 1
+    else if (ch === closeChar && --depth === 0) return i
+  }
+  return -1
+}
+
+function splitTopLevel(text, separator) {
+  const parts = []
+  let quote = null
+  let escaped = false
+  let depth = 0
+  let start = 0
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (quote) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') quote = ch
+    else if (ch === '(' || ch === '{' || ch === '[') depth += 1
+    else if (ch === ')' || ch === '}' || ch === ']') depth = Math.max(0, depth - 1)
+    else if (ch === separator && depth === 0) {
+      parts.push(text.slice(start, i))
+      start = i + 1
+    }
+  }
+  parts.push(text.slice(start))
+  return parts
+}
+
+function namedBindingsFromPattern(text) {
+  const out = []
+  for (const part of splitTopLevel(text, ',')) {
+    const trimmed = part.trim()
+    if (!trimmed || trimmed.startsWith('...')) continue
+    const match = /^([A-Za-z_$][\w$]*)\s*(?::\s*([A-Za-z_$][\w$]*))?(?:\s*=\s*[\s\S]*)?$/.exec(trimmed)
+    if (!match) continue
+    out.push({ imported: match[1], local: match[2] ?? match[1] })
+  }
+  return out
+}
+
+/** Find `=` that terminates a type annotation, without crossing a statement boundary. */
+function findEqualsAfterType(source, index) {
+  let quote = null
+  let escaped = false
+  let depth = 0
+  const limit = Math.min(source.length, index + 2000)
+  for (let i = index; i < limit; i += 1) {
+    const ch = source[i]
+    if (quote) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch
+      continue
+    }
+    if (ch === '{' || ch === '(' || ch === '[') {
+      depth += 1
+      continue
+    }
+    if (ch === '}' || ch === ')' || ch === ']') {
+      depth -= 1
+      if (depth < 0) return -1
+      continue
+    }
+    if (depth === 0 && (ch === '\n' || ch === ';')) return -1
+    if (depth === 0 && ch === '=') return i
+  }
+  return -1
+}
+
+const INIT_CALL = /^\s*(?:await\s+)?(?:\([^()\n]{0,100},\s*)?((?:require(?:\s*\.\s*resolve)?)|import)(?:\s*\?\.)?\s*(?:\)\s*)?\(/
+
+function destructuredCallBindings(source, code) {
+  const byStart = new Map()
+  const declRe = /(?:const|let|var)\s*\{/g
+  let match
+  while ((match = declRe.exec(source)) !== null) {
+    if (code[match.index] !== 1) continue
+    const brace = match.index + match[0].length - 1
+    const patternEnd = matchDelim(source, brace, '{', '}')
+    if (patternEnd < 0) continue
+    let cursor = skipWs(source, patternEnd + 1)
+    if (source[cursor] === ':') {
+      const eq = findEqualsAfterType(source, cursor + 1)
+      if (eq < 0) continue
+      cursor = eq
+    }
+    if (source[cursor] !== '=') continue
+    const init = INIT_CALL.exec(source.slice(cursor + 1, cursor + 501))
+    if (!init) continue
+    const keywordOffset = init[0].search(/\b(?:require|import)\b/)
+    const keywordIndex = cursor + 1 + keywordOffset
+    if (keywordOffset < 0 || code[keywordIndex] !== 1) continue
+    if (/\bresolve\b/.test(init[1])) continue
+    const open = cursor + 1 + init[0].length - 1
+    const arg = readCallArgument(source, open)
+    if (!arg) continue
+    const specifier = evaluateStaticSpecifier(source, arg.start, arg.end)
+    if (specifier === null) continue
+    const bindings = namedBindingsFromPattern(source.slice(brace + 1, patternEnd))
+    if (bindings.length === 0) continue
+    byStart.set(arg.start, bindings)
+    declRe.lastIndex = arg.close + 1
+  }
+  return byStart
+}
+
+/** TypeScript `import()` type queries are erased and are not runtime edges. */
+function isTypePositionImport(source, keywordIndex) {
+  const before = source.slice(Math.max(0, keywordIndex - 48), keywordIndex)
+  if (/(?:typeof|[:|&])\s*$/.test(before)) return true
+  const lineStart = source.lastIndexOf('\n', keywordIndex - 1) + 1
+  return /^\s*(?:export\s+)?(?:declare\s+)?(?:type|interface)\b/.test(source.slice(lineStart, keywordIndex))
+}
+
+function scanCallSpecifiers(source, code) {
+  const bindings = destructuredCallBindings(source, code)
+  const found = []
+  const callRe = /(?<![\w$.])((?:require(?:\s*\.\s*resolve)?)|import)(?:\s*\?\.)?\s*(?:\)\s*)?\(/g
+  let match
+  while ((match = callRe.exec(source)) !== null) {
+    const keywordOffset = match[0].search(/\b(?:require|import)\b/)
+    if (keywordOffset < 0 || code[match.index + keywordOffset] !== 1) continue
+    if (match[1] === 'import' && isTypePositionImport(source, match.index + keywordOffset)) continue
+    const open = match.index + match[0].length - 1
+    const isImport = match[1] === 'import'
+    const isResolve = !isImport && /\bresolve\b/.test(match[1])
+    const dynamicKind = isImport ? 'dynamic-import' : isResolve ? 'dynamic-require-resolve' : 'dynamic-require'
+    const staticKind = isImport ? 'static-import' : isResolve ? 'static-require-resolve' : 'static-require'
+    const arg = readCallArgument(source, open)
+    if (!arg) {
+      callRe.lastIndex = open + 1
+      found.push({ specifier: null, start: open + 1, kind: dynamicKind, fromCall: true, bindings: [] })
+      continue
+    }
+    callRe.lastIndex = arg.close + 1
+    const specifier = evaluateStaticSpecifier(source, arg.start, arg.end)
+    found.push({
+      specifier,
+      start: arg.start,
+      kind: specifier === null ? dynamicKind : staticKind,
+      fromCall: true,
+      bindings: specifier === null || isResolve ? [] : (bindings.get(arg.start) ?? []),
+    })
+  }
+  return found
+}
+
 /** Conservative ESM import/export recovery for TypeScript Acorn cannot parse. */
 function fallbackImportSpecifiers(content) {
   const source = withoutComments(content)
@@ -226,11 +417,6 @@ function fallbackImportSpecifiers(content) {
   const patterns = [
     { pattern: /(?:^|[;\r\n])\s*import\s*(['"])([^'"\r\n]+)\1/g, keyword: /\bimport\b/, kind: 'static-import', specifierGroup: 2 },
     { pattern: /(?:^|[;\r\n])\s*(?:import|export)\s+(?:type\s+)?[^;]{0,2000}?\bfrom\s*(['"])([^'"\r\n]+)\1/g, keyword: /\b(?:import|export)\b/, kind: 'static-import', specifierGroup: 2 },
-    { pattern: /(?<![\w$.])require\s*\.\s*resolve\s*\(\s*(['"])([^'"\r\n]+)\1\s*\)/g, keyword: /\brequire\b/, kind: 'static-require-resolve', specifierGroup: 2 },
-    { pattern: /(?<![\w$.])require\s*\(\s*(['"])([^'"\r\n]+)\1\s*\)/g, keyword: /\brequire\b/, kind: 'static-require', specifierGroup: 2 },
-    { pattern: /(?<![\w$.])require\s*\.\s*resolve\s*\((?!\s*['"])\s*/g, keyword: /\brequire\b/, kind: 'dynamic-require-resolve' },
-    { pattern: /(?<![\w$.])require\s*\((?!\s*['"])\s*/g, keyword: /\brequire\b/, kind: 'dynamic-require' },
-    { pattern: /\bimport\s*\((?!\s*['"])\s*/g, keyword: /\bimport\b/, kind: 'dynamic-import' },
   ]
   for (const { pattern, keyword, kind, specifierGroup } of patterns) {
     let match
@@ -244,11 +430,12 @@ function fallbackImportSpecifiers(content) {
       found.push({ specifier, start, kind })
     }
   }
+  found.push(...scanCallSpecifiers(source, code))
   const seen = new Set()
   return found
-    .sort((a, b) => a.start - b.start)
+    .sort((a, b) => a.start - b.start || String(a.kind).localeCompare(String(b.kind)))
     .filter((item) => {
-      const key = `${item.start}|${item.specifier}`
+      const key = `${item.start}|${item.specifier}|${item.kind}`
       if (seen.has(key)) return false
       seen.add(key)
       return true
@@ -265,8 +452,23 @@ function nodeFor(root, abs, content, ast) {
   }
 }
 
+/** Copy non-recoverable dynamic targets into report coverage without failing the scan. */
+export function dynamicModuleCoverageSkips(graph) {
+  return (graph?.warnings ?? [])
+    .filter((warning) => warning?.reason === 'dynamic-module-specifier')
+    .map((warning) => ({
+      stage: 'module-graph',
+      reason: warning.reason,
+      path: warning.path,
+      kind: warning.kind,
+      ...(Number.isInteger(warning.start) ? { start: warning.start } : {}),
+    }))
+}
+
 /**
- * Build a bounded module graph from seed files and their static imports.
+ * Build a bounded module graph from seed files and statically recoverable imports.
+ * Dynamic import()/require()/require.resolve() become edges only when the
+ * specifier folds to a string. Unrecoverable targets are warnings, not edges.
  * @param {string} root scan root
  * @param {string[]} files relative seed paths
  * @returns {{nodes: object[], edges: object[], unresolved: object[], failures: object[], warnings: object[], complete: boolean}}
@@ -307,7 +509,8 @@ export function buildModuleGraph(root, files = []) {
       continue
     }
     const ast = parseJavaScript(content)
-    nodes.push(nodeFor(rootAbs, abs, content, ast))
+    const node = nodeFor(rootAbs, abs, content, ast)
+    nodes.push(node)
     let imports
     if (ast) imports = importSpecifiers(ast)
     else {
@@ -319,6 +522,7 @@ export function buildModuleGraph(root, files = []) {
         continue
       }
       imports = fallbackImportSpecifiers(content)
+      node.imports = imports.map((item) => item.specifier).filter((value) => value !== null)
       warnings.push({ path: rel, reason: 'parser-unparsed', fallback: 'static-module-specifiers', importsRecovered: imports.length })
     }
     for (const item of imports) {
@@ -338,7 +542,14 @@ export function buildModuleGraph(root, files = []) {
         continue
       }
       const target = relPath(rootAbs, result.abs)
-      edges.push({ from: rel, to: target, specifier: item.specifier, start: item.start, kind: item.kind ?? 'static-import' })
+      edges.push({
+        from: rel,
+        to: target,
+        specifier: item.specifier,
+        start: item.start,
+        kind: item.kind ?? 'static-import',
+        ...(item.fromCall ? { bindings: item.bindings ?? [] } : {}),
+      })
       if (!seen.has(target)) queue.push(target)
     }
   }

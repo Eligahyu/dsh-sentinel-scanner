@@ -41,7 +41,8 @@
 - [x] pnpm v9 lockfile 标准化(importers/packages/snapshots)、workspace/peer 实例、`requiresBuild` 依赖路径、SBOM 引用与精确 direct/transitive 统计
 - [x] yarn/bun lockfile 标准化与 install-script 依赖链标注(yarn classic v1/Berry、bun.lock 文本;`bun.lockb` 显式 degraded;无脚本元数据时明确 `installScriptEvidence.status=unavailable`)
 - [x] 静态 CommonJS `require` / `require.resolve` 模块图、TS fallback 与解构导入跨文件污点
-- [ ] 动态 import/require、复杂回调/闭包的跨文件 reachability
+- [x] 可静态还原的动态 `import()` / `require()` / `require.resolve()` 跨文件 reachability(字面量、拼接、纯字面量模板、无歧义 const;无法还原的目标保持 warning,不猜测边)
+- [ ] 复杂回调/闭包/原型链的跨文件 reachability
 - [ ] 原生 TypeScript parser,减少静态 import/export 降级
 - [ ] GitHub Action 拆独立仓库 + 徽章服务
 - [ ] DSH 官方 pre-install hook 对接(若官方提供)

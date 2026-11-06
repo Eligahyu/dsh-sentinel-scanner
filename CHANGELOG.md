@@ -4,6 +4,8 @@
 
 ### Added
 
+- 可静态还原的动态 `import()` / `require()` / `require.resolve()` 模块图边:字面量、字符串拼接、仅含字面量插值的模板,以及文件内无歧义且未再赋值的 `const` 字符串。TypeScript 降级路径同样还原这些写法(不含标识符折叠),并沿用 `.js` → `.ts` 回退。
+- 跨文件污点与攻击链沿这些已还原动态边跟踪解构绑定。无法静态还原的动态目标仍只记 `dynamic-module-specifier` 警告,并复制到 `coverageSkips`;不猜测边,也不因此把扫描判为不完整。
 - 独立 CodeQL 工作流覆盖自扫描必须排除的规则引擎源码。
 - Dependabot、CODEOWNERS、贡献指南、行为准则，以及结构化 Issue / Pull Request 模板。
 - 静态 CommonJS `require` / `require.resolve` 模块图边，以及 CommonJS 解构导入到导出函数/箭头函数的跨文件污点链。

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { buildModuleGraph } from '../engine/semantic/module-graph.js'
 import { scan } from '../engine/index.js'
@@ -274,6 +275,146 @@ test('declaration files and development scripts do not make runtime analysis inc
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+const dynamicRoot = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'dynamic-modules')
+
+function edgesFrom(graph, file) {
+  return graph.edges.filter((edge) => edge.from === file)
+}
+
+test('recoverable dynamic import, require, and require.resolve become edges', () => {
+  const graph = buildModuleGraph(dynamicRoot, [
+    'recoverable/entry.js',
+    'recoverable/require.cjs',
+    'recoverable/resolve.cjs',
+    'recoverable/const-fold.js',
+    'recoverable/indirect.cjs',
+  ])
+
+  assert.equal(graph.complete, true)
+  assert.equal(graph.failures.length, 0)
+  assert.equal(edgesFrom(graph, 'recoverable/entry.js').length, 3)
+  assert.ok(edgesFrom(graph, 'recoverable/entry.js').every((edge) => edge.kind === 'static-import'
+    && edge.specifier === '../runtime/runner.js'
+    && edge.to === 'runtime/runner.js'))
+  assert.ok(edgesFrom(graph, 'recoverable/require.cjs').some((edge) => edge.kind === 'static-require'
+    && edge.specifier === '../runtime/runner.js'
+    && edge.to === 'runtime/runner.js'
+    && edge.bindings.some((binding) => binding.local === 'run')))
+  assert.ok(edgesFrom(graph, 'recoverable/const-fold.js').some((edge) => edge.specifier === '../runtime/runner.js'
+    && edge.bindings.some((binding) => binding.imported === 'run' && binding.local === 'run')))
+  assert.ok(edgesFrom(graph, 'recoverable/indirect.cjs').some((edge) => edge.kind === 'static-require'
+    && edge.to === 'runtime/runner.js'))
+  assert.equal(edgesFrom(graph, 'recoverable/resolve.cjs').length, 2)
+  assert.ok(edgesFrom(graph, 'recoverable/resolve.cjs').every((edge) => edge.kind === 'static-require-resolve'
+    && edge.to === 'runtime/runner.js'
+    && edge.bindings.length === 0))
+  assert.equal(graph.warnings.some((warning) => warning.reason === 'dynamic-module-specifier'
+    && warning.path.startsWith('recoverable/')), false)
+})
+
+test('dynamic .js specifiers fall back to TypeScript sources', () => {
+  const graph = buildModuleGraph(dynamicRoot, [
+    'recoverable/ts-specifier.js',
+    'typed/entry.ts',
+    'typed/indirect.cts',
+  ])
+
+  assert.equal(graph.complete, true)
+  assert.equal(graph.failures.length, 0)
+  assert.ok(edgesFrom(graph, 'recoverable/ts-specifier.js').some((edge) => edge.specifier === '../runtime/typed-runner.js'
+    && edge.to === 'runtime/typed-runner.ts'))
+  assert.ok(graph.nodes.some((node) => node.path === 'typed/entry.ts'
+    && node.parser === 'unparsed'
+    && node.imports.includes('../runtime/typed-runner.js')))
+  assert.ok(edgesFrom(graph, 'typed/entry.ts').some((edge) => edge.to === 'runtime/typed-runner.ts'
+    && edge.bindings.some((binding) => binding.local === 'run')))
+  assert.ok(edgesFrom(graph, 'typed/indirect.cts').some((edge) => edge.kind === 'static-require'
+    && edge.specifier === '../runtime/typed-runner.js'
+    && edge.to === 'runtime/typed-runner.ts'))
+})
+
+test('static import and require edges still resolve beside dynamic calls', () => {
+  const graph = buildModuleGraph(dynamicRoot, ['static/entry.js', 'static/commonjs.cjs'])
+
+  assert.equal(graph.complete, true)
+  assert.equal(graph.failures.length, 0)
+  assert.ok(edgesFrom(graph, 'static/entry.js').some((edge) => edge.kind === 'static-import'
+    && edge.specifier === '../runtime/runner.js'
+    && edge.to === 'runtime/runner.js'))
+  assert.ok(edgesFrom(graph, 'static/commonjs.cjs').some((edge) => edge.kind === 'static-require'
+    && edge.specifier === '../runtime/runner.js'
+    && edge.to === 'runtime/runner.js'))
+  assert.equal(graph.warnings.some((warning) => warning.reason === 'dynamic-module-specifier'), false)
+})
+
+test('computed, partial, and obfuscated dynamic targets do not invent edges', () => {
+  const files = [
+    'warning/computed.js',
+    'warning/obfuscated.js',
+    'warning/partial.js',
+    'warning/ambiguous.js',
+    'warning/reassign.js',
+    'warning/indirect-dynamic.cjs',
+    'warning/unresolved.ts',
+    'warning/string-only.js',
+    'warning/type-query.ts',
+  ]
+  const graph = buildModuleGraph(dynamicRoot, files)
+
+  assert.equal(graph.complete, true)
+  assert.equal(graph.failures.length, 0)
+  assert.equal(graph.edges.length, 0)
+  for (const file of [
+    'warning/computed.js',
+    'warning/obfuscated.js',
+    'warning/partial.js',
+    'warning/ambiguous.js',
+    'warning/reassign.js',
+    'warning/unresolved.ts',
+  ]) {
+    assert.ok(graph.warnings.some((warning) => warning.path === file && warning.reason === 'dynamic-module-specifier'), file)
+  }
+  assert.deepEqual(
+    graph.warnings
+      .filter((warning) => warning.path === 'warning/partial.js')
+      .map((warning) => warning.kind)
+      .sort(),
+    ['dynamic-import', 'dynamic-require', 'dynamic-require-resolve'],
+  )
+  assert.ok(graph.warnings.some((warning) => warning.path === 'warning/indirect-dynamic.cjs' && warning.kind === 'dynamic-require'))
+  assert.equal(graph.warnings.some((warning) => warning.path === 'warning/string-only.js'), false)
+  assert.equal(graph.warnings.some((warning) => warning.path === 'warning/type-query.ts'
+    && warning.reason === 'dynamic-module-specifier'), false)
+  assert.equal(graph.nodes.find((node) => node.path === 'warning/type-query.ts')?.imports.length ?? 0, 0)
+})
+
+test('unrecoverable dynamic specifiers are coverage warnings and do not fail the scan', async () => {
+  const report = await scan(dynamicRoot)
+  const computed = report.coverageSkips.filter((skip) => skip.path === 'warning/computed.js')
+
+  assert.equal(report.summary.scanComplete, true)
+  assert.equal(report.analysisLayers.moduleGraph.complete, true)
+  assert.ok(report.analysisLayers.moduleGraph.warnings.some((warning) => warning.reason === 'dynamic-module-specifier'
+    && warning.path === 'warning/computed.js'))
+  assert.ok(computed.some((skip) => skip.stage === 'module-graph'
+    && skip.reason === 'dynamic-module-specifier'
+    && skip.kind === 'dynamic-require'))
+  assert.equal(report.coverageSkips.some((skip) => skip.reason === 'parser-unparsed'), false)
+  assert.equal(report.analysisLayers.moduleGraph.edges.some((edge) => edge.from.startsWith('warning/')), false)
+})
+
+test('single-file scans also surface unresolved dynamic specifiers', async () => {
+  const report = await scan(join(dynamicRoot, 'warning', 'partial.js'))
+
+  assert.equal(report.summary.scanComplete, true)
+  assert.ok(report.analysisLayers.moduleGraph.warnings.some((warning) => warning.reason === 'dynamic-module-specifier'
+    && warning.kind === 'dynamic-import'))
+  assert.ok(report.coverageSkips.some((skip) => skip.stage === 'module-graph'
+    && skip.reason === 'dynamic-module-specifier'
+    && skip.kind === 'dynamic-require-resolve'))
+  assert.equal(report.analysisLayers.moduleGraph.edges.length, 0)
 })
 
 test('test paths do not downgrade containment failures', () => {
