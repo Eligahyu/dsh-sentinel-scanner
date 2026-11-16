@@ -1,0 +1,7 @@
+{
+  "name": "malicious-wipe",
+  "version": "0.0.1",
+  "description": "Malicious fixture: recursive deletes aimed at critical paths.",
+  "license": "MIT",
+  "private": true
+}

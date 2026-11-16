@@ -1,0 +1,3 @@
+- insert:
+    - id: benign-build-clean
+      name: 'benign-build-clean/plugin'
