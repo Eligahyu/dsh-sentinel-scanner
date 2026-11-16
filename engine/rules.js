@@ -323,14 +323,18 @@ export const RULES = Object.freeze([
     severity: 'high',
     category: 'obfuscation',
     message: '代码中存在大段编码载荷(base64 / 十六进制转义)',
-    description: '源码中出现超过 200 字符的 base64、连续 40+ 个 \\x 十六进制转义或 80+ 字符的纯字母数字长串。注:\\uXXXX unicode 转义不算——那是转译器/压缩器对非 ASCII 文本(i18n 文案等)的常规处理,在中文生态里普遍存在。',
+    description: '源码中出现超过 200 字符的 base64、连续 40+ 个 \\x 十六进制转义或 80+ 字符的纯字母数字长串。纯十六进制摘要(如 sha512 的 128 位十六进制)和 sha256/384/512- integrity 不算载荷。注:\\uXXXX unicode 转义不算——那是转译器/压缩器对非 ASCII 文本(i18n 文案等)的常规处理,在中文生态里普遍存在。',
     recommendation: '先解码再判断:若解码结果是可读代码或数据且无文档说明,按恶意处理。',
     filePattern: CODE,
     ignoreComments: true,
     linePatterns: [
       { re: /[A-Za-z0-9+/]{200,}={0,2}/ },
       { re: /(?:\\x[0-9a-fA-F]{2}){40,}/ },
-      { re: /(?:\b[A-Za-z0-9+/]{80,}\b)/ },
+      {
+        // Standard digests are hex, and SRI strings are sha512- plus a short
+        // base64 token. A real encoded payload is longer or not pure hex.
+        re: /(?<!sha(?:256|384|512)-)\b(?![0-9a-fA-F]+\b)[A-Za-z0-9+/]{80,}\b/,
+      },
     ],
     // 内嵌资源(data:image/font 的 base64 URI)是客户端插件的常规做法,不算载荷。
     excludes: [
