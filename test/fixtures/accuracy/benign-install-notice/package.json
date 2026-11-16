@@ -1,0 +1,10 @@
+{
+  "name": "benign-install-notice",
+  "version": "1.0.0",
+  "description": "Benign fixture: lifecycle scripts that only print documentation URLs.",
+  "license": "MIT",
+  "scripts": {
+    "postinstall": "echo see https://example.com/docs",
+    "prepare": "husky || echo see https://typicode.github.io/husky"
+  }
+}

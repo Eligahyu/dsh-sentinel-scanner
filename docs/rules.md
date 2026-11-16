@@ -7,7 +7,7 @@
 | `SEN-EXEC-001` | 🔴 critical(50 分) | execution | **remote-code-download** | 发现从网络获取内容后直接交给执行器(exec/spawn/eval/Function/shell)的模式。这是供应链攻击最典型的形状。 |
 | `SEN-EXEC-002` | 🟡 medium(8 分) | execution | **shell-execution** | 插件调用系统命令。部分 DSH 插件(终端、构建类)确有正当需求,但这是插件越权的最高频入口,必须逐处审查。 |
 | `SEN-EXEC-003` | 🟠 high(20 分) | execution | **dynamic-code-eval** | eval、new Function、vm.runIn*、Module._compile、process.binding 等动态执行机制。配合网络或解码即高危。 |
-| `SEN-EXEC-004` | 🟠 high(20 分) | execution | **eval-of-decoded** | 先 base64/URI 解码再执行,是绕过静态检测的经典混淆手段。 |
+| `SEN-EXEC-004` | 🟠 high(20 分) | execution | **eval-of-decoded** | 先 base64/URI 解码再执行,是绕过静态检测的经典混淆手段。shell 的 base64 -d | sh 与 eval "$(base64 …)" 同样算。 |
 | `SEN-CRED-001` | 🔴 critical(50 分) | credentials | **credential-file-read** | 代码读取 ~/.ssh、~/.aws/credentials、.npmrc、.netrc、kubeconfig、docker config、.git-credentials 等敏感文件。 |
 | `SEN-CRED-002` | 🟠 high(20 分) | credentials | **env-credential-access** | 代码访问 process.env 中名称含 API_KEY/TOKEN/SECRET/PASSWORD 或知名厂商前缀(DeepSeek/OpenAI/Anthropic/GitHub/AWS)的变量。 |
 | `SEN-CRED-003` | 🟠 high(20 分) | credentials | **hardcoded-secret** | 代码中出现形似真实 API key / token 的字符串(sk-…、AKIA…、ghp_…、JWT 等)。 |
@@ -20,7 +20,7 @@
 | `SEN-OBF-002` | 🟡 medium(8 分) | obfuscation | **minified-single-line** | 单个代码行超过 30KB。合法插件也可能打包产物,但超长单行是隐藏恶意逻辑的常用手法,需人工解压审阅。 |
 | `SEN-OBF-003` | 🟢 low(3 分) | obfuscation | **decode-then-exec** | decodeURIComponent/unescape/fromCharCode 与 eval/Function 出现在同一文件。 |
 | `SEN-INST-001` | 🟡 medium(8 分) | install | **install-script-present** | npm 安装时会自动执行这些脚本,运行在用户完整权限下、不在任何沙箱之内。注:DSH 官方对 git 安装的 TS bundle 也要求 prepare 构建脚本,因此仅"存在"本身不是恶意——需要人工确认脚本内容。 |
-| `SEN-INST-002` | 🔴 critical(50 分) | install | **install-script-network** | 安装脚本中包含 curl/wget/网络地址/base64/chmod 等,典型形状是 curl … | bash。 |
+| `SEN-INST-002` | 🔴 critical(50 分) | install | **install-script-network** | 安装脚本中包含 curl/wget/base64/chmod、管道到 shell,或非 echo/printf 的网络地址。典型形状是 curl … | bash。仅在 echo/printf 里出现的文档链接不算。 |
 | `SEN-FS-001` | 🔴 critical(50 分) | filesystem | **destructive-command** | 删除命令的目标是 ~、/、C:、/home、/root、/etc、/usr、/Users 等关键路径。相对路径(./dist)、临时目录(/tmp)和工作区清理不算。 |
 | `SEN-FS-002` | 🟡 medium(8 分) | filesystem | **write-outside-workspace** | 代码向 /etc、C:、用户主目录等绝对路径写入文件。 |
 | `SEN-FS-003` | 🟡 medium(8 分) | filesystem | **permission-mutation** | 代码把文件设为宽松权限(777 / a+rwx / 递归 -R 置宽)或提权执行。严格权限(0o600/0o700/0o644/0o755 等)是良好实践,不在此列。 |
