@@ -4,46 +4,46 @@
  * 查询失败/离线时静默降级(报告标注 advisories: 'unavailable')。
  */
 
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { tmpdir } from 'node:os'
-import { spawnSync } from 'node:child_process'
+import { boundedHttpRequest } from './http-client.js'
 
 export const OSV_API = 'https://api.osv.dev/v1/query'
+export const OSV_MAX_BYTES = 5 * 1024 * 1024
+export const OSV_TIMEOUT_MS = 20_000
 
 /**
  * 查询某个包的已知漏洞。
+ * 只 POST `{package:{name,ecosystem},version}`。传输失败、非 2xx 或非 JSON
+ * 都降级为 unavailable,不抛给扫描主路径。
  * @param {string} name
  * @param {string} version
+ * @param {object} [opts] - {endpoint, timeoutMs, maxBytes}
  * @returns {Promise<{status: 'ok'|'unavailable', vulnerabilities: Array}>}
  */
-export async function queryOsv(name, version) {
-  const outPath = join(tmpdir(), `osv-out-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
-  const bodyFile = join(tmpdir(), `osv-body-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
-  let vulnerabilities = []
-  let status = 'unavailable'
+export async function queryOsv(name, version, opts = {}) {
+  const endpoint = opts.endpoint ?? OSV_API
   try {
-    writeFileSync(bodyFile, JSON.stringify({ package: { name, ecosystem: 'npm' }, version }), 'utf8')
-    const r = spawnSync('curl.exe', ['-s', '--noproxy', '*', '--max-time', '20', '--max-filesize', '5242880',
-      '-X', 'POST', '-H', 'Content-Type: application/json',
-      '--data', `@${bodyFile}`, '-o', outPath, OSV_API], { stdio: 'ignore' })
-    if (r.status === 0) {
-      const doc = JSON.parse(readFileSync(outPath, 'utf8'))
-      vulnerabilities = (doc.vulns ?? []).map((v) => ({
-        id: v.id,
-        summary: v.summary ?? '',
-        severity: v.severity?.[0]?.score ? `CVSS ${v.severity[0].score}` : '',
-        modified: v.modified ?? '',
-      }))
-      status = 'ok'
+    const result = await boundedHttpRequest(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ package: { name, ecosystem: 'npm' }, version }),
+      maxBytes: opts.maxBytes ?? OSV_MAX_BYTES,
+      timeoutMs: opts.timeoutMs ?? OSV_TIMEOUT_MS,
+      followRedirects: false,
+    })
+    if (result.status < 200 || result.status >= 300 || !result.body) {
+      return { status: 'unavailable', vulnerabilities: [] }
     }
+    const doc = JSON.parse(result.body.toString('utf8'))
+    const vulnerabilities = (doc.vulns ?? []).map((v) => ({
+      id: v.id,
+      summary: v.summary ?? '',
+      severity: v.severity?.[0]?.score ? `CVSS ${v.severity[0].score}` : '',
+      modified: v.modified ?? '',
+    }))
+    return { status: 'ok', vulnerabilities }
   } catch {
-    status = 'unavailable'
-  } finally {
-    rmSync(outPath, { force: true })
-    rmSync(bodyFile, { force: true })
+    return { status: 'unavailable', vulnerabilities: [] }
   }
-  return { status, vulnerabilities }
 }
 
 /** 把 OSV 结果并入报告。 */

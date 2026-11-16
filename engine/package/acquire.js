@@ -3,10 +3,7 @@
  * 只读取 package metadata(名称/版本/tarball/integrity),不上传任何源码。
  */
 
-import { readFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
-import { tmpdir } from 'node:os'
-import { spawnSync } from 'node:child_process'
+import { boundedHttpRequest } from '../supplychain/http-client.js'
 
 /** registry 地址:每次调用读取(可被测试/镜像覆盖,不受模块缓存影响)。 */
 export function npmRegistry() {
@@ -24,32 +21,45 @@ export function parsePackageSpec(spec) {
 /** metadata 响应体上限(§9.2:先限流再读取,绝不整读超限响应)。 */
 export const METADATA_MAX_BYTES = 5 * 1024 * 1024
 
-/** 沙箱内获取 URL 文本:curl -o 落盘再读(规避管道/重定向限制)。 */
-function fetchText(url, { maxBytes = METADATA_MAX_BYTES } = {}) {
-  const out = join(tmpdir(), `npm-fetch-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
-  // --max-time 覆盖 redirect+headers+body(全 request deadline);--max-filesize 在
-  // 超过字节上限时中止并写 partial(下方 rmSync 兜底清理);--noproxy 沙箱内直连。
-  const r = spawnSync('curl.exe', ['-s', '--noproxy', '*', '--max-time', '30', '--max-filesize', String(maxBytes), '-o', out, url], { stdio: 'ignore' })
-  let text = null
-  if (r.status === 0) {
-    try { text = readFileSync(out, 'utf8') } catch { text = null }
+/** Metadata request deadline. Matches the previous curl --max-time 30. */
+export const METADATA_TIMEOUT_MS = 30_000
+
+/**
+ * Fetch URL text with a hard byte cap and deadline.
+ * Redirects are not followed (registry metadata is read from the requested URL).
+ * Transport failures return null so the caller can report a registry error.
+ */
+async function fetchText(url, { maxBytes = METADATA_MAX_BYTES, timeoutMs = METADATA_TIMEOUT_MS } = {}) {
+  try {
+    const result = await boundedHttpRequest(url, {
+      method: 'GET',
+      headers: { accept: 'application/json' },
+      maxBytes,
+      timeoutMs,
+      followRedirects: false,
+    })
+    return result.body ? result.body.toString('utf8') : ''
+  } catch {
+    return null
   }
-  rmSync(out, { force: true })
-  return text
 }
 
 /**
  * 获取 npm 包元数据(仅 metadata,不下载 tarball)。
  * @param {string} spec - 'name' 或 'name@version'
+ * @param {object} [opts] - {maxBytes, timeoutMs}
  * @returns {Promise<{name, version, dist: {tarball, integrity, shasum}, dependencies, scripts}>}
  */
-export async function acquireNpmPackage(spec) {
+export async function acquireNpmPackage(spec, opts = {}) {
   const { name, version } = parsePackageSpec(spec)
   if (!name) throw new Error(`invalid package spec: ${spec}`)
   const url = version
     ? `${npmRegistry()}/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
     : `${npmRegistry()}/${encodeURIComponent(name)}/latest`
-  const text = fetchText(url)
+  const text = await fetchText(url, {
+    maxBytes: opts.maxBytes ?? METADATA_MAX_BYTES,
+    timeoutMs: opts.timeoutMs ?? METADATA_TIMEOUT_MS,
+  })
   if (text === null || !text.trim().startsWith('{')) {
     throw new Error(`无法获取 npm 元数据:${name}@${version ?? 'latest'}(注册表不可达或包不存在)`)
   }

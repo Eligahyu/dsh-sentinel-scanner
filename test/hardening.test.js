@@ -298,8 +298,8 @@ test('diffPackageWithSource:完成后 tgz 与 quarantine 都清理(联网,不可
 })
 
 // ---- P0-7: metadata/download full-body resource limit ----
-// 注:沙箱禁子进程回环互连,curl --max-filesize 的 HTTP 行为无法本地端到端验证;
-// 此处验证资源上限常量 + 失败路径的 partial 清理(curl 语义由标准实现保证)。
+// 字节上限与 partial 清理由 Node HTTP 客户端强制执行,本地回环用例在
+// test/http-client.test.js。这里保留不可达地址的失败清理,并用短超时避免黑洞地址拖住 CI。
 
 test('资源上限常量:metadata 5MB,tarball 512MB', async () => {
   const acquire = await import('../engine/package/acquire.js')
@@ -311,9 +311,9 @@ test('资源上限常量:metadata 5MB,tarball 512MB', async () => {
 test('downloadTarball:失败路径无 partial 残留(不可达 URL 快速失败)', async () => {
   const { downloadTarball } = await import('../engine/package/tarball.js')
   const before = new Set(sentinelLeftovers())
-  // 10.255.255.1 不可达:connect-timeout 3s 后 curl 失败 → 必须清理 partial
+  // 10.255.255.1 不可达:短超时后必须失败并清理 partial。
   await assert.rejects(
-    () => downloadTarball('http://10.255.255.1:9/x.tgz', '', { maxBytes: 1024 }),
+    () => downloadTarball('http://10.255.255.1:9/x.tgz', '', { maxBytes: 1024, timeoutMs: 1000 }),
     /下载失败/,
   )
   const after = sentinelLeftovers().filter((n) => !before.has(n))
@@ -325,7 +325,7 @@ test('acquireNpmPackage:注册表不可达时明确报错(失败路径)', async 
   const oldRegistry = process.env.SENTINEL_NPM_REGISTRY
   process.env.SENTINEL_NPM_REGISTRY = 'http://10.255.255.1:9'
   try {
-    await assert.rejects(() => acquireNpmPackage('some-pkg'), /无法获取 npm 元数据/)
+    await assert.rejects(() => acquireNpmPackage('some-pkg', { timeoutMs: 1000 }), /无法获取 npm 元数据/)
   } finally {
     if (oldRegistry === undefined) delete process.env.SENTINEL_NPM_REGISTRY
     else process.env.SENTINEL_NPM_REGISTRY = oldRegistry

@@ -8,8 +8,8 @@ import { createHash } from 'node:crypto'
 import { readFileSync, rmSync, mkdirSync, readdirSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { spawnSync } from 'node:child_process'
 import { extractTarballSafe, TarSafetyError } from './tar.js'
+import { boundedHttpRequest } from '../supplychain/http-client.js'
 
 /** sha512 base64 integrity(npm 格式)与文件内容比对。 */
 export function verifyIntegrity(filePath, integrity) {
@@ -29,6 +29,9 @@ export function fileSha256(filePath) {
 /** tarball 下载体上限(§9.4:超大/恶意 tarball 绝不整包落盘)。 */
 export const TARBALL_MAX_BYTES = 512 * 1024 * 1024
 
+/** Whole-transfer deadline, including redirects. Matches the previous curl --max-time 120. */
+export const TARBALL_TIMEOUT_MS = 120_000
+
 /** Process-scoped temporary artifact name to prevent concurrent test/process interference. */
 export function temporaryArtifactName(kind, suffix = '') {
   return `sentinel-${kind}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}${suffix}`
@@ -38,23 +41,35 @@ export function temporaryArtifactName(kind, suffix = '') {
  * 下载 tarball 到临时文件并校验 integrity。
  * @param {string} tarballUrl
  * @param {string} integrity
- * @param {object} [opts] - {maxBytes, strictDns}
+ * @param {object} [opts] - {maxBytes, timeoutMs, strictDns}
  * @returns {Promise<{tarballPath: string, sha256: string, integrityOk: boolean, integrityReason?: string}>}
  */
 export async function downloadTarball(tarballUrl, integrity, opts = {}) {
   const maxBytes = opts.maxBytes ?? TARBALL_MAX_BYTES
-  // P1-2:严格 DNS 模式(默认关)在下载前解析 hostname 并拒绝私有地址。
-  if (opts.strictDns) {
-    const { assertPublicDns } = await import('../supplychain/fetch.js')
-    await assertPublicDns(tarballUrl, { strict: true })
-  }
   const tarballPath = join(tmpdir(), temporaryArtifactName('pkg', '.tgz'))
-  // --max-time 覆盖 redirect+headers+body;--max-filesize 超限即中止;
-  // 失败/超限/partial 一律 rmSync 清理(§9.4)。
-  const r = spawnSync('curl.exe', ['-sL', '--noproxy', '*', '--max-time', '120', '--max-filesize', String(maxBytes), '-o', tarballPath, tarballUrl], { stdio: 'ignore' })
-  if (r.status !== 0) {
+  // 字节上限在传输中生效;失败/超限/partial 一律删除(§9.4)。
+  // 重定向仅在最终响应落盘。strict DNS 时每个跳转目标都重新检查。
+  const timeoutMs = opts.timeoutMs ?? TARBALL_TIMEOUT_MS
+  const guard = opts.strictDns
+    ? async (href) => {
+      const { assertPublicDns } = await import('../supplychain/fetch.js')
+      await assertPublicDns(href, { strict: true })
+    }
+    : null
+  try {
+    await boundedHttpRequest(tarballUrl, {
+      method: 'GET',
+      maxBytes,
+      timeoutMs,
+      followRedirects: true,
+      destination: tarballPath,
+      guard,
+    })
+  } catch (error) {
     rmSync(tarballPath, { force: true })
-    throw new Error(`tarball 下载失败:${tarballUrl}`)
+    if (String(error?.message ?? '').startsWith('SSRF guard:')) throw error
+    const reason = error?.code ?? 'failed'
+    throw new Error(`tarball 下载失败:${tarballUrl} (${reason})`)
   }
   const integrityResult = verifyIntegrity(tarballPath, integrity)
   return {

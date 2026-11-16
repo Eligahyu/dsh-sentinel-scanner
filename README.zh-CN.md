@@ -104,6 +104,8 @@ canary correlation 和任何 allowlisted replay network 都是 Phase C 工作；
 ## 安全与隐私保证
 
 - 被扫描代码从不执行；安装前审计也不会执行 npm 生命周期脚本。
+- 安装前审计和可选 OSV 查询使用 Node 自带 HTTP 客户端，不调用 shell 或 curl。
+  Linux、macOS 与 Windows 共用同一套字节上限和超时；tarball 重定向在开启严格 DNS 时会逐跳复查。
 - 所有动态层证据都在固定的脱敏边界内规范化、限长和摘要化；原始 secret 不会写入报告。
 - 路径、清单入口和隔离解包继续经过 containment 与资源限制检查。
 - 所有跳过、截断和不完整状态都显式报告；“干净”不等于插件安全。
