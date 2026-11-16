@@ -100,7 +100,7 @@ canary correlation 和任何 allowlisted replay network 都是 Phase C 工作；
 | --- | --- |
 | `0` | 未达到配置的严重级别阈值。 |
 | `1` | 有 finding 达到 fail-on 阈值。 |
-| `2` | 用法错误或扫描失败。缺少参数、非正整数的 `--max-files` / `--max-plugins` / `--max-bytes` 都属于用法错误。 |
+| `2` | 用法错误或扫描失败。缺少参数、非正整数的资源上限，以及类型不对的 `sentinel.config.json` 都属于用法错误。未知配置字段会被忽略并警告，不会变成可执行设置。配置里的 `redactPaths: true` 会匿名化报告路径。 |
 | `3` | 静态扫描不完整，或请求的动态分析为 unavailable/refused/incomplete。仅在 `--fail-on-incomplete` 或 `--strict-exit-codes` 时使用。 |
 
 ## 动态分析 CLI 选项

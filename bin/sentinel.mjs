@@ -335,6 +335,7 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
   }
 
   let effectiveFailOn = null
+  let shouldRedactPaths = false
   const run = (async () => {
     // 配置:默认 ← sentinel.config.json(优先从目标目录检测)← CLI 覆盖(CLI 优先)
     const { loadConfig, mergeOverrides } = await import('../engine/config.js')
@@ -347,10 +348,14 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
         // Keep the existing target-path lookup for inaccessible targets.
       }
     }
-    const { config } = loadConfig({
+    const { config, warnings = [] } = loadConfig({
       configPath: opts.configPath,
       cwd: configCwd,
     })
+    for (const warning of warnings) {
+      stderr.write(`dsh-sentinel: 警告 — sentinel.config.json ${warning}\n`)
+    }
+    shouldRedactPaths = opts.redactPaths === true || config.redactPaths === true
     if (config.redactSecrets === false) {
       stderr.write('dsh-sentinel: 警告 — config 中 redactSecrets=false 被忽略:secret 脱敏永远开启(不可关闭)\n')
     }
@@ -468,7 +473,7 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
       if (opts.format === 'json') {
         // audit 元数据必须与 report 一起输出(Harness Tool 与 CLI 保持一致)
         const payload = { ...report, audit }
-        if (opts.redactPaths) redactReportPaths(payload, positional[1] ?? process.cwd())
+        if (shouldRedactPaths) redactReportPaths(payload, positional[1] ?? process.cwd())
         stdout.write(JSON.stringify(payload, null, 2) + '\n')
       } else {
         formatText(report, stdout)
@@ -481,7 +486,7 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
     }
 
     // 输出前:可分享报告路径匿名化(--redact-paths)
-    if (opts.redactPaths) redactReportPaths(output, positional[0] ?? process.cwd())
+    if (shouldRedactPaths) redactReportPaths(output, positional[0] ?? process.cwd())
 
     // 输出格式:json / sarif / html / text
     if (opts.format === 'cyclonedx' || opts.format === 'spdx') {
