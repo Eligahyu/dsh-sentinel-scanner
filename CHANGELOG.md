@@ -4,6 +4,7 @@
 
 ### Added
 
+- 有界静态 re-export: `export { name } from`、`export { name as alias } from`、`export * from` 与 `export * as ns from` 会沿已解析模块边追到真正定义函数,`modulePath` 保留中间 barrel。同名 `export *` 冲突记 `cross-file-reexport-unresolved`,不猜测;本地声明优先于 star。这不是 failure,也不单独把扫描判为不完整。
 - 有界 Promise / `await` continuation:值产生型 read(`readFileSync`、`fs/promises` 与 `fs.promises.readFile`)、decode、env 凭据,以及 `Promise.resolve` 对这些值的包装,其 `.then` 只播种兑现参数。链式 `.then` 仅在上一个兑现回调直接返回该污点时继承;`.catch`、未知调用和回调形态 `fs.readFile` 的返回值不会被当成文件数据。
 - 可静态折叠的动态 `import()` 现在带上 `await` 命名空间、成员绑定和 `.then` 兑现参数。builtin `child_process` / `fs` / `fs/promises` 的 `await import` 与 `import().then` 会确认 sink 绑定;无法折叠的说明符仍然不猜测。
 - 跨文件导出函数若能证明返回 modeled source,调用方的直接使用、`await` 和 `.then` 会继续到 sink。函数碰到 source 但返回值无法证明,且调用方把结果送进 sink 时记 `cross-file-return-unresolved`;这不是 failure,不伪造边,也不单独把扫描判为不完整。
@@ -50,7 +51,7 @@
 
 ### Verification
 
-- 478 项测试:477 pass / 0 fail / 1 skip。含 Promise / `await` / `import().then` continuation、跨文件 source 返回值与 `cross-file-return-unresolved`,以及配置校验回归。
+- 488 项测试:487 pass / 0 fail / 1 skip。含静态 re-export reachability 与 `cross-file-reexport-unresolved`。
 - 33 项 benchmark:rule precision 0.955 / recall 1.000 / F1 0.977;finding precision 0.919 / recall 1.000 / F1 0.958;flow precision/recall/F1 1.000;hardening edge 组 17 项全 1.000(与 v0.5 基线持平)。
 
 ## 0.4.4 (2026-08-23) — Professional Scanner Release

@@ -162,6 +162,7 @@ profile package.json direct dependencies
 - 无法折叠的动态目标记 `dynamic-module-specifier` 警告,并进入报告 `coverageSkips`;该警告不是 failure,不单独把 `scanComplete` 打成 false
 - 无法证明的跨文件回调/方法接收者记 `cross-file-callback-unresolved` / `cross-file-method-unresolved` 到 `coverageSkips`;同样不是 failure
 - 跨文件返回值无法证明但调用方把结果送进 sink 时记 `cross-file-return-unresolved`;该跳过不是 failure,不单独把 `scanComplete` 打成 false
+- 静态 re-export(`export { name } from`、重命名、`export *`、`export * as ns`)沿模块图追到定义函数,调用链写入 `modulePath`;同名 `export *` 冲突记 `cross-file-reexport-unresolved`,本地声明优先,深度上限 4 跳
 - TypeScript 解析失败或 oxc-parser 不可用时,节点标记 `parser: unparsed`,静态 recovery 仍保留可证明的
   import/export/require 边,并记录 `parser-unparsed` warning 与 `coverageSkips`;该降级不伪造边。
 
@@ -170,6 +171,7 @@ profile package.json direct dependencies
 - 同一标识符存在重复 `const`、`let`/`var`、参数或赋值时不做常量折叠
 - 未知高阶函数、未被识别的回调 API、任意回调组合,以及 `require.resolve` 返回的路径字符串;这些不进入攻击链,必要时记 `cross-file-callback-unresolved`
 - `.catch`、回调形态 `fs.readFile` 的返回值、经过未知调用的 `.then` 链、`Promise.all` / `Promise.race`、事件 `on('data')`,以及无法静态折叠的 `import()`;这些不猜测兑现值或模块绑定
+- 计算或条件 re-export,以及 `module.exports = require(...)` 这种整模块转发;同名 `export *` 冲突只记 `cross-file-reexport-unresolved`
 - 动态属性/计算成员(`obj[method](...)`)、运行时改写原型、`Proxy`、`eval` / `Function` 构造函数生成的边;这些只记 `cross-file-method-unresolved` 或保持 warning,绝不猜测方法
 - 跨文件闭包只做有界的模块级 setter/getter 关联,不做完整控制流、调用顺序、异步交错或跨导入方状态共享
 - 间接 `import`(`(0, import)(...)`)是语法错误,整文件按 parse failure 处理,不从失败解析里猜边
