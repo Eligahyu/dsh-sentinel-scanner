@@ -32,6 +32,7 @@
 
 ### Fixed
 
+- CLI 拒绝缺失或非正整数的 `--max-files` / `--max-plugins` / `--max-bytes`，以及缺少取值的 `--out`、`--config`、`--baseline`、`--format`、`--fail-on`、`--mode` 和 `--profile`。`--profile` 不再把任意 `--profile*` 前缀当成配置名。`--help` 写明退出码 3 和内置默认 `--fail-on high`。
 - 注册表元数据、tarball 下载和 OSV 查询不再依赖 Windows 专用的 `curl.exe`。三端都使用带字节上限、总超时和失败清理的 Node HTTP 客户端;不走 shell,不读取代理环境变量。tarball 重定向在 strict DNS 下逐跳复查,元数据和 OSV 请求不跟随重定向。
 - 避免将能力说明中的 `exfiltration endpoints` 名词短语误判为提示注入。
 - 支持带安全 options 参数的 `spawn` / `execFile` 调用，但 `shell` 选项仍保持告警。
@@ -45,7 +46,7 @@
 
 ### Verification
 
-- 460 项测试:459 pass / 0 fail / 1 skip(本机可访问 npm registry 时,原先因缺少 curl.exe 而跳过的安装审计/diff 联网用例会实际执行)。新增本地回环用例覆盖字节上限、超时、重定向、strict DNS 拒绝、OSV 请求体和 partial 清理。
+- 464 项测试:463 pass / 0 fail / 1 skip。CLI 用法错误在扫描前返回退出码 2，`--help` 与内置 `--fail-on high` 默认值有回归用例。
 - 33 项 benchmark:rule precision 0.955 / recall 1.000 / F1 0.977;finding precision 0.919 / recall 1.000 / F1 0.958;flow precision/recall/F1 1.000;hardening edge 组 17 项全 1.000(与 v0.5 基线持平)。
 
 ## 0.4.4 (2026-08-23) — Professional Scanner Release

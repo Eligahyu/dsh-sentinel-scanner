@@ -45,25 +45,30 @@ Options:
   --format <fmt>  output format: json | text | sarif | html | cyclonedx | spdx
   --out <file>    write the report to a file, print a summary to stdout
   --baseline <f>  diff against a previous report (by stable fingerprint)
-  --fail-on <lvl> exit 1 when any finding ≥ level (critical|high|medium|low); CLI 优先于 config
+  --fail-on <lvl> exit 1 at or above critical|high|medium|low (default high; CLI overrides config)
   --fail-on-incomplete  exit 3 when the scan is incomplete (files/bytes/plugins capped)
   --strict-exit-codes   0=ok 1=threshold 2=runtime/usage 3=incomplete scan
-  --max-files <n> cap scanned files (default 3000)
-  --max-plugins <n> cap plugins scanned per profile (default 12)
-  --max-bytes <n>  max bytes per file before large-file-lite (default 524288)
+  --max-files <n> cap scanned files (default 3000; positive integer)
+  --max-plugins <n> cap plugins scanned per profile (default 12; positive integer)
+  --max-bytes <n>  max bytes per file before large-file-lite (default 524288; positive integer)
   --mode <mode>   scan mode: source(默认,跳过 dist/build) | package(扫构建产物) | profile
   --config <path> sentinel.config.json path (auto-detected in cwd)
   --include-builtins  include trusted @deepseek-ai scopes in profile audits
   --redact-paths  anonymize absolute paths in shareable reports (<workspace>/...)
   --advisories    query OSV for known vulnerabilities (default OFF; uploads name+version only)
   --provenance    read npm provenance attestations (default OFF)
-  --dynamic       request bounded dynamic analysis (Phase A may be unavailable)
+  --dynamic       request bounded Phase B dynamic analysis (unavailable without a scanner-owned image)
   --dynamic-backend <name>  backend: auto | docker | podman
-  --dynamic-profile observe  dynamic analysis profile (Phase A only)
+  --dynamic-profile observe  dynamic analysis profile (Phase B only)
   --dynamic-timeout <ms>     dynamic analysis timeout in milliseconds
   -h, --help      show this help
 
-Exit codes: 0 = safe/review, 1 = risky/dangerous or --fail-on exceeded, 2 = usage error.
+Exit codes:
+  0  configured threshold not exceeded (built-in default is --fail-on high)
+  1  a finding reaches the fail-on threshold
+  2  usage error or scan failure
+  3  incomplete static scan, or requested dynamic analysis unavailable/refused/incomplete
+     (only with --fail-on-incomplete or --strict-exit-codes)
 `)
 }
 
@@ -156,6 +161,31 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
   const args = [...argv]
   const opts = { json: false, format: 'text', out: null, maxFiles: undefined, maxPlugins: undefined, maxBytes: undefined, configPath: null, includeBuiltins: false, baseline: null, failOn: null, advisories: false, provenance: false, redactPaths: false, failOnIncomplete: false, strictExitCodes: false, dynamic: false, dynamicBackend: undefined, dynamicProfile: undefined, dynamicTimeoutMs: undefined }
   const positional = []
+
+  const takeValue = (flag, index) => {
+    const value = args[index + 1]
+    if (value === undefined || value.startsWith('-')) {
+      stderr.write(`dsh-sentinel: ${flag} requires a value\n`)
+      return { ok: false, index }
+    }
+    return { ok: true, value, index: index + 1 }
+  }
+
+  const takePositiveInt = (flag, index) => {
+    const taken = takeValue(flag, index)
+    if (!taken.ok) return taken
+    if (!/^[0-9]+$/.test(taken.value)) {
+      stderr.write(`dsh-sentinel: ${flag} must be a positive integer (got ${taken.value})\n`)
+      return { ok: false, index }
+    }
+    const number = Number(taken.value)
+    if (!Number.isSafeInteger(number) || number < 1) {
+      stderr.write(`dsh-sentinel: ${flag} must be a positive integer (got ${taken.value})\n`)
+      return { ok: false, index }
+    }
+    return { ok: true, value: number, index: taken.index }
+  }
+
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i]
     switch (a) {
@@ -197,29 +227,76 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
       case '--fail-on-incomplete': opts.failOnIncomplete = true; break
       case '--strict-exit-codes': opts.strictExitCodes = true; break
       case '--format': {
-        const fmt = args[++i]
-        if (!['json', 'text', 'sarif', 'html', 'cyclonedx', 'spdx'].includes(fmt)) {
-          stderr.write(`dsh-sentinel: --format must be json|text|sarif|html|cyclonedx|spdx (got ${fmt})\n`)
+        const taken = takeValue('--format', i)
+        if (!taken.ok) return 2
+        i = taken.index
+        if (!['json', 'text', 'sarif', 'html', 'cyclonedx', 'spdx'].includes(taken.value)) {
+          stderr.write(`dsh-sentinel: --format must be json|text|sarif|html|cyclonedx|spdx (got ${taken.value})\n`)
           return 2
         }
-        opts.format = fmt
+        opts.format = taken.value
         break
       }
-      case '--baseline': opts.baseline = args[++i]; break
+      case '--baseline': {
+        const taken = takeValue('--baseline', i)
+        if (!taken.ok) return 2
+        i = taken.index
+        opts.baseline = taken.value
+        break
+      }
       case '--fail-on': {
-        const level = args[++i]
-        if (!['critical', 'high', 'medium', 'low'].includes(level)) {
-          stderr.write(`dsh-sentinel: --fail-on must be critical|high|medium|low (got ${level})\n`)
+        const taken = takeValue('--fail-on', i)
+        if (!taken.ok) return 2
+        i = taken.index
+        if (!['critical', 'high', 'medium', 'low'].includes(taken.value)) {
+          stderr.write(`dsh-sentinel: --fail-on must be critical|high|medium|low (got ${taken.value})\n`)
           return 2
         }
-        opts.failOn = level
+        opts.failOn = taken.value
         break
       }
-      case '--out': opts.out = args[++i]; break
-      case '--max-files': opts.maxFiles = Number(args[++i]); break
-      case '--max-plugins': opts.maxPlugins = Number(args[++i]); break
-      case '--max-bytes': opts.maxBytes = Number(args[++i]); break
-      case '--config': opts.configPath = args[++i]; break
+      case '--out': {
+        const taken = takeValue('--out', i)
+        if (!taken.ok) return 2
+        i = taken.index
+        opts.out = taken.value
+        break
+      }
+      case '--max-files': {
+        const taken = takePositiveInt('--max-files', i)
+        if (!taken.ok) return 2
+        i = taken.index
+        opts.maxFiles = taken.value
+        break
+      }
+      case '--max-plugins': {
+        const taken = takePositiveInt('--max-plugins', i)
+        if (!taken.ok) return 2
+        i = taken.index
+        opts.maxPlugins = taken.value
+        break
+      }
+      case '--max-bytes': {
+        const taken = takePositiveInt('--max-bytes', i)
+        if (!taken.ok) return 2
+        i = taken.index
+        opts.maxBytes = taken.value
+        break
+      }
+      case '--config': {
+        const taken = takeValue('--config', i)
+        if (!taken.ok) return 2
+        i = taken.index
+        opts.configPath = taken.value
+        break
+      }
+      case '--profile': {
+        const taken = takeValue('--profile', i)
+        if (!taken.ok) return 2
+        i = taken.index
+        opts.profile = taken.value
+        break
+      }
       case '--include-builtins': opts.includeBuiltins = true; break
       case '--rules': {
         for (const r of RULES) {
@@ -228,18 +305,25 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
         return 0
       }
       case '--mode': {
-        const mode = args[++i]
-        if (!['source', 'package', 'profile'].includes(mode)) {
-          stderr.write(`dsh-sentinel: --mode must be source|package|profile (got ${mode})\n`)
+        const taken = takeValue('--mode', i)
+        if (!taken.ok) return 2
+        i = taken.index
+        if (!['source', 'package', 'profile'].includes(taken.value)) {
+          stderr.write(`dsh-sentinel: --mode must be source|package|profile (got ${taken.value})\n`)
           return 2
         }
-        opts.mode = mode
+        opts.mode = taken.value
         break
       }
       case '-h': case '--help': usage(stdout); return 0
       default:
-        if (a.startsWith('--profile')) {
-          opts.profile = args[++i]
+        if (a.startsWith('--profile=')) {
+          const name = a.slice('--profile='.length)
+          if (!name || name.startsWith('-')) {
+            stderr.write('dsh-sentinel: --profile requires a profile name\n')
+            return 2
+          }
+          opts.profile = name
         } else if (a.startsWith('-')) {
           stderr.write(`dsh-sentinel: unknown option ${a}\n`)
           usage(stderr)

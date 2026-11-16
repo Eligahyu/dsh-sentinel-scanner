@@ -92,6 +92,17 @@ command timeout。DNS/HTTP/TCP/UDP gateway、Node preload probe、
 canary correlation 和任何 allowlisted replay network 都是 Phase C 工作；Phase B 的
 `complete` 不暗示这些能力，也不暗示公共网络访问。
 
+## 退出码
+
+内置默认阈值是 `--fail-on high`（`sentinel.config.json` 可改，命令行再覆盖配置）。
+
+| 码 | 含义 |
+| --- | --- |
+| `0` | 未达到配置的严重级别阈值。 |
+| `1` | 有 finding 达到 fail-on 阈值。 |
+| `2` | 用法错误或扫描失败。缺少参数、非正整数的 `--max-files` / `--max-plugins` / `--max-bytes` 都属于用法错误。 |
+| `3` | 静态扫描不完整，或请求的动态分析为 unavailable/refused/incomplete。仅在 `--fail-on-incomplete` 或 `--strict-exit-codes` 时使用。 |
+
 ## 动态分析 CLI 选项
 
 | 选项 | Phase B 行为 |
