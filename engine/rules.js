@@ -707,7 +707,7 @@ export const RULES = Object.freeze([
     severity: 'critical',
     category: 'taint',
     message: '解码后的内容流向动态执行,疑似混淆载荷',
-    description: 'base64/hex/URI 解码(Buffer.from/atob/fromCharCode 等)的结果进入 eval/Function/exec。',
+    description: 'base64/hex/URI 解码(Buffer.from/atob/fromCharCode 等)的结果进入 eval/Function/exec。别名(const run = eval、Function.prototype.constructor、const decode = atob)和 new vm.Script(decoded) 同样算。',
     recommendation: '解码内容必须人工复核;无文档说明的解码执行按恶意处理。',
   },
 

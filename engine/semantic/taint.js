@@ -14,7 +14,7 @@ import { normalizeHostname } from './harness.js'
 import { buildConstStringLookup, namedBindingsFromObjectPattern, recoverStaticSpecifier } from './static-specifier.js'
 
 const SINKS = [
-  { names: ['exec', 'execSync', 'spawn', 'spawnSync', 'execFile', 'execFileSync', 'fork', 'eval', 'vm.runInNewContext', 'vm.runInThisContext', 'vm.runInContext'], type: 'shell', ruleId: 'SEN-AGENT-001', severity: 'critical' },
+  { names: ['exec', 'execSync', 'spawn', 'spawnSync', 'execFile', 'execFileSync', 'fork', 'eval', 'Function', 'vm.Script', 'vm.runInNewContext', 'vm.runInThisContext', 'vm.runInContext'], type: 'shell', ruleId: 'SEN-AGENT-001', severity: 'critical' },
   { names: ['readFile', 'readFileSync', 'createReadStream', 'openSync'], type: 'file-read', ruleId: 'SEN-AGENT-002', severity: 'high' },
   { names: ['writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'createWriteStream'], type: 'file-write', ruleId: 'SEN-AGENT-003', severity: 'high' },
   { names: ['fetch', 'axios', 'http.request', 'https.request', 'WebSocket', 'sendBeacon', 'net.connect', 'net.createConnection', 'dgram.createSocket'], type: 'network', ruleId: 'SEN-AGENT-004', severity: 'high' },
@@ -35,7 +35,7 @@ const SECRET_ENV = /(?:^|_)(?:PRIVATE_KEY|ACCESS_KEY|API_KEY|CREDENTIAL|PASSWORD
  * member 形态(cp.exec / fs.readFileSync / http.request)限定性足够,放行。
  */
 const BINDING_REQUIRED_KINDS = new Set(['shell', 'file-read', 'file-write'])
-const BUILTIN_NO_BINDING = new Set(['eval', 'Function', 'fetch'])
+const BUILTIN_NO_BINDING = new Set(['eval', 'Function', 'fetch', 'vm.Script'])
 const BINDING_MODULES = ['child_process', 'node:child_process', 'fs', 'node:fs', 'node:fs/promises', 'fs/promises']
 
 /** raw 调用名是否确认绑定到内置模块(imports/aliases)。 */
@@ -195,16 +195,22 @@ function walkWithParent(node, visit, parent = null) {
   }
 }
 
-/** 表达式是否为解码调用:atob/decodeURIComponent/unescape/fromCharCode,或带 base64/hex 编码参数的 Buffer.from。 */
-function isDecodeCall(node) {
-  if (node?.type !== 'CallExpression') return false
+/** 表达式是否为解码调用:atob/decodeURIComponent/unescape/fromCharCode,或带 base64/hex 编码参数的 Buffer.from。别名(const decode = atob)算解码器。 */
+function decoderName(node, aliases) {
+  if (node?.type !== 'CallExpression') return null
   const raw = calleeName(node.callee)
-  if (DECODERS.has(raw)) return true
-  if (raw === 'Buffer.from') {
+  if (!raw) return null
+  const resolved = aliases?.get(raw) ?? raw
+  if (DECODERS.has(resolved)) return resolved
+  if (resolved === 'Buffer.from' || raw === 'Buffer.from') {
     const enc = staticStringOf(node.arguments[1])
-    return enc === 'base64' || enc === 'base64url' || enc === 'hex'
+    if (enc === 'base64' || enc === 'base64url' || enc === 'hex') return 'Buffer.from'
   }
-  return false
+  return null
+}
+
+function isDecodeCall(node, aliases) {
+  return decoderName(node, aliases) !== null
 }
 
 const PROMISE_BUILTINS = new Set([
@@ -341,7 +347,7 @@ function sourceTag(node, toolArgName, ctx = null) {
   const visit = (n, parent) => {
     if (tag) return
     if (isSecretEnvRead(n) || isBareEnvValue(n, parent)) { tag = 'env'; return }
-    if (isDecodeCall(n)) { tag = 'decode'; return }
+    if (isDecodeCall(n, ctx?.aliases)) { tag = 'decode'; return }
     if (isReadCall(n, ctx)) { tag = 'read'; return }
     if (n?.type === 'Identifier' && /^(conversation|memory|history|chatHistory|session|context)$/.test(n.name)) {
       tag = 'memory'
@@ -374,7 +380,7 @@ export function expressionTaints(node, toolArgName, ctx = null) {
   const visit = (n, parent) => {
     if (isSecretEnvRead(n)) { push('env', calleeName(n) ?? 'process.env'); return }
     if (isBareEnvValue(n, parent)) { push('env', 'process.env'); return }
-    if (isDecodeCall(n)) { push('decode', calleeName(n.callee)?.split('.').slice(0, 2).join('.') ?? 'decode'); return }
+    if (isDecodeCall(n, ctx?.aliases)) { push('decode', decoderName(n, ctx?.aliases) ?? 'decode'); return }
     if (isReadCall(n, ctx)) { push('read', calleeName(n.callee) ?? 'read'); return }
     if (n?.type === 'Identifier' && /^(conversation|memory|history|chatHistory|session|context)$/.test(n.name)) { push('memory', n.name); return }
     if (toolArgName && n?.type === 'MemberExpression' && n.object.type === 'Identifier' && n.object.name === toolArgName) {
@@ -386,7 +392,7 @@ export function expressionTaints(node, toolArgName, ctx = null) {
 }
 
 /** 参数树中的源头表达式名(args.command / process.env.X / Buffer.from / readFileSync 等)。 */
-function sourceNameInArg(node, toolArgName) {
+function sourceNameInArg(node, toolArgName, aliases, ctx = null) {
   let found = null
   walkWithParent(node, (n, parent) => {
     if (found) return
@@ -396,10 +402,9 @@ function sourceNameInArg(node, toolArgName) {
       found = calleeName(n) ?? 'direct'
     } else if (isBareEnvValue(n, parent)) {
       found = 'process.env'
-    } else if (isDecodeCall(n)) {
-      const raw = calleeName(n.callee)
-      found = raw ? raw.split('.').slice(0, 2).join('.') : 'direct'
-    } else if (isReadCall(n)) {
+    } else if (isDecodeCall(n, aliases)) {
+      found = decoderName(n, aliases) ?? 'direct'
+    } else if (isReadCall(n, ctx)) {
       found = calleeName(n.callee) ?? 'direct'
     }
   })
@@ -589,7 +594,7 @@ function receiverTaint(node, taints, toolArgName, ctx = null) {
     for (const element of target.elements ?? []) {
       if (!element) continue
       const direct = sourceTag(element, toolArgName, ctx)
-      if (direct) return { tag: direct, source: sourceNameInArg(element, toolArgName) }
+      if (direct) return { tag: direct, source: sourceNameInArg(element, toolArgName, ctx?.aliases, ctx) }
       for (const name of referencedIdentifiers(element)) {
         if (taints.has(name)) return taints.get(name)
       }
@@ -598,11 +603,38 @@ function receiverTaint(node, taints, toolArgName, ctx = null) {
   }
   if (target.type === 'Identifier' && taints.has(target.name)) return taints.get(target.name)
   const direct = sourceTag(target, toolArgName, ctx)
-  if (direct) return { tag: direct, source: sourceNameInArg(target, toolArgName) }
+  if (direct) return { tag: direct, source: sourceNameInArg(target, toolArgName, ctx?.aliases, ctx) }
   for (const name of referencedIdentifiers(target)) {
     if (taints.has(name)) return taints.get(name)
   }
   return null
+}
+
+/** const run = eval / Function.prototype.constructor, and const decode = atob. */
+function execAndDecoderAliases(declarators, aliases) {
+  const local = new Map(aliases)
+  const direct = (name) => name === 'eval' || name === 'Function' || DECODERS.has(name)
+  let changed = true
+  let rounds = 0
+  while (changed && rounds < 4) {
+    changed = false
+    rounds += 1
+    for (const declarator of declarators) {
+      if (declarator.id?.type !== 'Identifier' || local.has(declarator.id.name)) continue
+      const init = unwrapExpression(declarator.init)
+      let target = null
+      if (init?.type === 'Identifier') {
+        target = local.get(init.name) ?? (direct(init.name) ? init.name : null)
+      } else if (calleeName(init) === 'Function.prototype.constructor') {
+        target = 'Function'
+      }
+      if (target && direct(target)) {
+        local.set(declarator.id.name, target)
+        changed = true
+      }
+    }
+  }
+  return local
 }
 
 /**
@@ -616,6 +648,7 @@ function taintFunction(ctx, fn, depth = 0) {
   const findings = []
   const taints = new Map(ctx.paramTaints ?? new Map()) // 变量名 → {tag, source}
   const declarators = []
+  const patterns = []
   const calls = []
 
   const bodyNode = fn.bodyNode.type === 'BlockStatement' ? fn.bodyNode : { type: 'BlockStatement', body: [fn.bodyNode] }
@@ -633,26 +666,31 @@ function taintFunction(ctx, fn, depth = 0) {
         }
         return
       }
-      // 解构污点(edge-destructure):const { command } = args → command 携带 args.command 污点
-      const src = node.init.type === 'Identifier' && node.init.name === fn.toolArgName
-        ? 'args' // 裸 toolArgName:const { command } = args
-        : sourceTag(node.init, fn.toolArgName, ctx)
-      if (src) {
-        const base = sourceNameInArg(node.init, fn.toolArgName)
-        for (const prop of node.id.properties) {
-          const local = prop.value?.name
-          if (!local || taints.has(local)) continue
-          // 直接解构 toolArgName 时 source 精确到属性名(args.command)
-          const precise = node.init.type === 'Identifier' && node.init.name === fn.toolArgName
-            && prop.key?.name
-            ? `${fn.toolArgName}.${prop.key.name}`
-            : base
-          taints.set(local, { tag: src, source: precise })
-        }
-      }
+      patterns.push(node)
     }
-    if (node.type === 'CallExpression') calls.push(node)
+    if (node.type === 'CallExpression' || node.type === 'NewExpression') calls.push(node)
   })
+
+  const localAliases = execAndDecoderAliases(declarators, aliases)
+  const flowCtx = { ...ctx, aliases: localAliases }
+  for (const node of patterns) {
+    // 解构污点(edge-destructure):const { command } = args → command 携带 args.command 污点
+    const src = node.init.type === 'Identifier' && node.init.name === fn.toolArgName
+      ? 'args' // 裸 toolArgName:const { command } = args
+      : sourceTag(node.init, fn.toolArgName, flowCtx)
+    if (!src) continue
+    const base = sourceNameInArg(node.init, fn.toolArgName, localAliases, flowCtx)
+    for (const prop of node.id.properties) {
+      const local = prop.value?.name
+      if (!local || taints.has(local)) continue
+      // 直接解构 toolArgName 时 source 精确到属性名(args.command)
+      const precise = node.init.type === 'Identifier' && node.init.name === fn.toolArgName
+        && prop.key?.name
+        ? `${fn.toolArgName}.${prop.key.name}`
+        : base
+      taints.set(local, { tag: src, source: precise })
+    }
+  }
 
   // 传播到不动点
   let changed = true
@@ -663,9 +701,9 @@ function taintFunction(ctx, fn, depth = 0) {
     for (const d of declarators) {
       const name = d.id.name
       if (taints.has(name)) continue
-      const direct = sourceTag(d.init, fn.toolArgName, ctx)
+      const direct = sourceTag(d.init, fn.toolArgName, flowCtx)
       if (direct) {
-        taints.set(name, { tag: direct, source: sourceNameInArg(d.init, fn.toolArgName) })
+        taints.set(name, { tag: direct, source: sourceNameInArg(d.init, fn.toolArgName, localAliases, flowCtx) })
         changed = true
         continue
       }
@@ -703,18 +741,18 @@ function taintFunction(ctx, fn, depth = 0) {
   for (const call of calls) {
     const raw = calleeName(call.callee)
     if (!raw) continue
-    const sinkName = resolveCallee(raw, aliases)
+    const sinkName = resolveCallee(raw, localAliases)
     if (!sinkName) continue
     const sink = SINKS.find((s) => s.names.includes(sinkName))
     if (!sink) continue
 
     // P1-3:bare sink 必须绑定 import(§12)——未绑定的同名本地函数不产生 high-confidence。
-    if (BINDING_REQUIRED_KINDS.has(sink.type) && !bindingConfirmsBuiltin(raw, ctx)) continue
+    if (BINDING_REQUIRED_KINDS.has(sink.type) && !bindingConfirmsBuiltin(raw, { ...ctx, aliases: localAliases })) continue
 
     // 参数污点:同一参数的所有独立 source(P1-4 §13.3,一个 arg → 多个 flow)
     let argTaints = []
     for (const arg of call.arguments) {
-      argTaints = expressionTaints(arg, fn.toolArgName, ctx)
+      argTaints = expressionTaints(arg, fn.toolArgName, flowCtx)
       if (argTaints.length > 0) break
       const refs = referencedIdentifiers(arg)
       for (const r of refs) {
@@ -792,7 +830,7 @@ function taintFunction(ctx, fn, depth = 0) {
       if (!method) continue
       const callee = unwrapExpression(call.callee)
       if (callee?.type !== 'MemberExpression') continue
-      const inherited = receiverTaint(callee.object, taints, fn.toolArgName, ctx)
+      const inherited = receiverTaint(callee.object, taints, fn.toolArgName, flowCtx)
       if (!inherited) continue
       const callbackArg = call.arguments[0]
       const target = unwrapExpression(callbackArg)
@@ -849,16 +887,16 @@ function taintFunction(ctx, fn, depth = 0) {
   if (depth < 1 && fn.localFunctions) {
     for (const call of calls) {
       const raw = callTargetName(call.callee)
-      if (!raw || SINK_NAMES.has(resolveCallee(raw, aliases) ?? '')) continue // sink 已处理
+      if (!raw || SINK_NAMES.has(resolveCallee(raw, localAliases) ?? '')) continue // sink 已处理
       const localFn = fn.localFunctions.get(raw)
       if (!localFn) continue
       const paramTaints = new Map()
       localFn.params.forEach((p, i) => {
         const arg = call.arguments[i]
         if (!arg) return
-        const t = sourceTag(arg, fn.toolArgName, ctx)
+        const t = sourceTag(arg, fn.toolArgName, flowCtx)
         if (t) {
-          paramTaints.set(p, { tag: t, source: sourceNameInArg(arg, fn.toolArgName) })
+          paramTaints.set(p, { tag: t, source: sourceNameInArg(arg, fn.toolArgName, localAliases, flowCtx) })
           return
         }
         const refs = referencedIdentifiers(arg)

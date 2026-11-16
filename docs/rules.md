@@ -46,7 +46,7 @@
 | `SEN-AGENT-004` | 🟠 high(20 分) | agent | **model-controlled-network-target** | 模型可控参数成为网络请求 URL,即 SSRF / 任意出网能力面。 |
 | `SEN-TAINT-001` | 🔴 critical(50 分) | taint | **secret-to-network** | process.env 中的凭据(API key/token/secret)直接或经变量传播进入网络请求。 |
 | `SEN-TAINT-002` | 🟠 high(20 分) | taint | **workspace-to-network** | readFile 等读取的结果(可能是工作区源码/配置)进入网络请求体。 |
-| `SEN-TAINT-003` | 🔴 critical(50 分) | taint | **decode-to-exec-flow** | base64/hex/URI 解码(Buffer.from/atob/fromCharCode 等)的结果进入 eval/Function/exec。 |
+| `SEN-TAINT-003` | 🔴 critical(50 分) | taint | **decode-to-exec-flow** | base64/hex/URI 解码(Buffer.from/atob/fromCharCode 等)的结果进入 eval/Function/exec。别名(const run = eval、Function.prototype.constructor、const decode = atob)和 new vm.Script(decoded) 同样算。 |
 | `SEN-AGENT-005` | 🟡 medium(8 分) | agent | **tool-prompt-poisoning** | defineTool 描述或指令文本含 "ignore previous instructions" / "do not tell the user" 等短语。注意:防御性说明也可能出现同类文字,需结合上下文。 |
 | `SEN-AGENT-006` | 🟡 medium(8 分) | agent | **capability-mismatch** | 工具描述看似普通(天气/问候/换算等),但代码含 exec/fetch/文件读写等敏感能力。 |
 | `SEN-BIN-001` | ⚪ info(0 分) | binary | **native-binary-present** | 插件包内含可执行原生代码(.exe/.dll/.so/.node 等)。可能完全正当(构建工具/平台库),但原生代码无法逐行静态审阅,需人工确认来源。 |
