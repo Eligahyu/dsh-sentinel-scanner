@@ -37,6 +37,7 @@
 
 ### Fixed
 
+- SARIF 在扫描不完整时把 `invocations[0].executionSuccessful` 设为 false,并在不完整或 `findingsTruncated` 时写入 `toolExecutionNotifications`。行号和列号钳到 1-based,同一行的结束列不会早于起始列。扫描单个文件时 URI 使用文件名,不再是空字符串。稳定指纹仍只放在 `properties.dshFingerprint`。
 - `sentinel.config.json` 的已知字段现在做类型校验:非法 `mode` / `failOn` / 资源上限 / 布尔值 / `ignore` 数组会使 CLI 以退出码 2 失败,而不是静默扫错范围。未知字段仍被丢弃,并打印警告,避免把 `commandPath` 一类字段变成可执行设置。配置中的 `redactPaths: true` 会生效,不必再额外传 `--redact-paths`。
 - CLI 拒绝缺失或非正整数的 `--max-files` / `--max-plugins` / `--max-bytes`，以及缺少取值的 `--out`、`--config`、`--baseline`、`--format`、`--fail-on`、`--mode` 和 `--profile`。`--profile` 不再把任意 `--profile*` 前缀当成配置名。`--help` 写明退出码 3 和内置默认 `--fail-on high`。
 - 注册表元数据、tarball 下载和 OSV 查询不再依赖 Windows 专用的 `curl.exe`。三端都使用带字节上限、总超时和失败清理的 Node HTTP 客户端;不走 shell,不读取代理环境变量。tarball 重定向在 strict DNS 下逐跳复查,元数据和 OSV 请求不跟随重定向。
@@ -52,7 +53,7 @@
 
 ### Verification
 
-- 502 项测试:501 pass / 0 fail / 1 skip。含顶层 `module.exports = require(...)` 整模块转发。
+- 489 项测试:488 pass / 0 fail / 1 skip。不完整扫描的 SARIF `executionSuccessful`、截断通知、1-based 区域和单文件 URI 有回归用例;Promise continuation 与安装脚本文档 URL 用例仍在套件中。
 - 33 项 benchmark:rule precision 0.955 / recall 1.000 / F1 0.977;finding precision 0.919 / recall 1.000 / F1 0.958;flow precision/recall/F1 1.000;hardening edge 组 17 项全 1.000(与 v0.5 基线持平)。
 
 ## 0.4.4 (2026-08-23) — Professional Scanner Release

@@ -61,7 +61,7 @@ engine/
     provenance.js          metadata-only provenance 证据校验
     osv.js                 OSV 查询(默认关闭)
   output/
-    sarif.js               SARIF 2.1.0(相对路径、稳定指纹)
+    sarif.js               SARIF 2.1.0(相对路径、1-based 区域、invocation 完整度、dshFingerprint)
     html.js                单文件 HTML 报告
   report/fingerprint.js    稳定指纹 + baseline 对比
 plugin/index.js            DSH 插件入口:sentinel_scan / sentinel_scan_profile /
