@@ -179,13 +179,13 @@ export const RULES = Object.freeze([
     severity: 'critical',
     category: 'credentials',
     message: '读取凭据文件(SSH 私钥 / AWS / npmrc / kubeconfig 等)',
-    description: '代码读取 ~/.ssh、~/.aws/credentials、.npmrc、.netrc、kubeconfig、docker config、.git-credentials 等敏感文件。',
+    description: '代码读取 ~/.ssh、~/.aws/credentials、.npmrc、.netrc、kubeconfig、docker config、.git-credentials 等敏感文件。项目里的 credentials.json 不算。',
     recommendation: '拒绝安装。DSH 插件没有读取用户私钥的任何正当理由。',
     filePattern: CODE,
     ignoreComments: true,
     linePatterns: [
       {
-        re: /(?:readFile|readFileSync|createReadStream|openSync|require\s*\(\s*["'`])[^;\n]{0,160}?(?:\.ssh[\\\/]|id_rsa|id_ed25519|\.aws[\\\/]|credentials|\.npmrc|\.netrc|\.kube[\\\/]|\.docker[\\\/]config|\.git-credentials|\.pypirc|\.yarnrc|\.env\.local|\.env\.production|application_default_credentials\.json|\.azure[\\\/]|kubeconfig)/i,
+        re: /(?:readFile|readFileSync|createReadStream|openSync|require\s*\(\s*["'`])[^;\n]{0,200}?(?:\.ssh[\\\/]|id_rsa|id_ed25519|\.aws(?:[\\\/]|['"`]\s*,\s*['"`]credentials)|\.npmrc|\.netrc|\.kube[\\\/]|\.docker[\\\/]config|\.git-credentials|\.pypirc|\.yarnrc|\.env\.local|\.env\.production|application_default_credentials\.json|\.azure[\\\/]|kubeconfig)/i,
       },
       {
         re: /(?:\.ssh[\\\/]|id_rsa|id_ed25519|\.aws[\\\/]credentials|\.npmrc|\.netrc|\.kube[\\\/]|\.git-credentials|\.pypirc|\.yarnrc|\.env\.local|\.env\.production|application_default_credentials\.json|kubeconfig)[^;\n]{0,120}?(?:readFile|cat|type\s+)/i,
