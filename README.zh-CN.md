@@ -18,7 +18,8 @@ npm 发布包、DSH profile 和 CI 进行静态审计，输出风险分、裁决
 - 同一调用方先调用导出的 setter、再调用读取模块级绑定的导出 getter（闭包捕获）；
 - 接收者和属性静态可知的对象/类/原型方法，例如 `runner.run(...)`、`new Runner().run(...)`；
 - 直接 `.then` / `await`：值产生型 read、decode、env 与 `Promise.resolve` 的兑现值，以及可折叠 `import()` 的 `await` / `.then` 绑定；
-- 导出函数可证明的 source 返回值回到调用方的直接调用、`await` 或 `.then`。
+- 导出函数可证明的 source 返回值回到调用方的直接调用、`await` 或 `.then`；
+- 静态 re-export（`export { name } from`、重命名、`export *`、`export * as ns`）追到定义函数；同名 star 冲突只记 `cross-file-reexport-unresolved`。
 
 边界仍然保守：未知调用绝不视为纯 passthrough（可能 sanitize 或重写路径）；不做完整控制流、
 任意异步交错、`Promise.all`、`.catch`、`Proxy` / `eval` / `Function` 构造函数、动态属性或任意原型改写。无法证明的回调、

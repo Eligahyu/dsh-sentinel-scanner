@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import {
   calleeName,
   collectImports,
+  exportDeclarationHasRuntimeBinding,
   importDeclarationHasRuntimeBinding,
   parseSource,
   referencedIdentifiers,
@@ -244,6 +245,14 @@ function indexExports(ast) {
   const methods = new Map()
   const classMethods = new Map()
   const moduleBindings = new Set()
+  const reexports = new Map()
+  const exportStars = []
+  const recordReexport = (exported, imported, specifier, start) => {
+    if (!exported || !imported || !specifier) return
+    const list = reexports.get(exported) ?? []
+    list.push({ specifier, imported, start })
+    reexports.set(exported, list)
+  }
   const addFunction = (name, init) => {
     const entry = functionEntry(init)
     if (name && entry) functions.set(name, entry)
@@ -327,6 +336,20 @@ function indexExports(ast) {
   for (const statement of ast?.body ?? []) {
     if (statement.type === 'ExportNamedDeclaration') {
       if (statement.exportKind === 'type') continue
+      if (statement.source) {
+        if (!exportDeclarationHasRuntimeBinding(statement)) continue
+        const specifier = staticString(statement.source)
+        for (const spec of statement.specifiers ?? []) {
+          if (spec.exportKind === 'type') continue
+          recordReexport(
+            spec.exported?.name ?? staticString(spec.exported),
+            spec.local?.name ?? staticString(spec.local),
+            specifier,
+            statement.source.start ?? statement.start,
+          )
+        }
+        continue
+      }
       const decl = statement.declaration
       addDeclaration(decl)
       for (const spec of statement.specifiers ?? []) {
@@ -334,6 +357,22 @@ function indexExports(ast) {
         const exported = spec.exported?.name ?? staticString(spec.exported)
         const local = spec.local?.name ?? staticString(spec.local)
         if (exported && local) addRef(exported, { local })
+      }
+      continue
+    }
+    if (statement.type === 'ExportAllDeclaration') {
+      if (!exportDeclarationHasRuntimeBinding(statement)) continue
+      const specifier = staticString(statement.source)
+      if (!specifier) continue
+      if (statement.exported) {
+        recordReexport(
+          statement.exported.name ?? staticString(statement.exported),
+          '*',
+          specifier,
+          statement.source?.start ?? statement.start,
+        )
+      } else {
+        exportStars.push({ specifier, start: statement.source?.start ?? statement.start })
       }
       continue
     }
@@ -392,7 +431,72 @@ function indexExports(ast) {
     addAssignedValue(exported, expression.right)
   }
 
-  return { functions, refs, values, methods, classMethods, moduleBindings }
+  return { functions, refs, values, methods, classMethods, moduleBindings, reexports, exportStars }
+}
+
+function targetsForSpecifier(sourceByPath, graph, fromPath, specifier) {
+  const targets = []
+  for (const edge of graph?.edges ?? []) {
+    if (edge.from !== fromPath || edge.specifier !== specifier) continue
+    if (!sourceByPath.has(edge.to) || targets.includes(edge.to)) continue
+    targets.push(edge.to)
+  }
+  return targets
+}
+
+/**
+ * Follow a static re-export to the module that actually defines the export.
+ * A local declaration wins. `export *` names that resolve to more than one
+ * concrete function are ambiguous and are not guessed.
+ */
+function resolveReexport(sourceByPath, graph, filePath, exportPath, options = {}, depth = 0, seen = new Set()) {
+  if (!filePath || depth > 4 || !Array.isArray(exportPath) || exportPath.length === 0) return { status: 'missing' }
+  const key = `${filePath}\0${exportPath.join('.')}\0${options.instance ? '1' : '0'}`
+  if (seen.has(key)) return { status: 'missing' }
+  seen.add(key)
+  const file = sourceByPath.get(filePath)
+  if (!file?.index) return { status: 'missing' }
+  const direct = resolveExportEntry(file.index, exportPath, options)
+  if (direct) return { status: 'found', file, entry: direct, chain: [filePath] }
+
+  const [head, ...members] = exportPath
+  const named = file.index.reexports?.get(head) ?? []
+  if (named.length > 1) return { status: 'ambiguous', file, name: head }
+  if (named.length === 1) {
+    const targets = targetsForSpecifier(sourceByPath, graph, filePath, named[0].specifier)
+    if (targets.length !== 1) return { status: 'missing' }
+    const nextPath = named[0].imported === '*' ? members : [named[0].imported, ...members]
+    if (nextPath.length === 0) return { status: 'missing' }
+    const inner = resolveReexport(sourceByPath, graph, targets[0], nextPath, options, depth + 1, seen)
+    if (inner.status !== 'found') return inner
+    return { ...inner, chain: [filePath, ...inner.chain] }
+  }
+  if (members.length > 0) return { status: 'missing' }
+
+  const found = []
+  let ambiguous = false
+  for (const star of file.index.exportStars ?? []) {
+    const targets = targetsForSpecifier(sourceByPath, graph, filePath, star.specifier)
+    if (targets.length === 0) continue
+    if (targets.length > 1) {
+      ambiguous = true
+      continue
+    }
+    const inner = resolveReexport(sourceByPath, graph, targets[0], [head], options, depth + 1, seen)
+    if (inner.status === 'found') found.push(inner)
+    else if (inner.status === 'ambiguous') ambiguous = true
+  }
+  const unique = []
+  const seenEntry = new Set()
+  for (const item of found) {
+    const id = `${item.file.path}:${item.entry.start}`
+    if (seenEntry.has(id)) continue
+    seenEntry.add(id)
+    unique.push(item)
+  }
+  if (unique.length > 1 || ambiguous) return { status: 'ambiguous', file, name: head }
+  if (unique.length === 1) return { ...unique[0], chain: [filePath, ...unique[0].chain] }
+  return { status: 'missing' }
 }
 
 function resolveExportEntry(index, path, { instance = false } = {}) {
@@ -1205,7 +1309,7 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
     coverageSkips.push({ stage: 'cross-file', ...skip })
   }
 
-  const addHit = ({ fromPath, toPath, source, sinkHit, binding, entry, trace, sinkFile }) => {
+  const addHit = ({ fromPath, toPath, source, sinkHit, binding, entry, trace, sinkFile, modulePath = null }) => {
     const sinkOffset = Number.isInteger(sinkHit.sink.start) ? sinkHit.sink.start : entry.start
     const sinkLine = (sinkFile.content.slice(0, sinkOffset).match(/\n/g) ?? []).length + 1
     const sinkSnippet = snippetAt(sinkFile.content, sinkOffset)
@@ -1216,12 +1320,13 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
       ...(trace ?? []),
       sinkHit.sink.callee,
     ]
-    const dedupeKey = `${fromPath}|${toPath}|${rule.ruleId}|${sinkFile.path}|${sinkLine}|${sinkHit.sink.callee}|${source}`
+    const resolvedModulePath = modulePath ?? [fromPath, toPath]
+    const dedupeKey = `${resolvedModulePath.join('>')}|${rule.ruleId}|${sinkFile.path}|${sinkLine}|${sinkHit.sink.callee}|${source}`
     if (seenFindings.has(dedupeKey)) return
     seenFindings.add(dedupeKey)
     const chain = {
       source,
-      modulePath: [fromPath, toPath],
+      modulePath: resolvedModulePath,
       functionPath: [`${binding.local}(...)`, `${binding.imported}(${entry.param ?? (entry.params ?? [])[0] ?? ''})`],
       sink: sinkHit.sink.callee,
     }
@@ -1243,7 +1348,7 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
       sink: { type: sinkHit.sink.type, callee: sinkHit.sink.callee },
       flow: [source, `${binding.local}(...)`, `${sinkHit.sink.callee}(...)`],
       flowSteps,
-      modulePath: [fromPath, toPath],
+      modulePath: resolvedModulePath,
       crossFile: true,
       attackChainId,
     })
@@ -1320,8 +1425,19 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
           }
           continue
         }
-        const entry = resolveExportEntry(to.index, invocation.targetPath, { instance: invocation.instance })
-        if (!entry) {
+        const followed = resolveReexport(sourceByPath, graph, edge.to, invocation.targetPath, { instance: invocation.instance })
+        if (followed.status === 'ambiguous') {
+          if (invocation.argTaints.size > 0) {
+            addSkip({
+              reason: 'cross-file-reexport-unresolved',
+              path: edge.from,
+              member: invocation.targetPath.join('.'),
+              start: invocation.start,
+            })
+          }
+          continue
+        }
+        if (followed.status !== 'found') {
           if (invocation.targetPath.length > 1 && invocation.argTaints.size > 0) {
             addSkip({
               reason: 'cross-file-method-unresolved',
@@ -1332,7 +1448,15 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
           }
           continue
         }
-        invocations.push({ ...invocation, edge, binding, from, to, entry })
+        invocations.push({
+          ...invocation,
+          edge,
+          binding,
+          from,
+          to: followed.file,
+          entry: followed.entry,
+          exportChain: followed.chain,
+        })
       }
     }
   }
@@ -1341,7 +1465,7 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
   for (let round = 0; round < 3; round += 1) {
     let changed = false
     for (const invocation of invocations) {
-      const key = `${invocation.edge.to}\0${invocation.edge.from}`
+      const key = `${invocation.to.path}\0${invocation.edge.from}`
       const saved = moduleState.get(key) ?? new Map()
       const seed = new Map(saved)
       for (const [index, taint] of invocation.argTaints) {
@@ -1355,7 +1479,7 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
         index: invocation.to.index,
         collected: invocation.to.collected,
         moduleBindings: invocation.to.moduleBindings,
-        file: invocation.edge.to,
+        file: invocation.to.path,
       }, { depth: 0 })
 
       for (const write of flow.closureWrites) {
@@ -1370,7 +1494,8 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
         const source = hit.taint.source
         addHit({
           fromPath: invocation.edge.from,
-          toPath: invocation.edge.to,
+          toPath: invocation.to.path,
+          modulePath: [invocation.edge.from, ...(invocation.exportChain ?? [invocation.to.path])],
           source,
           sinkHit: hit,
           binding: invocation.binding,
@@ -1412,7 +1537,8 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
         for (const hit of callbackFlow.hits) {
           addHit({
             fromPath: invocation.edge.from,
-            toPath: invocation.edge.to,
+            toPath: invocation.to.path,
+            modulePath: [invocation.edge.from, ...(invocation.exportChain ?? [invocation.to.path])],
             source: hit.taint.source,
             sinkHit: { ...hit, trace: [...(callback.trace ?? []), callback.label, ...(hit.trace ?? [])] },
             binding: invocation.binding,
@@ -1436,12 +1562,23 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
     for (const binding of bindings) {
       for (const invocation of collectInvocationsForBinding(from.ast, binding, from.taints)) {
         if (!Array.isArray(invocation.targetPath) || invocation.targetPath.length === 0) continue
-        const resolved = resolveExportEntry(to.index, invocation.targetPath, { instance: invocation.instance })
-        if (!resolved) continue
-        const profileKey = `${edge.to}\0${invocation.targetPath.join('.')}\0${invocation.instance ? '1' : '0'}`
+        const followed = resolveReexport(sourceByPath, graph, edge.to, invocation.targetPath, { instance: invocation.instance })
+        if (followed.status === 'ambiguous') {
+          if (invocation.argTaints.size > 0) {
+            addSkip({
+              reason: 'cross-file-reexport-unresolved',
+              path: edge.from,
+              member: invocation.targetPath.join('.'),
+              start: invocation.start,
+            })
+          }
+          continue
+        }
+        if (followed.status !== 'found') continue
+        const profileKey = `${followed.file.path}\0${invocation.targetPath.join('.')}\0${invocation.instance ? '1' : '0'}`
         let profile = returnProfiles.get(profileKey)
         if (!profile) {
-          profile = ownReturnTaint(resolved, new Map(), to.collected)
+          profile = ownReturnTaint(followed.entry, new Map(), followed.file.collected)
           returnProfiles.set(profileKey, profile)
         }
         if (!profile.taint && !profile.touches) continue
@@ -1450,7 +1587,9 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
           unresolved: !profile.taint && profile.touches,
           edge,
           binding,
-          entry: resolved,
+          entry: followed.entry,
+          resolvedFile: followed.file,
+          exportChain: followed.chain,
           label: invocation.targetPath.join('.'),
         })
       }
@@ -1473,7 +1612,8 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
           if (!hit.info?.edge) continue
           addHit({
             fromPath: hit.info.edge.from,
-            toPath: hit.info.edge.to,
+            toPath: hit.info.resolvedFile?.path ?? hit.info.edge.to,
+            modulePath: [hit.info.edge.from, ...(hit.info.exportChain ?? [hit.info.edge.to])],
             source: hit.taint.source,
             sinkHit: hit,
             binding: hit.info.binding,

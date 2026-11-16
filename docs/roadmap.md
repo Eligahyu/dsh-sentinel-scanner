@@ -44,6 +44,7 @@
 - [x] 可静态还原的动态 `import()` / `require()` / `require.resolve()` 跨文件 reachability(字面量、拼接、纯字面量模板、无歧义 const;无法还原的目标保持 warning,不猜测边)
 - [x] 复杂回调/闭包/原型链的有界跨文件 reachability(已知 source 回调、迭代回调、导出 setter/getter 闭包、静态对象/类/原型方法;未知或计算形态只记 coverageSkip)
 - [x] 有界 Promise / `await` continuation:值产生型 read/decode/env 与 `Promise.resolve` 的 `.then` 兑现参数、直接返回该值的链式 `.then`、可折叠 `import()` 的 `await` / `.then` 绑定,以及导出函数可证明的 source 返回值回到调用方;`fs.readFile` 回调形态的返回值、`.catch` 与未知调用不当作数据
+- [x] 有界静态 re-export reachability:`export { name } from`、`export { name as alias } from`、`export * from`、`export * as ns from` 沿已解析模块边追到定义函数;同名 `export *` 冲突只记 `cross-file-reexport-unresolved`
 - [x] 原生 TypeScript parser:`.ts/.tsx/.mts/.cts` 使用 oxc-parser AST,type-only import/export 不建运行时边,解析失败显式降级并报告
 - [ ] GitHub Action 拆独立仓库 + 徽章服务
 - [ ] DSH 官方 pre-install hook 对接(若官方提供)
@@ -66,6 +67,10 @@
 - 链式 `.then` 仅在上一个兑现回调直接返回已证明的污点时继承;中间未知调用(可能是 sanitizer)会断开。
 - 跨文件返回值只承认函数体内可证明的 source(read/decode/env),不把参数原样返回或未知包装当作 passthrough。碰到 source 但返回值无法证明、且调用方把结果送进 sink 时记 `cross-file-return-unresolved`,不伪造边,也不单独把扫描判为不完整。
 - 不建模任意异步交错、调用顺序、`Promise.all` / `Promise.race`、事件 `.on('data')` 或跨导入方共享的异步状态。
+
+#### v0.5 静态 re-export 剩余限制
+- 只跟随已经进入模块图的静态 `export ... from`。计算路径、条件 re-export、`module.exports = require(...)` 整模块转发不猜测。
+- 同名 `export *` 解析到多个具体函数时记 `cross-file-reexport-unresolved`,不选边。本地声明优先于 `export *`。追踪深度有界(4 跳),环只停止,不报完整。该跳过不是 failure。
 
 ### v1.0
 - [ ] 稳定语义引擎与基准(目标:rule precision ≥ 0.90 / recall ≥ 0.85)
