@@ -432,7 +432,7 @@ dsh-sentinel --rules                print the rule catalog
 | `--dynamic-timeout <ms>` | Bounded deep-analysis timeout; default `15000`, clamped to `1000`–`30000` ms. |
 | `--max-files`, `--max-plugins`, `--max-bytes` | Set bounded resource limits. Each value must be a positive integer. Defaults: 3000 files, 12 plugins, 524288 bytes. |
 | `--config <file>` | Load `sentinel.config.json`; CLI values override config values. Invalid field types are a usage error (exit 2). Unknown fields are ignored and a warning is printed. `redactPaths: true` anonymizes report paths even without `--redact-paths`. |
-| `--redact-paths` | Replace absolute paths with shareable workspace labels. |
+| `--redact-paths` | Anonymize absolute paths in the report, including skips, attack chains, module-graph and dependency paths, profile paths, and audit/diff output. The target becomes `<workspace>/<name>`. In-workspace file paths become relative. Other absolute paths become `<outside>/<name>`. Messages and snippets replace only this scan's workspace path, so other paths in the evidence stay intact. |
 | `--advisories` | Query OSV with package name and version only; disabled by default. |
 | `--provenance` | Read npm provenance attestations; disabled by default. |
 

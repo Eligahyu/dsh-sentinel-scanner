@@ -20,7 +20,7 @@ import { scan, scanProfile, RULES, VERSION } from '../engine/index.js'
 import { SEVERITY_ORDER } from '../engine/rules.js'
 import { normalizeDynamicOptions } from '../engine/dynamic/policy.js'
 import { statSync } from 'node:fs'
-import { dirname as pathDirname, relative as pathRelative, isAbsolute as pathIsAbsolute } from 'node:path'
+import { dirname as pathDirname, isAbsolute as pathIsAbsolute, resolve as pathResolve } from 'node:path'
 
 const VERDICT_EMOJI = { safe: '✅', review: '👀', risky: '⚠️', dangerous: '🚨' }
 const SEV_LABEL = { critical: 'CRITICAL', high: 'HIGH', medium: 'MEDIUM', low: 'low', info: 'info' }
@@ -54,7 +54,9 @@ Options:
   --mode <mode>   scan mode: source(默认,跳过 dist/build) | package(扫构建产物) | profile
   --config <path> sentinel.config.json path (auto-detected in cwd)
   --include-builtins  include trusted @deepseek-ai scopes in profile audits
-  --redact-paths  anonymize absolute paths in shareable reports (<workspace>/...)
+  --redact-paths  anonymize absolute paths (<workspace>/<name> for the target;
+                  in-workspace files become relative; other absolute paths
+                  become <outside>/<name>; snippets keep non-workspace paths)
   --advisories    query OSV for known vulnerabilities (default OFF; uploads name+version only)
   --provenance    read npm provenance attestations (default OFF)
   --dynamic       request bounded Phase B dynamic analysis (unavailable without a scanner-owned image)
@@ -135,24 +137,112 @@ function formatText(report, out) {
   out.write('\n')
 }
 
-/** 可分享输出中的绝对路径匿名化(<workspace>/...)。 */
-function redactReportPaths(report, basePath) {
-  const rel = (p) => {
-    if (!p || typeof p !== 'string') return p
-    const r = pathRelative(basePath, p)
-    if (pathIsAbsolute(p) && !r.startsWith('..') && r !== '..') return r
-    return p
+const REDACT_TEXT_KEYS = new Set(['snippet', 'message', 'detail', 'recommendation', 'text', 'markdown', 'description'])
+
+/** 过短的根(如 `/` 或 `C:`)不能当匿名化前缀,否则会改写整份报告。 */
+function redactPrefix(value) {
+  if (typeof value !== 'string' || value.length === 0) return null
+  let abs
+  try {
+    abs = pathResolve(value)
+  } catch {
+    return null
   }
-  report.target.path = `<workspace>/${report.target.path.split(/[\\/]/).filter(Boolean).pop() ?? 'target'}`
-  for (const f of report.findings ?? []) {
-    f.file = rel(f.file) ?? f.file
+  if (!pathIsAbsolute(abs)) return null
+  const norm = abs.replace(/\\/g, '/').replace(/\/+$/, '')
+  if (norm.length < 2 || norm === '/' || /^[A-Za-z]:$/.test(norm)) return null
+  return norm
+}
+
+/**
+ * 可分享输出中的绝对路径匿名化。
+ * target.path 使用 `<workspace>/<name>`。工作区内的路径字段改成相对路径(供 SARIF 继续指向文件)。
+ * 工作区以外的绝对路径收成 `<outside>/<name>`。消息和代码片段只替换本次扫描根,避免抹掉证据里的其他路径。
+ */
+export function redactReportPaths(report, basePath) {
+  const originalTarget = typeof report?.target?.path === 'string' ? report.target.path : ''
+  const prefixes = []
+  const addPrefix = (value) => {
+    const prefix = redactPrefix(value)
+    if (prefix && !prefixes.includes(prefix)) prefixes.push(prefix)
   }
-  for (const s of report.stats?.largestFiles ?? []) {
-    s.file = rel(s.file) ?? s.file
+  addPrefix(basePath)
+  addPrefix(originalTarget)
+  for (const candidate of [basePath, originalTarget]) {
+    if (!candidate || !pathIsAbsolute(candidate)) continue
+    try {
+      if (statSync(candidate).isFile()) addPrefix(pathDirname(candidate))
+    } catch {
+      // 路径不存在时只使用它本身。
+    }
   }
-  for (const h of report.hardSkipped ?? []) {
-    h.path = rel(h.path) ?? h.path
+  prefixes.sort((a, b) => b.length - a.length)
+
+  if (report?.target && typeof report.target.path === 'string') {
+    const label = originalTarget.split(/[\\/]/).filter(Boolean).pop() ?? 'target'
+    report.target.path = `<workspace>/${label}`
   }
+
+  const replaceRoots = (value) => {
+    const norm = value.replace(/\\/g, '/')
+    let next = norm
+    let changed = false
+    for (const prefix of prefixes) {
+      if (!next.includes(prefix)) continue
+      next = next.split(prefix).join('<workspace>')
+      changed = true
+    }
+    if (!changed) return null
+    return next.replace(/<workspace>\/+/g, '<workspace>/')
+  }
+
+  const relativize = (value) => {
+    const norm = value.replace(/\\/g, '/')
+    for (const prefix of prefixes) {
+      if (norm === prefix) return norm.split('/').filter(Boolean).pop() || '<workspace>'
+      if (norm.startsWith(`${prefix}/`)) return norm.slice(prefix.length + 1)
+    }
+    if (pathIsAbsolute(value)) {
+      const name = norm.split('/').filter(Boolean).pop() || 'path'
+      return `<outside>/${name}`
+    }
+    return value
+  }
+
+  const rewrite = (value, key) => {
+    if (typeof value !== 'string' || value.length === 0) return value
+    const text = REDACT_TEXT_KEYS.has(key)
+    const rooted = replaceRoots(value)
+    if (text) return rooted ?? value
+    if (rooted != null || pathIsAbsolute(value)) return relativize(value)
+    return value
+  }
+
+  const walk = (node, seen, key) => {
+    if (!node || typeof node !== 'object') return
+    if (seen.has(node)) return
+    seen.add(node)
+    if (Array.isArray(node)) {
+      for (let i = 0; i < node.length; i += 1) {
+        const item = node[i]
+        if (typeof item === 'string') {
+          try { node[i] = rewrite(item, key) } catch { /* frozen */ }
+        } else {
+          walk(item, seen, key)
+        }
+      }
+      return
+    }
+    for (const childKey of Object.keys(node)) {
+      const item = node[childKey]
+      if (typeof item === 'string') {
+        try { node[childKey] = rewrite(item, childKey) } catch { /* frozen */ }
+      } else {
+        walk(item, seen, childKey)
+      }
+    }
+  }
+  walk(report, new Set(), '')
   return report
 }
 
@@ -438,11 +528,23 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
       }
       const diff = diffBaseline(output, baseline)
       output.baseline = diff
-      if (opts.format === 'text') {
-        stdout.write(`\nbaseline: new ${diff.newFindings} · existing ${diff.existingFindings} · resolved ${diff.resolvedFindings}\n`)
-        for (const f of diff.new.slice(0, 10)) {
-          stdout.write(`  NEW [${f.severity}] ${f.id} ${f.file}:${f.line} — ${f.message}\n`)
-        }
+    }
+
+    const redactBase = result.__audit
+      ? (positional[1] ?? process.cwd())
+      : result.__diff
+        ? (positional[2] ?? process.cwd())
+        : (positional[0] ?? process.cwd())
+    if (shouldRedactPaths) {
+      if (result.__diff) redactReportPaths({ target: { path: redactBase }, ...result.__diff }, redactBase)
+      else if (result.__audit) redactReportPaths({ ...result.__audit.report, audit: result.__audit.audit }, redactBase)
+      else redactReportPaths(output, redactBase)
+    }
+    if (opts.baseline && opts.format === 'text' && output.baseline) {
+      const diff = output.baseline
+      stdout.write(`\nbaseline: new ${diff.newFindings} · existing ${diff.existingFindings} · resolved ${diff.resolvedFindings}\n`)
+      for (const f of diff.new.slice(0, 10)) {
+        stdout.write(`  NEW [${f.severity}] ${f.id} ${f.file}:${f.line} — ${f.message}\n`)
       }
     }
 
@@ -472,9 +574,7 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
       }
       if (opts.format === 'json') {
         // audit 元数据必须与 report 一起输出(Harness Tool 与 CLI 保持一致)
-        const payload = { ...report, audit }
-        if (shouldRedactPaths) redactReportPaths(payload, positional[1] ?? process.cwd())
-        stdout.write(JSON.stringify(payload, null, 2) + '\n')
+        stdout.write(JSON.stringify({ ...report, audit }, null, 2) + '\n')
       } else {
         formatText(report, stdout)
       }
@@ -484,9 +584,6 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
       }
       return audit.verdict === 'BLOCK-RECOMMENDED' ? 1 : 0
     }
-
-    // 输出前:可分享报告路径匿名化(--redact-paths)
-    if (shouldRedactPaths) redactReportPaths(output, positional[0] ?? process.cwd())
 
     // 输出格式:json / sarif / html / text
     if (opts.format === 'cyclonedx' || opts.format === 'spdx') {

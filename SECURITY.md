@@ -36,7 +36,7 @@ dsh-sentinel 是一个安全扫描工具,自身的安全同样重要。请通过
 ### 报告二次泄露
 
 - secret 脱敏绕过:`engine/redact.js` 永远开启,报告零完整 secret,只保留指纹
-- 绝对路径泄露:`--redact-paths` 将本机路径匿名化为 `<workspace>/...`
+- 绝对路径泄露:`--redact-paths` 将目标写成 `<workspace>/<name>`，工作区内路径改为相对路径，其余绝对路径收成 `<outside>/<name>`。消息和代码片段只替换本次扫描根。
   (JSON / SARIF / HTML 均可分享)
 
 ### 误执行被扫描代码(红线)
