@@ -16,11 +16,13 @@ npm 发布包、DSH profile 和 CI 进行静态审计，输出风险分、裁决
 - 已建模的 source 形态 API 回调，例如 `readFile(path, (err, data) => ...)` 中的 `data`；
 - 数组/元素已带污点时的 `forEach` / `map` 等迭代回调；
 - 同一调用方先调用导出的 setter、再调用读取模块级绑定的导出 getter（闭包捕获）；
-- 接收者和属性静态可知的对象/类/原型方法，例如 `runner.run(...)`、`new Runner().run(...)`。
+- 接收者和属性静态可知的对象/类/原型方法，例如 `runner.run(...)`、`new Runner().run(...)`；
+- 直接 `.then` / `await`：值产生型 read、decode、env 与 `Promise.resolve` 的兑现值，以及可折叠 `import()` 的 `await` / `.then` 绑定；
+- 导出函数可证明的 source 返回值回到调用方的直接调用、`await` 或 `.then`。
 
 边界仍然保守：未知调用绝不视为纯 passthrough（可能 sanitize 或重写路径）；不做完整控制流、
-异步交错、`Proxy` / `eval` / `Function` 构造函数、动态属性或任意原型改写。无法证明的回调或
-方法只会产生 `cross-file-*` coverageSkips，不会猜测模块边，也不会单独把扫描判为不完整。
+任意异步交错、`Promise.all`、`.catch`、`Proxy` / `eval` / `Function` 构造函数、动态属性或任意原型改写。无法证明的回调、
+方法或跨文件返回值只会产生 `cross-file-*` / `cross-file-return-unresolved` coverageSkips，不会猜测模块边，也不会单独把扫描判为不完整。
 英文 [README](README.md) 与 [架构文档](docs/architecture.md) 有完整说明。
 
 ## Phase B 动态分析：显式选择、网络隔离

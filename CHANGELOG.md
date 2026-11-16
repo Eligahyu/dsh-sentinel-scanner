@@ -4,6 +4,9 @@
 
 ### Added
 
+- 有界 Promise / `await` continuation:值产生型 read(`readFileSync`、`fs/promises` 与 `fs.promises.readFile`)、decode、env 凭据,以及 `Promise.resolve` 对这些值的包装,其 `.then` 只播种兑现参数。链式 `.then` 仅在上一个兑现回调直接返回该污点时继承;`.catch`、未知调用和回调形态 `fs.readFile` 的返回值不会被当成文件数据。
+- 可静态折叠的动态 `import()` 现在带上 `await` 命名空间、成员绑定和 `.then` 兑现参数。builtin `child_process` / `fs` / `fs/promises` 的 `await import` 与 `import().then` 会确认 sink 绑定;无法折叠的说明符仍然不猜测。
+- 跨文件导出函数若能证明返回 modeled source,调用方的直接使用、`await` 和 `.then` 会继续到 sink。函数碰到 source 但返回值无法证明,且调用方把结果送进 sink 时记 `cross-file-return-unresolved`;这不是 failure,不伪造边,也不单独把扫描判为不完整。
 - 有界跨文件 reachability 扩展:已建模 source 形态 API 的回调桥接(如 `readFile(path, (err, data) => ...)`)、数组/元素已带污点时的 `forEach` / `map` 迭代回调、同一导入方内“导出 setter 写入模块级绑定 → 导出 getter 读取该绑定”的闭包链,以及静态对象字面量/类实例/`prototype` 方法(`runner.run(...)`、`new Runner().run(...)`)。
 - 无法证明的回调或方法接收者(未知高阶函数、`obj[computed](...)`、未知方法)现在进入 `coverageSkips`,使用 `cross-file-callback-unresolved` / `cross-file-method-unresolved`;它们不是 failure,不会伪造模块边,也不会单独把扫描判为不完整。
 - 跨文件 AST 污点新增 `cross-file-*` 证据:回调/方法/闭包链沿用 `modulePath`、`flowSteps`、`attackChainId`;未知调用(如 `sanitize(args.x)`)不会被当作纯 passthrough。
@@ -47,7 +50,7 @@
 
 ### Verification
 
-- 467 项测试:466 pass / 0 fail / 1 skip。非法配置类型在扫描前返回退出码 2；`redactPaths: true` 与未知字段警告有回归用例。
+- 478 项测试:477 pass / 0 fail / 1 skip。含 Promise / `await` / `import().then` continuation、跨文件 source 返回值与 `cross-file-return-unresolved`,以及配置校验回归。
 - 33 项 benchmark:rule precision 0.955 / recall 1.000 / F1 0.977;finding precision 0.919 / recall 1.000 / F1 0.958;flow precision/recall/F1 1.000;hardening edge 组 17 项全 1.000(与 v0.5 基线持平)。
 
 ## 0.4.4 (2026-08-23) — Professional Scanner Release

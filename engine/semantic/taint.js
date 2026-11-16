@@ -11,6 +11,7 @@
 
 import { walk, calleeName, staticStringOf, referencedIdentifiers, collectAliases, collectImports, unwrapExpression } from './ast.js'
 import { normalizeHostname } from './harness.js'
+import { buildConstStringLookup, namedBindingsFromObjectPattern, recoverStaticSpecifier } from './static-specifier.js'
 
 const SINKS = [
   { names: ['exec', 'execSync', 'spawn', 'spawnSync', 'execFile', 'execFileSync', 'fork', 'eval', 'vm.runInNewContext', 'vm.runInThisContext', 'vm.runInContext'], type: 'shell', ruleId: 'SEN-AGENT-001', severity: 'critical' },
@@ -164,24 +165,142 @@ function isDecodeCall(node) {
   return false
 }
 
-/** 表达式是否为文件读取调用。 */
-function isReadCall(node) {
+const PROMISE_BUILTINS = new Set([
+  'fs', 'node:fs', 'fs/promises', 'node:fs/promises',
+  'child_process', 'node:child_process',
+])
+
+function moduleBareName(mod) {
+  if (typeof mod !== 'string') return ''
+  const bare = mod.startsWith('node:') ? mod.slice(5) : mod
+  return bare.split(':')[0]
+}
+
+/** `readFile(path, cb)` returns undefined; only the callback receives the bytes. */
+export function isCallbackStyleRead(node) {
   if (node?.type !== 'CallExpression') return false
   const raw = calleeName(node.callee)
-  if (READERS.has(raw)) return true
-  if (raw && /^fs\./.test(raw)) return READERS.has(raw.split('.').pop())
-  return false
+  const tail = raw ? raw.slice(raw.lastIndexOf('.') + 1) : ''
+  if (tail !== 'readFile') return false
+  const args = node.arguments ?? []
+  if (args.length < 2) return false
+  const last = unwrapExpression(args[args.length - 1])
+  return FUNCTION_TYPES.has(last?.type) || last?.type === 'Identifier'
+}
+
+/**
+ * Read call whose return/fulfillment value is the file data.
+ * Callback-style `fs.readFile` is excluded: without a promises binding the
+ * return value is not the file contents.
+ */
+export function valueProducingReadTag(call, collected = null) {
+  if (call?.type !== 'CallExpression' || isCallbackStyleRead(call)) return null
+  const raw = calleeName(call.callee)
+  if (!raw) return null
+  const tail = raw.slice(raw.lastIndexOf('.') + 1)
+  if (!READERS.has(raw) && !READERS.has(tail)) return null
+  if (tail === 'readFileSync' || tail === 'openSync' || tail === 'createReadStream') {
+    return { tag: 'read', source: raw }
+  }
+  if (tail !== 'readFile') return null
+  if (raw.includes('.promises.')) return { tag: 'read', source: raw }
+  const root = raw.includes('.') ? raw.slice(0, raw.indexOf('.')) : raw
+  const mod = collected?.imports?.get(root)
+  if (moduleBareName(mod) === 'fs/promises') return { tag: 'read', source: raw }
+  return null
+}
+
+/** 表达式是否为文件读取调用,且返回值就是文件数据。 */
+function isReadCall(node, ctx = null) {
+  return valueProducingReadTag(node, ctx) !== null
+}
+
+function unwrapAwaitable(node) {
+  let current = unwrapExpression(node)
+  while (current?.type === 'ChainExpression' || current?.type === 'AwaitExpression') {
+    current = unwrapExpression(current.type === 'ChainExpression' ? current.expression : current.argument)
+  }
+  return current
+}
+
+function builtinImportSpecifier(node, lookup) {
+  const target = unwrapAwaitable(node)
+  if (target?.type !== 'ImportExpression') return null
+  const spec = recoverStaticSpecifier(target.source, lookup ?? (() => null))
+  return PROMISE_BUILTINS.has(spec) ? spec : null
+}
+
+function awaitedBuiltinSpecifier(node, lookup) {
+  let current = unwrapExpression(node)
+  let awaited = false
+  while (current?.type === 'ChainExpression' || current?.type === 'AwaitExpression') {
+    if (current.type === 'AwaitExpression') awaited = true
+    current = unwrapExpression(current.type === 'ChainExpression' ? current.expression : current.argument)
+  }
+  if (!awaited || current?.type !== 'ImportExpression') return null
+  const spec = recoverStaticSpecifier(current.source, lookup ?? (() => null))
+  return PROMISE_BUILTINS.has(spec) ? spec : null
+}
+
+/** Names bound by a promise fulfillment parameter: `data` or `{ data }`. */
+export function fulfillmentNames(param) {
+  const names = []
+  const target = unwrapExpression(param)
+  const node = target?.type === 'AssignmentPattern' ? unwrapExpression(target.left) : target
+  if (!node) return names
+  if (node.type === 'Identifier') names.push(node.name)
+  else if (node.type === 'ObjectPattern') {
+    for (const binding of namedBindingsFromObjectPattern(node)) names.push(binding.local)
+  }
+  return names
+}
+
+function bindBuiltinPattern(pattern, spec, collected) {
+  const target = unwrapExpression(pattern)
+  const node = target?.type === 'AssignmentPattern' ? unwrapExpression(target.left) : target
+  if (!node || !spec) return
+  if (node.type === 'Identifier') {
+    if (!collected.imports.has(node.name)) collected.imports.set(node.name, spec)
+    collected.cpVars.add(node.name)
+    return
+  }
+  if (node.type === 'ObjectPattern') {
+    for (const binding of namedBindingsFromObjectPattern(node)) {
+      if (!collected.aliases.has(binding.local)) collected.aliases.set(binding.local, binding.imported)
+      if (!collected.imports.has(binding.local)) collected.imports.set(binding.local, `${spec}:${binding.imported}`)
+    }
+  }
+}
+
+function overlayBuiltin(ctx, spec, pattern) {
+  const imports = new Map(ctx.imports)
+  const aliases = new Map(ctx.aliases)
+  const cpVars = new Set(ctx.cpVars)
+  bindBuiltinPattern(pattern, spec, { imports, aliases, cpVars })
+  return { imports, aliases, cpVars }
+}
+
+/** `const ns = await import('node:fs')` binds the namespace; a bare promise does not. */
+export function applyAwaitImportBindings(ast, collected) {
+  if (!ast || !collected?.imports) return collected
+  const lookup = buildConstStringLookup(ast)
+  walk(ast, (node) => {
+    if (node.type !== 'VariableDeclarator' || !node.id || !node.init) return
+    const spec = awaitedBuiltinSpecifier(node.init, lookup)
+    if (spec) bindBuiltinPattern(node.id, spec, collected)
+  })
+  return collected
 }
 
 /** 表达式标签:'env' | 'decode' | 'read' | 'args' | 'memory' | null(扫描整棵表达式树)。 */
-function sourceTag(node, toolArgName) {
+function sourceTag(node, toolArgName, ctx = null) {
   if (!node) return null
   let tag = null
   const visit = (n) => {
     if (tag) return
     if (isSecretEnvRead(n)) { tag = 'env'; return }
     if (isDecodeCall(n)) { tag = 'decode'; return }
-    if (isReadCall(n)) { tag = 'read'; return }
+    if (isReadCall(n, ctx)) { tag = 'read'; return }
     if (n?.type === 'Identifier' && /^(conversation|memory|history|chatHistory|session|context)$/.test(n.name)) {
       tag = 'memory'
       return
@@ -201,7 +320,7 @@ function sourceTag(node, toolArgName) {
  * 每个 source 独立成流,不再只取第一个。
  * @returns {Array<{tag: string, source: string}>}
  */
-export function expressionTaints(node, toolArgName) {
+export function expressionTaints(node, toolArgName, ctx = null) {
   const out = []
   const seen = new Set()
   const push = (tag, source) => {
@@ -214,7 +333,7 @@ export function expressionTaints(node, toolArgName) {
   const visit = (n) => {
     if (isSecretEnvRead(n)) { push('env', calleeName(n) ?? 'process.env'); return }
     if (isDecodeCall(n)) { push('decode', calleeName(n.callee)?.split('.').slice(0, 2).join('.') ?? 'decode'); return }
-    if (isReadCall(n)) { push('read', calleeName(n.callee) ?? 'read'); return }
+    if (isReadCall(n, ctx)) { push('read', calleeName(n.callee) ?? 'read'); return }
     if (n?.type === 'Identifier' && /^(conversation|memory|history|chatHistory|session|context)$/.test(n.name)) { push('memory', n.name); return }
     if (toolArgName && n?.type === 'MemberExpression' && n.object.type === 'Identifier' && n.object.name === toolArgName) {
       push('args', calleeName(n) ?? 'direct')
@@ -255,9 +374,146 @@ function functionNodeForCallback(node) {
   if (!fn || !FUNCTION_TYPES.has(fn.type) || !fn.body) return null
   return {
     params: (fn.params ?? []).map((p) => firstParamName(p)).filter(Boolean),
+    paramNodes: fn.params ?? [],
     bodyNode: fn.body.type === 'BlockStatement' ? fn.body : fn.body,
+    implicitReturn: fn.body.type === 'BlockStatement' ? null : fn.body,
     raw: fn,
   }
+}
+
+function memberPropertyName(member) {
+  const target = unwrapExpression(member)
+  if (target?.type === 'ChainExpression') return memberPropertyName(target.expression)
+  if (target?.type !== 'MemberExpression') return null
+  if (!target.computed) return target.property?.type === 'Identifier' ? target.property.name : null
+  return staticStringOf(target.property)
+}
+
+function isThenCall(call) {
+  return memberPropertyName(call?.callee) === 'then'
+}
+
+function walkOwn(node, visit) {
+  if (!node || typeof node.type !== 'string' || FUNCTION_TYPES.has(node.type)) return
+  visit(node)
+  for (const key of Object.keys(node)) {
+    if (key === 'type' || key === 'start' || key === 'end' || key === 'loc' || key === 'range') continue
+    const child = node[key]
+    const children = Array.isArray(child) ? child : [child]
+    for (const item of children) {
+      if (!item || typeof item.type !== 'string' || FUNCTION_TYPES.has(item.type)) continue
+      walkOwn(item, visit)
+    }
+  }
+}
+
+/**
+ * Taint carried by a promise receiver or a fulfillment return.
+ * Unknown calls are not passthroughs. `.then` results already proven in this
+ * scope are read from `promiseValues`.
+ */
+function promiseValueTaint(node, taints, toolArgName, ctx, promiseValues) {
+  const target = unwrapAwaitable(node)
+  if (!target) return null
+  if (target.type === 'Identifier') return taints.get(target.name) ?? null
+  if (target.type === 'CallExpression') {
+    if (promiseValues?.has(target)) return promiseValues.get(target)
+    const raw = calleeName(target.callee)
+    if (raw === 'Promise.resolve' && target.arguments?.[0]) {
+      return promiseValueTaint(target.arguments[0], taints, toolArgName, ctx, promiseValues)
+    }
+    if (isDecodeCall(target)) return { tag: 'decode', source: raw ?? 'decode' }
+    return valueProducingReadTag(target, ctx)
+  }
+  if (isSecretEnvRead(target)) return { tag: 'env', source: calleeName(target) ?? 'process.env' }
+  if (target.type === 'MemberExpression') {
+    if (toolArgName && target.object?.type === 'Identifier' && target.object.name === toolArgName) {
+      return { tag: 'args', source: calleeName(target) ?? toolArgName }
+    }
+    if (target.object?.type === 'Identifier' && taints.has(target.object.name)) return taints.get(target.object.name)
+    return null
+  }
+  if (target.type === 'TemplateLiteral') {
+    for (const expression of target.expressions ?? []) {
+      const taint = promiseValueTaint(expression, taints, toolArgName, ctx, promiseValues)
+      if (taint) return taint
+    }
+    return null
+  }
+  if (target.type === 'BinaryExpression' || target.type === 'LogicalExpression') {
+    return promiseValueTaint(target.left, taints, toolArgName, ctx, promiseValues)
+      ?? promiseValueTaint(target.right, taints, toolArgName, ctx, promiseValues)
+  }
+  if (target.type === 'ConditionalExpression') {
+    return promiseValueTaint(target.consequent, taints, toolArgName, ctx, promiseValues)
+      ?? promiseValueTaint(target.alternate, taints, toolArgName, ctx, promiseValues)
+  }
+  if (target.type === 'ObjectExpression') {
+    for (const prop of target.properties ?? []) {
+      if (prop?.type !== 'Property') continue
+      const taint = promiseValueTaint(prop.value, taints, toolArgName, ctx, promiseValues)
+      if (taint) return taint
+    }
+    return null
+  }
+  if (target.type === 'ArrayExpression') {
+    for (const element of target.elements ?? []) {
+      const taint = promiseValueTaint(element, taints, toolArgName, ctx, promiseValues)
+      if (taint) return taint
+    }
+    return null
+  }
+  if (target.type === 'SequenceExpression') {
+    for (let index = (target.expressions ?? []).length - 1; index >= 0; index -= 1) {
+      const taint = promiseValueTaint(target.expressions[index], taints, toolArgName, ctx, promiseValues)
+      if (taint) return taint
+    }
+    return null
+  }
+  return null
+}
+
+function fulfillmentResultTaint(entry, seed, toolArgName, ctx) {
+  const taints = new Map(seed)
+  const declarators = []
+  const sourceBody = entry.raw?.body?.type === 'BlockStatement' ? entry.raw.body : null
+  if (sourceBody) {
+    walkOwn(sourceBody, (node) => {
+      if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier' && node.init) declarators.push(node)
+      if (node.type === 'AssignmentExpression' && node.left?.type === 'Identifier' && node.right) {
+        declarators.push({ id: node.left, init: node.right })
+      }
+    })
+  }
+  let changed = true
+  let rounds = 0
+  while (changed && rounds < 6) {
+    changed = false
+    rounds += 1
+    for (const declarator of declarators) {
+      if (taints.has(declarator.id.name)) continue
+      const taint = promiseValueTaint(declarator.init, taints, toolArgName, ctx, null)
+      if (taint) {
+        taints.set(declarator.id.name, taint)
+        changed = true
+      }
+    }
+  }
+  const returns = []
+  if (entry.implicitReturn) returns.push(entry.implicitReturn)
+  else if (sourceBody) {
+    walkOwn(sourceBody, (node) => {
+      if (node.type === 'ReturnStatement' && node.argument) returns.push(node.argument)
+    })
+  }
+  let found = null
+  for (const expr of returns) {
+    const taint = promiseValueTaint(expr, taints, toolArgName, ctx, null)
+    if (!taint) continue
+    if (!found) found = taint
+    else if (found.tag !== taint.tag) return null
+  }
+  return found
 }
 
 function firstParamName(param) {
@@ -283,13 +539,13 @@ function callTargetName(callee) {
 }
 
 /** Conservative receiver taint for array iteration: literals and already-tainted bindings. */
-function receiverTaint(node, taints, toolArgName) {
+function receiverTaint(node, taints, toolArgName, ctx = null) {
   const target = unwrapExpression(node)
   if (!target) return null
   if (target.type === 'ArrayExpression') {
     for (const element of target.elements ?? []) {
       if (!element) continue
-      const direct = sourceTag(element, toolArgName)
+      const direct = sourceTag(element, toolArgName, ctx)
       if (direct) return { tag: direct, source: sourceNameInArg(element, toolArgName) }
       for (const name of referencedIdentifiers(element)) {
         if (taints.has(name)) return taints.get(name)
@@ -298,7 +554,7 @@ function receiverTaint(node, taints, toolArgName) {
     return null
   }
   if (target.type === 'Identifier' && taints.has(target.name)) return taints.get(target.name)
-  const direct = sourceTag(target, toolArgName)
+  const direct = sourceTag(target, toolArgName, ctx)
   if (direct) return { tag: direct, source: sourceNameInArg(target, toolArgName) }
   for (const name of referencedIdentifiers(target)) {
     if (taints.has(name)) return taints.get(name)
@@ -326,7 +582,7 @@ function taintFunction(ctx, fn, depth = 0) {
       // 解构污点(edge-destructure):const { command } = args → command 携带 args.command 污点
       const src = node.init.type === 'Identifier' && node.init.name === fn.toolArgName
         ? 'args' // 裸 toolArgName:const { command } = args
-        : sourceTag(node.init, fn.toolArgName)
+        : sourceTag(node.init, fn.toolArgName, ctx)
       if (src) {
         const base = sourceNameInArg(node.init, fn.toolArgName)
         for (const prop of node.id.properties) {
@@ -353,7 +609,7 @@ function taintFunction(ctx, fn, depth = 0) {
     for (const d of declarators) {
       const name = d.id.name
       if (taints.has(name)) continue
-      const direct = sourceTag(d.init, fn.toolArgName)
+      const direct = sourceTag(d.init, fn.toolArgName, ctx)
       if (direct) {
         taints.set(name, { tag: direct, source: sourceNameInArg(d.init, fn.toolArgName) })
         changed = true
@@ -404,7 +660,7 @@ function taintFunction(ctx, fn, depth = 0) {
     // 参数污点:同一参数的所有独立 source(P1-4 §13.3,一个 arg → 多个 flow)
     let argTaints = []
     for (const arg of call.arguments) {
-      argTaints = expressionTaints(arg, fn.toolArgName)
+      argTaints = expressionTaints(arg, fn.toolArgName, ctx)
       if (argTaints.length > 0) break
       const refs = referencedIdentifiers(arg)
       for (const r of refs) {
@@ -441,9 +697,10 @@ function taintFunction(ctx, fn, depth = 0) {
     }
   }
 
-  const runSub = (entry, paramTaints) => {
-    if (!entry || paramTaints.size === 0) return
-    const sub = taintFunction({ ...ctx, paramTaints }, {
+  const runSub = (entry, paramTaints, extra = null) => {
+    if (!entry || (paramTaints.size === 0 && !extra?.always)) return
+    const nextCtx = extra?.ctx ? { ...ctx, ...extra.ctx, paramTaints } : { ...ctx, paramTaints }
+    const sub = taintFunction(nextCtx, {
       bodyNode: entry.bodyNode,
       params: entry.params,
       toolArgName: fn.toolArgName,
@@ -481,7 +738,7 @@ function taintFunction(ctx, fn, depth = 0) {
       if (!method) continue
       const callee = unwrapExpression(call.callee)
       if (callee?.type !== 'MemberExpression') continue
-      const inherited = receiverTaint(callee.object, taints, fn.toolArgName)
+      const inherited = receiverTaint(callee.object, taints, fn.toolArgName, ctx)
       if (!inherited) continue
       const callbackArg = call.arguments[0]
       const target = unwrapExpression(callbackArg)
@@ -499,6 +756,41 @@ function taintFunction(ctx, fn, depth = 0) {
     }
   }
 
+  // Promise fulfillment. Only a modeled value (read/decode/env/args) or a
+  // statically folded builtin import() seeds the first `.then` parameter.
+  // `.catch` and unknown receivers are not passthroughs. A chained `.then`
+  // inherits taint only when the previous fulfillment returns that value
+  // without calling an unknown function.
+  if (depth < 2) {
+    const promiseValues = new Map()
+    const callbackEntryFor = (argument) => {
+      const target = unwrapExpression(argument)
+      if (FUNCTION_TYPES.has(target?.type)) return functionNodeForCallback(target)
+      if (target?.type === 'Identifier') return fn.localFunctions?.get(target.name) ?? null
+      return null
+    }
+    for (const call of calls.filter(isThenCall).reverse()) {
+      const callee = unwrapExpression(call.callee)
+      const receiver = callee?.type === 'MemberExpression' ? callee.object : null
+      const entry = callbackEntryFor(call.arguments?.[0])
+      if (!entry) continue
+      const pattern = entry.paramNodes?.[0] ?? entry.raw?.params?.[0]
+      const spec = builtinImportSpecifier(receiver, ctx.constLookup)
+      if (spec && pattern) {
+        runSub(entry, new Map(), { ctx: overlayBuiltin(ctx, spec, pattern), always: true })
+        continue
+      }
+      const receiverTaint = promiseValueTaint(receiver, taints, fn.toolArgName, ctx, promiseValues)
+      if (!receiverTaint) continue
+      const names = fulfillmentNames(pattern)
+      if (names.length === 0) continue
+      const seed = new Map(names.map((name) => [name, receiverTaint]))
+      runSub(entry, seed)
+      const returned = fulfillmentResultTaint(entry, seed, fn.toolArgName, ctx)
+      if (returned) promiseValues.set(call, returned)
+    }
+  }
+
   // 跨函数(同文件,深度受限):本地函数/对象方法/类方法调用,参数带污点 → 递归分析。
   if (depth < 1 && fn.localFunctions) {
     for (const call of calls) {
@@ -510,7 +802,7 @@ function taintFunction(ctx, fn, depth = 0) {
       localFn.params.forEach((p, i) => {
         const arg = call.arguments[i]
         if (!arg) return
-        const t = sourceTag(arg, fn.toolArgName)
+        const t = sourceTag(arg, fn.toolArgName, ctx)
         if (t) {
           paramTaints.set(p, { tag: t, source: sourceNameInArg(arg, fn.toolArgName) })
           return
@@ -540,6 +832,7 @@ export function astTaintScan(ast, content, relPath) {
   // AST 绑定是主路径;正则别名只作为同一份源码的补充证据(不跨文件、不执行)。
   const aliases = collectAliases(content)
   const collected = collectImports(ast)
+  applyAwaitImportBindings(ast, collected)
   for (const [local, original] of collected.aliases) {
     if (!aliases.has(local)) aliases.set(local, original)
   }
@@ -555,9 +848,12 @@ export function astTaintScan(ast, content, relPath) {
     if (!FUNCTION_TYPES.has(target?.type) || !target.body) return null
     return {
       params: (target.params ?? []).map((p) => firstParamName(p)).filter(Boolean),
+      paramNodes: target.params ?? [],
       bodyNode: target.body.type === 'BlockStatement'
         ? target.body
         : { type: 'BlockStatement', body: [target.body] },
+      implicitReturn: target.body.type === 'BlockStatement' ? null : target.body,
+      raw: target,
     }
   }
   const addObjectMethods = (base, object) => {
@@ -630,7 +926,7 @@ export function astTaintScan(ast, content, relPath) {
     }
   }
 
-  const ctx = { content, aliases, imports, cpVars, file: relPath }
+  const ctx = { content, aliases, imports, cpVars, file: relPath, constLookup: buildConstStringLookup(ast) }
   const findings = []
 
   // 1) execute(args) 上下文(SEN-AGENT)
