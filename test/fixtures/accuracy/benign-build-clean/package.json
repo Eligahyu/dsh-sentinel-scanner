@@ -1,0 +1,17 @@
+{
+  "name": "benign-build-clean",
+  "version": "1.0.0",
+  "description": "Benign fixture: build cleanup that looks like a destructive delete.",
+  "type": "module",
+  "license": "MIT",
+  "main": "plugin/index.js",
+  "scripts": {
+    "clean": "node scripts/clean.js",
+    "prepare": "node scripts/clean.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

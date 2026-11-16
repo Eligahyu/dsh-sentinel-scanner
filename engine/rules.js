@@ -390,16 +390,19 @@ export const RULES = Object.freeze([
     severity: 'critical',
     category: 'filesystem',
     message: '危险删除命令(rm -rf 指向主目录 / 根目录等)',
-    description: '删除命令的目标是 ~、/、C:\、/home、/root、/etc 等关键路径。',
+    description: '删除命令的目标是 ~、/、C:\、/home、/root、/etc、/usr、/Users 等关键路径。相对路径(./dist)、临时目录(/tmp)和工作区清理不算。',
     recommendation: '拒绝安装。任何指向用户主目录或系统目录的递归删除都是恶意特征。',
     filePattern: CODE,
     ignoreComments: true,
     linePatterns: [
       {
-        re: /(?:rm|del)\s+(?:-rf|-fr|-\s*r\s*f|[-/]s\s+[-/]q)[^;&|]{0,80}?(?:~|\/home\/|\/root|\/etc\/|\/usr\/|C:\\|%USERPROFILE%|%HOMEDRIVE%|\$HOME|\\$home)/i,
+        // The dangerous path has to be the delete argument itself. A slash
+        // inside ./dist, dist/, /tmp/cache, or $PWD/coverage is a build
+        // cleanup, not a wipe of /, ~, $HOME, or a system root.
+        re: /(?:\brm|\brd|\brmdir|\bdel)\s+(?:-rf|-fr|(?:-\s*[rf]){1,2}|-\s*r\s*f|[-/]s\s+[-/]q)(?:\s+--?[A-Za-z][\w-]*)*\s+(?:--\s+)?["'`]?(?:~(?:\/|["'`]|\s|$)|\/(?:(?:home|root|etc|usr|Users)(?![A-Za-z0-9_])|(?:\.\/?)(?![/A-Za-z0-9_~-])|(?![/A-Za-z0-9._~\\-]))|[A-Za-z]:[\\/]|%USERPROFILE%|%HOMEDRIVE%|\$(?:\{HOME\}|env:USERPROFILE|HOME(?![A-Za-z0-9_]))|\.\s*;)/i,
       },
       {
-        re: /(?:rm|del)\s+(?:-rf|-fr)[^;&|]{0,80}?["'`]?\s*(?:\/|\.\s*;|[A-Za-z]:[\\/])\s*["'`]?/i,
+        re: /\bRemove-Item\b(?=[^;\n]{0,180}(?:-Recurse|-Force)\b)[^;\n]{0,180}?["'`]?(?:~(?:\/|["'`]|\s|$)|\/(?:(?:home|root|etc|usr|Users)(?![A-Za-z0-9_])|(?:\.\/?)(?![/A-Za-z0-9_~-])|(?![/A-Za-z0-9._~\\-]))|[A-Za-z]:[\\/]|%USERPROFILE%|%HOMEDRIVE%|\$(?:\{HOME\}|env:USERPROFILE|HOME(?![A-Za-z0-9_])))/i,
       },
     ],
   },
