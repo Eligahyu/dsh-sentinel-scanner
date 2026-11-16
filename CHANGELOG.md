@@ -32,6 +32,7 @@
 
 ### Fixed
 
+- `sentinel.config.json` 的已知字段现在做类型校验:非法 `mode` / `failOn` / 资源上限 / 布尔值 / `ignore` 数组会使 CLI 以退出码 2 失败,而不是静默扫错范围。未知字段仍被丢弃,并打印警告,避免把 `commandPath` 一类字段变成可执行设置。配置中的 `redactPaths: true` 会生效,不必再额外传 `--redact-paths`。
 - CLI 拒绝缺失或非正整数的 `--max-files` / `--max-plugins` / `--max-bytes`，以及缺少取值的 `--out`、`--config`、`--baseline`、`--format`、`--fail-on`、`--mode` 和 `--profile`。`--profile` 不再把任意 `--profile*` 前缀当成配置名。`--help` 写明退出码 3 和内置默认 `--fail-on high`。
 - 注册表元数据、tarball 下载和 OSV 查询不再依赖 Windows 专用的 `curl.exe`。三端都使用带字节上限、总超时和失败清理的 Node HTTP 客户端;不走 shell,不读取代理环境变量。tarball 重定向在 strict DNS 下逐跳复查,元数据和 OSV 请求不跟随重定向。
 - 避免将能力说明中的 `exfiltration endpoints` 名词短语误判为提示注入。
@@ -46,7 +47,7 @@
 
 ### Verification
 
-- 464 项测试:463 pass / 0 fail / 1 skip。CLI 用法错误在扫描前返回退出码 2，`--help` 与内置 `--fail-on high` 默认值有回归用例。
+- 467 项测试:466 pass / 0 fail / 1 skip。非法配置类型在扫描前返回退出码 2；`redactPaths: true` 与未知字段警告有回归用例。
 - 33 项 benchmark:rule precision 0.955 / recall 1.000 / F1 0.977;finding precision 0.919 / recall 1.000 / F1 0.958;flow precision/recall/F1 1.000;hardening edge 组 17 项全 1.000(与 v0.5 基线持平)。
 
 ## 0.4.4 (2026-08-23) — Professional Scanner Release

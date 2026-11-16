@@ -431,7 +431,7 @@ dsh-sentinel --rules                print the rule catalog
 | `--dynamic-profile observe` | Select the bounded Phase B profile; gateway/probe observation is deferred to Phase C. |
 | `--dynamic-timeout <ms>` | Bounded deep-analysis timeout; default `15000`, clamped to `1000`–`30000` ms. |
 | `--max-files`, `--max-plugins`, `--max-bytes` | Set bounded resource limits. Each value must be a positive integer. Defaults: 3000 files, 12 plugins, 524288 bytes. |
-| `--config <file>` | Load `sentinel.config.json`; CLI values override config values. |
+| `--config <file>` | Load `sentinel.config.json`; CLI values override config values. Invalid field types are a usage error (exit 2). Unknown fields are ignored and a warning is printed. `redactPaths: true` anonymizes report paths even without `--redact-paths`. |
 | `--redact-paths` | Replace absolute paths with shareable workspace labels. |
 | `--advisories` | Query OSV with package name and version only; disabled by default. |
 | `--provenance` | Read npm provenance attestations; disabled by default. |
