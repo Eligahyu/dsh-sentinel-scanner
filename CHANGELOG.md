@@ -4,6 +4,7 @@
 
 ### Added
 
+- CommonJS 顶层 `module.exports = require(静态说明符)` 在没有其他具名导出时按整模块转发,解构导入可以追到定义函数。动态 `require`、条件说明符,以及和 `exports.name = ...` 混用的文件不猜测赋值顺序。
 - 有界静态 re-export: `export { name } from`、`export { name as alias } from`、`export * from` 与 `export * as ns from` 会沿已解析模块边追到真正定义函数,`modulePath` 保留中间 barrel。同名 `export *` 冲突记 `cross-file-reexport-unresolved`,不猜测;本地声明优先于 star。这不是 failure,也不单独把扫描判为不完整。
 - 有界 Promise / `await` continuation:值产生型 read(`readFileSync`、`fs/promises` 与 `fs.promises.readFile`)、decode、env 凭据,以及 `Promise.resolve` 对这些值的包装,其 `.then` 只播种兑现参数。链式 `.then` 仅在上一个兑现回调直接返回该污点时继承;`.catch`、未知调用和回调形态 `fs.readFile` 的返回值不会被当成文件数据。
 - 可静态折叠的动态 `import()` 现在带上 `await` 命名空间、成员绑定和 `.then` 兑现参数。builtin `child_process` / `fs` / `fs/promises` 的 `await import` 与 `import().then` 会确认 sink 绑定;无法折叠的说明符仍然不猜测。
@@ -51,7 +52,7 @@
 
 ### Verification
 
-- 488 项测试:487 pass / 0 fail / 1 skip。含静态 re-export reachability 与 `cross-file-reexport-unresolved`。
+- 502 项测试:501 pass / 0 fail / 1 skip。含顶层 `module.exports = require(...)` 整模块转发。
 - 33 项 benchmark:rule precision 0.955 / recall 1.000 / F1 0.977;finding precision 0.919 / recall 1.000 / F1 0.958;flow precision/recall/F1 1.000;hardening edge 组 17 项全 1.000(与 v0.5 基线持平)。
 
 ## 0.4.4 (2026-08-23) — Professional Scanner Release

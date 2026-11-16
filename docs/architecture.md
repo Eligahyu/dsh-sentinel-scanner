@@ -171,7 +171,7 @@ profile package.json direct dependencies
 - 同一标识符存在重复 `const`、`let`/`var`、参数或赋值时不做常量折叠
 - 未知高阶函数、未被识别的回调 API、任意回调组合,以及 `require.resolve` 返回的路径字符串;这些不进入攻击链,必要时记 `cross-file-callback-unresolved`
 - `.catch`、回调形态 `fs.readFile` 的返回值、经过未知调用的 `.then` 链、`Promise.all` / `Promise.race`、事件 `on('data')`,以及无法静态折叠的 `import()`;这些不猜测兑现值或模块绑定
-- 计算或条件 re-export,以及 `module.exports = require(...)` 这种整模块转发;同名 `export *` 冲突只记 `cross-file-reexport-unresolved`
+- 计算或条件 re-export 不猜测。顶层 `module.exports = require(静态说明符)` 在没有其他具名导出时按 `export *` 转发;混有具名 `exports.name` 时不猜赋值顺序。同名冲突仍记 `cross-file-reexport-unresolved`
 - 动态属性/计算成员(`obj[method](...)`)、运行时改写原型、`Proxy`、`eval` / `Function` 构造函数生成的边;这些只记 `cross-file-method-unresolved` 或保持 warning,绝不猜测方法
 - 跨文件闭包只做有界的模块级 setter/getter 关联,不做完整控制流、调用顺序、异步交错或跨导入方状态共享
 - 间接 `import`(`(0, import)(...)`)是语法错误,整文件按 parse failure 处理,不从失败解析里猜边
