@@ -9,7 +9,7 @@
 | `SEN-EXEC-003` | 🟠 high(20 分) | execution | **dynamic-code-eval** | eval、new Function、vm.runIn*、Module._compile、process.binding 等动态执行机制。配合网络或解码即高危。 |
 | `SEN-EXEC-004` | 🟠 high(20 分) | execution | **eval-of-decoded** | 先 base64/URI 解码再执行,是绕过静态检测的经典混淆手段。shell 的 base64 -d | sh 与 eval "$(base64 …)" 同样算。 |
 | `SEN-CRED-001` | 🔴 critical(50 分) | credentials | **credential-file-read** | 代码读取 ~/.ssh、~/.aws/credentials、.npmrc、.netrc、kubeconfig、docker config、.git-credentials 等敏感文件。 |
-| `SEN-CRED-002` | 🟠 high(20 分) | credentials | **env-credential-access** | 代码访问 process.env 中名称含 API_KEY/TOKEN/SECRET/PASSWORD 或知名厂商前缀(DeepSeek/OpenAI/Anthropic/GitHub/AWS)的变量。 |
+| `SEN-CRED-002` | 🟠 high(20 分) | credentials | **env-credential-access** | 代码访问 process.env 中以 _ 分段的凭据名(API_KEY/ACCESS_KEY/TOKEN/SECRET/PASSWORD/CREDENTIAL/PRIVATE_KEY/AUTH)。AUTHOR、GITHUB_SHA、AWS_REGION 这类非凭据名不算。 |
 | `SEN-CRED-003` | 🟠 high(20 分) | credentials | **hardcoded-secret** | 代码中出现形似真实 API key / token 的字符串(sk-…、AKIA…、ghp_…、JWT 等)。 |
 | `SEN-CRED-004` | 🟡 medium(8 分) | credentials | **dotenv-loading** | 插件读取 .env 或环境文件。本机开发场景常见,但需确认 .env 内容不会离开本机。 |
 | `SEN-CRED-005` | 🟡 medium(8 分) | credentials | **credential-file-write** | 代码向 .ssh/.aws/.npmrc 等敏感路径写入内容(注入密钥或篡改配置)。 |

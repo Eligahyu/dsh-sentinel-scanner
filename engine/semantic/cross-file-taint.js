@@ -434,7 +434,8 @@ const FUNCTION_NODE_TYPES = new Set(['FunctionDeclaration', 'FunctionExpression'
 const ITERATION_METHODS = new Set(['forEach', 'map', 'flatMap', 'filter', 'some', 'every', 'find', 'reduce', 'reduceRight'])
 const READER_METHODS = new Set(['readFile', 'readFileSync', 'createReadStream', 'openSync'])
 const DECODER_METHODS = new Set(['atob', 'decodeURIComponent', 'unescape', 'String.fromCharCode'])
-const SECRET_ENV = /(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY|AUTH)/i
+// Keep in step with engine/semantic/taint.js: segment boundaries, not substrings.
+const SECRET_ENV = /(?:^|_)(?:PRIVATE_KEY|ACCESS_KEY|API_KEY|CREDENTIAL|PASSWORD|PASSWD|SECRET|TOKEN|AUTH)(?:_|$)/i
 
 function isFunctionNode(node) {
   return FUNCTION_NODE_TYPES.has(node?.type)
@@ -565,17 +566,22 @@ function sourceCallTag(node) {
 function expressionTaint(node, taints, toolArgName = 'args', options = null) {
   const target = unwrapExpression(node)
   if (!target) return null
-  const again = (child) => expressionTaint(child, taints, toolArgName, options)
+  const allowBareEnv = options?.allowBareEnv !== false
+  const again = (child, nextOptions = options) => expressionTaint(child, taints, toolArgName, nextOptions)
   if (target.type === 'ChainExpression') return again(target.expression)
   if (target.type === 'Identifier') return taints.get(target.name) ?? null
   if (target.type === 'MemberExpression') {
     if (isSecretEnvRead(target)) return { tag: 'env', source: calleeName(target) ?? 'process.env' }
+    if (allowBareEnv && !target.computed && calleeName(target) === 'process.env') {
+      return { tag: 'env', source: 'process.env' }
+    }
     const objectName = target.object?.type === 'Identifier' ? target.object.name : null
     if (toolArgName && objectName && objectName === toolArgName) {
       return { tag: 'args', source: calleeName(target) ?? toolArgName }
     }
     if (target.object?.type === 'Identifier' && taints.has(target.object.name)) return taints.get(target.object.name)
-    return again(target.object)
+    // process.env.NODE_ENV must not inherit a full-env dump from its object.
+    return again(target.object, { ...(options ?? {}), allowBareEnv: false })
   }
   if (target.type === 'CallExpression') {
     if (options?.promiseValues?.has(target)) return options.promiseValues.get(target)
@@ -845,6 +851,18 @@ function analyzeFunctionFlow(entry, seedTaints, ctx, options = {}) {
           changed = true
         }
       } else if (declarator.id?.type === 'ObjectPattern' && declarator.init) {
+        const init = unwrapExpression(declarator.init)
+        if (calleeName(init) === 'process.env') {
+          for (const prop of declarator.id.properties ?? []) {
+            const key = prop.computed ? staticStringOf(prop.key) : (prop.key?.name ?? staticStringOf(prop.key))
+            const value = prop.value
+            const name = value?.type === 'AssignmentPattern' ? value.left?.name : value?.name
+            if (!key || !name || taints.has(name) || !SECRET_ENV.test(key)) continue
+            taints.set(name, { tag: 'env', source: `process.env.${key}` })
+            changed = true
+          }
+          continue
+        }
         const taint = flowTaint(declarator.init)
         if (!taint) continue
         for (const prop of declarator.id.properties ?? []) {

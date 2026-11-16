@@ -24,7 +24,9 @@ const DECODERS = new Set(['atob', 'decodeURIComponent', 'unescape', 'String.from
 const READERS = new Set(['readFile', 'readFileSync', 'createReadStream', 'openSync'])
 const ITERATION_METHODS = new Set(['forEach', 'map', 'flatMap', 'filter', 'some', 'every', 'find', 'reduce', 'reduceRight'])
 const FUNCTION_TYPES = new Set(['FunctionExpression', 'ArrowFunctionExpression', 'FunctionDeclaration'])
-const SECRET_ENV = /(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY|AUTH)/i
+// Credential words are underscore-delimited segments. AUTHOR, SECRETARY,
+// TOKENIZER, GITHUB_SHA, and AWS_REGION are not credential reads.
+const SECRET_ENV = /(?:^|_)(?:PRIVATE_KEY|ACCESS_KEY|API_KEY|CREDENTIAL|PASSWORD|PASSWD|SECRET|TOKEN|AUTH)(?:_|$)/i
 
 /**
  * P1-3:裸 sink 必须真正绑定 import 才 high-confidence。
@@ -151,6 +153,46 @@ function isSecretEnvRead(node) {
   if (calleeName(obj) !== 'process.env') return false
   const key = staticStringOf(node.property) ?? (node.property.type === 'Identifier' ? node.property.name : null)
   return key !== null && SECRET_ENV.test(key)
+}
+
+/** `process.env` itself, not `process.env.NAME`. */
+function isBareProcessEnv(node) {
+  return node?.type === 'MemberExpression' && !node.computed && calleeName(node) === 'process.env'
+}
+
+/** Bare `process.env` used as a value. A further member access (`process.env.NODE_ENV`) is not a dump. */
+function isBareEnvValue(node, parent) {
+  return isBareProcessEnv(node) && !(parent?.type === 'MemberExpression' && parent.object === node)
+}
+
+function propertyKeyName(prop) {
+  if (!prop) return null
+  if (!prop.computed && prop.key?.type === 'Identifier') return prop.key.name
+  return staticStringOf(prop.key)
+}
+
+function propertyLocalName(prop) {
+  const value = prop?.value
+  if (!value) return null
+  if (value.type === 'Identifier') return value.name
+  if (value.type === 'AssignmentPattern' && value.left?.type === 'Identifier') return value.left.name
+  return null
+}
+
+function walkWithParent(node, visit, parent = null) {
+  if (!node || typeof node.type !== 'string') return
+  visit(node, parent)
+  for (const key of Object.keys(node)) {
+    if (key === 'type' || key === 'start' || key === 'end' || key === 'loc' || key === 'range') continue
+    const child = node[key]
+    if (Array.isArray(child)) {
+      for (const item of child) {
+        if (item && typeof item.type === 'string') walkWithParent(item, visit, node)
+      }
+    } else if (child && typeof child.type === 'string') {
+      walkWithParent(child, visit, node)
+    }
+  }
 }
 
 /** 表达式是否为解码调用:atob/decodeURIComponent/unescape/fromCharCode,或带 base64/hex 编码参数的 Buffer.from。 */
@@ -296,9 +338,9 @@ export function applyAwaitImportBindings(ast, collected) {
 function sourceTag(node, toolArgName, ctx = null) {
   if (!node) return null
   let tag = null
-  const visit = (n) => {
+  const visit = (n, parent) => {
     if (tag) return
-    if (isSecretEnvRead(n)) { tag = 'env'; return }
+    if (isSecretEnvRead(n) || isBareEnvValue(n, parent)) { tag = 'env'; return }
     if (isDecodeCall(n)) { tag = 'decode'; return }
     if (isReadCall(n, ctx)) { tag = 'read'; return }
     if (n?.type === 'Identifier' && /^(conversation|memory|history|chatHistory|session|context)$/.test(n.name)) {
@@ -309,8 +351,7 @@ function sourceTag(node, toolArgName, ctx = null) {
       tag = 'args'
     }
   }
-  walk(node, visit)
-  visit(node)
+  walkWithParent(node, visit)
   return tag
 }
 
@@ -330,8 +371,9 @@ export function expressionTaints(node, toolArgName, ctx = null) {
     out.push({ tag, source })
   }
   if (!node) return out
-  const visit = (n) => {
+  const visit = (n, parent) => {
     if (isSecretEnvRead(n)) { push('env', calleeName(n) ?? 'process.env'); return }
+    if (isBareEnvValue(n, parent)) { push('env', 'process.env'); return }
     if (isDecodeCall(n)) { push('decode', calleeName(n.callee)?.split('.').slice(0, 2).join('.') ?? 'decode'); return }
     if (isReadCall(n, ctx)) { push('read', calleeName(n.callee) ?? 'read'); return }
     if (n?.type === 'Identifier' && /^(conversation|memory|history|chatHistory|session|context)$/.test(n.name)) { push('memory', n.name); return }
@@ -339,20 +381,21 @@ export function expressionTaints(node, toolArgName, ctx = null) {
       push('args', calleeName(n) ?? 'direct')
     }
   }
-  walk(node, visit)
-  visit(node)
+  walkWithParent(node, visit)
   return out
 }
 
 /** 参数树中的源头表达式名(args.command / process.env.X / Buffer.from / readFileSync 等)。 */
 function sourceNameInArg(node, toolArgName) {
   let found = null
-  walk(node, (n) => {
+  walkWithParent(node, (n, parent) => {
     if (found) return
     if (toolArgName && n.type === 'MemberExpression' && n.object.type === 'Identifier' && n.object.name === toolArgName) {
       found = calleeName(n) ?? 'direct'
     } else if (isSecretEnvRead(n)) {
       found = calleeName(n) ?? 'direct'
+    } else if (isBareEnvValue(n, parent)) {
+      found = 'process.env'
     } else if (isDecodeCall(n)) {
       const raw = calleeName(n.callee)
       found = raw ? raw.split('.').slice(0, 2).join('.') : 'direct'
@@ -579,6 +622,17 @@ function taintFunction(ctx, fn, depth = 0) {
   walk(bodyNode, (node) => {
     if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier') declarators.push(node)
     if (node.type === 'VariableDeclarator' && node.id.type === 'ObjectPattern' && node.init) {
+      const init = unwrapExpression(node.init)
+      // const { NPM_TOKEN, PORT } = process.env → only credential segments are tainted.
+      if (calleeName(init) === 'process.env') {
+        for (const prop of node.id.properties ?? []) {
+          const key = propertyKeyName(prop)
+          const local = propertyLocalName(prop)
+          if (!key || !local || taints.has(local) || !SECRET_ENV.test(key)) continue
+          taints.set(local, { tag: 'env', source: `process.env.${key}` })
+        }
+        return
+      }
       // 解构污点(edge-destructure):const { command } = args → command 携带 args.command 污点
       const src = node.init.type === 'Identifier' && node.init.name === fn.toolArgName
         ? 'args' // 裸 toolArgName:const { command } = args
