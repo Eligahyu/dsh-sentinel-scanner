@@ -104,7 +104,7 @@ canary correlation 和任何 allowlisted replay network 都是 Phase C 工作；
 | --- | --- |
 | `0` | 未达到配置的严重级别阈值。 |
 | `1` | 有 finding 达到 fail-on 阈值。 |
-| `2` | 用法错误或扫描失败。缺少参数、非正整数的资源上限，以及类型不对的 `sentinel.config.json` 都属于用法错误。未知配置字段会被忽略并警告，不会变成可执行设置。配置里的 `redactPaths: true` 会匿名化报告路径。 |
+| `2` | 用法错误或扫描失败。缺少参数、非正整数的资源上限，以及类型不对的 `sentinel.config.json` 都属于用法错误。未知配置字段会被忽略并警告，不会变成可执行设置。配置里的 `redactPaths: true` 与 `--redact-paths` 会匿名化报告里的绝对路径:目标写成 `<workspace>/<name>`，工作区内的文件改成相对路径，工作区外的绝对路径收成 `<outside>/<name>`。代码片段里不属于本次扫描根的路径会保留。 |
 | `3` | 静态扫描不完整，或请求的动态分析为 unavailable/refused/incomplete。仅在 `--fail-on-incomplete` 或 `--strict-exit-codes` 时使用。 |
 
 SARIF 2.1.0 也会标出不完整扫描：`invocations[0].executionSuccessful` 为 false，并写入 `toolExecutionNotifications`。结果被截断时 invocation 仍为成功，但带 warning 通知。行号和列号从 1 起算；扫描单个文件时 URI 是文件名。稳定指纹在 `properties.dshFingerprint`，不写 `partialFingerprints`。

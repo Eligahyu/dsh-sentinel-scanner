@@ -37,6 +37,7 @@
 
 ### Fixed
 
+- `--redact-paths` 现在覆盖跳过项、攻击链、模块图、依赖失败、profile 路径,以及审计和 diff 输出。工作区内的路径字段改成相对路径;工作区外的绝对路径收成 `<outside>/<name>`。消息和代码片段只替换本次扫描根,不抹掉证据中的其他路径。
 - SARIF 在扫描不完整时把 `invocations[0].executionSuccessful` 设为 false,并在不完整或 `findingsTruncated` 时写入 `toolExecutionNotifications`。行号和列号钳到 1-based,同一行的结束列不会早于起始列。扫描单个文件时 URI 使用文件名,不再是空字符串。稳定指纹仍只放在 `properties.dshFingerprint`。
 - `sentinel.config.json` 的已知字段现在做类型校验:非法 `mode` / `failOn` / 资源上限 / 布尔值 / `ignore` 数组会使 CLI 以退出码 2 失败,而不是静默扫错范围。未知字段仍被丢弃,并打印警告,避免把 `commandPath` 一类字段变成可执行设置。配置中的 `redactPaths: true` 会生效,不必再额外传 `--redact-paths`。
 - CLI 拒绝缺失或非正整数的 `--max-files` / `--max-plugins` / `--max-bytes`，以及缺少取值的 `--out`、`--config`、`--baseline`、`--format`、`--fail-on`、`--mode` 和 `--profile`。`--profile` 不再把任意 `--profile*` 前缀当成配置名。`--help` 写明退出码 3 和内置默认 `--fail-on high`。
@@ -53,7 +54,7 @@
 
 ### Verification
 
-- 509 项测试:508 pass / 0 fail / 1 skip。不完整扫描的 SARIF `executionSuccessful`、截断通知、1-based 区域和单文件 URI 有回归用例;CommonJS `module.exports = require` 转发用例仍在套件中。
+- 511 项测试:510 pass / 0 fail / 1 skip。`--redact-paths` 覆盖跳过项、攻击链、模块图和依赖路径,并保留代码片段中的非工作区路径。
 - 33 项 benchmark:rule precision 0.955 / recall 1.000 / F1 0.977;finding precision 0.919 / recall 1.000 / F1 0.958;flow precision/recall/F1 1.000;hardening edge 组 17 项全 1.000(与 v0.5 基线持平)。
 
 ## 0.4.4 (2026-08-23) — Professional Scanner Release
