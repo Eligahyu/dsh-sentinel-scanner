@@ -53,7 +53,7 @@
 
 ### Verification
 
-- 489 项测试:488 pass / 0 fail / 1 skip。不完整扫描的 SARIF `executionSuccessful`、截断通知、1-based 区域和单文件 URI 有回归用例;Promise continuation 与安装脚本文档 URL 用例仍在套件中。
+- 509 项测试:508 pass / 0 fail / 1 skip。不完整扫描的 SARIF `executionSuccessful`、截断通知、1-based 区域和单文件 URI 有回归用例;CommonJS `module.exports = require` 转发用例仍在套件中。
 - 33 项 benchmark:rule precision 0.955 / recall 1.000 / F1 0.977;finding precision 0.919 / recall 1.000 / F1 0.958;flow precision/recall/F1 1.000;hardening edge 组 17 项全 1.000(与 v0.5 基线持平)。
 
 ## 0.4.4 (2026-08-23) — Professional Scanner Release
