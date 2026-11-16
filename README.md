@@ -423,14 +423,14 @@ dsh-sentinel --rules                print the rule catalog
 | `--format text\|json\|sarif\|html\|cyclonedx\|spdx` | Select report format. |
 | `--out <file>` | Write the full report to a file and keep a summary on stdout. |
 | `--baseline <file>` | Compare against a previous report using stable fingerprints. |
-| `--fail-on <severity>` | Exit 1 when a finding reaches `critical`, `high`, `medium`, or `low`. |
+| `--fail-on <severity>` | Exit 1 when a finding is at or above `critical`, `high`, `medium`, or `low`. Built-in default is `high`; `sentinel.config.json` can change it, and this flag overrides the config. |
 | `--fail-on-incomplete` | Exit 3 when coverage is incomplete. |
 | `--strict-exit-codes` | Preserve distinct threshold, runtime, and incomplete-scan exits. |
 | `--dynamic` | Request the opt-in Phase B layer after static preflight; no request keeps scans static-only. |
 | `--dynamic-backend <auto\|docker\|podman>` | Select the local Docker/Podman backend; it still requires a scanner-owned immutable image. |
 | `--dynamic-profile observe` | Select the bounded Phase B profile; gateway/probe observation is deferred to Phase C. |
 | `--dynamic-timeout <ms>` | Bounded deep-analysis timeout; default `15000`, clamped to `1000`–`30000` ms. |
-| `--max-files`, `--max-plugins`, `--max-bytes` | Set bounded resource limits. |
+| `--max-files`, `--max-plugins`, `--max-bytes` | Set bounded resource limits. Each value must be a positive integer. Defaults: 3000 files, 12 plugins, 524288 bytes. |
 | `--config <file>` | Load `sentinel.config.json`; CLI values override config values. |
 | `--redact-paths` | Replace absolute paths with shareable workspace labels. |
 | `--advisories` | Query OSV with package name and version only; disabled by default. |
@@ -440,8 +440,8 @@ Exit codes:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Scan completed and the configured policy threshold was not exceeded. |
-| `1` | Risk or policy threshold exceeded. |
+| `0` | Scan completed and the configured policy threshold was not exceeded. The built-in threshold is `high`, so a `review` verdict can still exit 1 when a high finding is present. |
+| `1` | A finding reached the configured fail-on threshold. |
 | `2` | Usage or runtime error. |
 | `3` | Static scan incomplete, or requested dynamic analysis unavailable/refused/incomplete, only when `--fail-on-incomplete` or `--strict-exit-codes` is enabled. |
 
