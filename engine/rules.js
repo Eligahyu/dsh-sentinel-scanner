@@ -198,16 +198,18 @@ export const RULES = Object.freeze([
     severity: 'high',
     category: 'credentials',
     message: '读取环境变量中的凭据(API key / token / secret)',
-    description: '代码访问 process.env 中名称含 API_KEY/TOKEN/SECRET/PASSWORD 或知名厂商前缀(DeepSeek/OpenAI/Anthropic/GitHub/AWS)的变量。',
+    description: '代码访问 process.env 中以 _ 分段的凭据名(API_KEY/ACCESS_KEY/TOKEN/SECRET/PASSWORD/CREDENTIAL/PRIVATE_KEY/AUTH)。AUTHOR、GITHUB_SHA、AWS_REGION 这类非凭据名不算。',
     recommendation: '确认凭据读取是否功能必需(如官方 API 客户端),以及凭据是否仅用于本机调用、绝不出网。',
     filePattern: CODE,
     ignoreComments: true,
     linePatterns: [
       {
-        re: /process\s*\.\s*env\s*\.?\s*\[?["'`]?[A-Za-z_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY|AUTH)[A-Za-z_]*["'`]?\]?/i,
+        // The credential word must be its own _-segment (API_KEY, not AUTHOR).
+        re: /process\s*\.\s*env\s*\??\s*(?:\.\s*|\[\s*["'`])(?:[A-Za-z0-9_]*_)?(?:PRIVATE_KEY|ACCESS_KEY|API_KEY|CREDENTIAL|PASSWORD|PASSWD|SECRET|TOKEN|AUTH)(?:_|[^A-Za-z0-9_]|$)/i,
       },
       {
-        re: /process\s*\.\s*env\s*\.?\s*\[?["'`]?(?:DEEPSEEK|OPENAI|ANTHROPIC|GITHUB|AWS|AZURE|GOOGLE|HF_|HUGGING)[A-Za-z_]*["'`]?\]?/i,
+        re: /(?:PRIVATE_KEY|ACCESS_KEY|API_KEY|CREDENTIAL|PASSWORD|PASSWD|SECRET|TOKEN|AUTH)(?:_|[^A-Za-z0-9_])[^}]{0,300}\}\s*=\s*process\s*\.\s*env\b/i,
+        note: '从 process.env 解构出的凭据名',
       },
     ],
   },
