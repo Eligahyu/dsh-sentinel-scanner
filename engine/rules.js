@@ -262,7 +262,7 @@ export const RULES = Object.freeze([
     severity: 'critical',
     category: 'exfiltration',
     message: '可疑数据外传端点(webhook / pastebin / 隧道 / 监听服务)',
-    description: '代码向已知的"接收任意数据"类服务发起请求:webhook.site、requestbin、pastebin、Discord webhook、Telegram bot、ngrok/serveo 隧道、oast/interactsh 等。',
+    description: '代码向已知的"接收任意数据"类服务发起请求:webhook.site、requestbin、pastebin、Discord webhook（/api/webhooks）、Telegram bot、ngrok/serveo 隧道、oast/interactsh 等。普通 Discord API（/api/v10）和仅出现 discord 字样不算。',
     recommendation: '拒绝安装。正常插件不会把数据发往这些端点。',
     filePattern: CODE,
     ignoreComments: true,
@@ -271,7 +271,9 @@ export const RULES = Object.freeze([
         re: /https?:\/\/[^"'`\s)]{0,120}?(?:webhook\.site|requestbin\.com|pastebin\.com|discord(?:app)?\.com\/api\/webhooks|api\.telegram\.org\/bot|ngrok\.(?:io|app)|serveo\.net|localtunnel\.me|smee\.io|oast\.(?:me|online|fun|pro)|interact\.sh|webhook\.cc|pipedream\.net|requestcatcher\.com)/i,
       },
       {
-        re: /(?:fetch|axios|XMLHttpRequest|sendBeacon|http\.request|https\.request)\s*\([^)]{0,200}?(?:webhook\.site|requestbin|pastebin|discord|api\.telegram|ngrok|serveo|oast\.|interact\.sh)/i,
+        // Same hosts as the URL pattern. A bare "discord" or "ngrok" word
+        // inside a normal API client is not an exfil endpoint.
+        re: /(?:fetch|axios|XMLHttpRequest|sendBeacon|http\.request|https\.request)\s*\([^)]{0,240}?(?:webhook\.site|requestbin\.com|pastebin\.com|discord(?:app)?\.com\/api\/webhooks|api\.telegram\.org\/bot|ngrok\.(?:io|app)|serveo\.net|localtunnel\.me|smee\.io|oast\.(?:me|online|fun|pro)|interact\.sh|webhook\.cc|pipedream\.net|requestcatcher\.com)/i,
       },
     ],
   },
