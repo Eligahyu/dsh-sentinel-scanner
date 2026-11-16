@@ -43,7 +43,7 @@ engine/
     index.js               语义入口 + 正则兜底
   package/
     audit.js               安装前审计 API(auditPackageBeforeInstall)
-    acquire.js             npm 元数据获取(参数数组 spawn,无 shell 拼接)
+    acquire.js             npm 元数据获取(Node HTTP,无 shell,字节上限与超时)
     tarball.js             tarball 下载 + integrity + 隔离解包
     tar.js                 自包含安全 tar 解析(traversal/symlink/bomb 防护)
     diff.js                源码 ↔ 发布包漂移(SEN-SUPPLY-003)

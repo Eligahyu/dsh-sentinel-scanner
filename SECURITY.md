@@ -148,8 +148,10 @@ allowlisted replay behavior; this policy does not authorize those features.
 - **不保证检测所有恶意插件**:静态启发式扫描存在天然漏报(跨文件污点分析是有界的;
   复杂回调/闭包/原型链、非 JS 语言语义和运行时混淆仍是能力边界),扫描通过 ≠ 插件安全
 - **SSRF 下载层有显式目标限制**:`--strict-dns`(或 `SENTINEL_STRICT_DNS=1`)在下载前
-  解析 hostname 并拒绝私有/保留地址;注意 DNS rebinding 无法完全消除(TOCTOU),
-  严格校验降低风险而非绝对防护
+  解析 hostname 并拒绝私有/保留地址;tarball 的每一次重定向都会重新检查。
+  注意 DNS rebinding 无法完全消除(TOCTOU),严格校验降低风险而非绝对防护
+- 下载客户端不调用 shell 或 curl:Linux、macOS、Windows 共用 Node HTTP,
+  带不可关闭的字节上限与超时,且不读取 HTTP(S)_PROXY
 
 ## Response expectations
 

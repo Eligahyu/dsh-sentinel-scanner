@@ -529,6 +529,12 @@ The extractor rejects `../` traversal, absolute and drive-letter paths,
 symlink/hardlink entries, excessive nesting, oversized entries, excessive total
 output, and excessive archive entry counts. It never invokes npm lifecycle scripts.
 
+Registry metadata, tarball download, and optional OSV queries use Node's HTTP
+client. They do not spawn a shell or `curl`, so the same limits apply on Linux,
+macOS, and Windows: metadata 5MB / 30s, tarball 512MB / 120s, OSV 5MB / 20s.
+Metadata and OSV requests are not redirected. Tarball redirects are followed,
+and with strict DNS enabled every redirect target is checked again.
+
 See the [DSH pre-install integration design](docs/integration-dsh-preinstall.md).
 
 ## Reports and integrations
