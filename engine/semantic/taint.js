@@ -17,7 +17,7 @@ const SINKS = [
   { names: ['exec', 'execSync', 'spawn', 'spawnSync', 'execFile', 'execFileSync', 'fork', 'eval', 'Function', 'vm.Script', 'vm.runInNewContext', 'vm.runInThisContext', 'vm.runInContext'], type: 'shell', ruleId: 'SEN-AGENT-001', severity: 'critical' },
   { names: ['readFile', 'readFileSync', 'createReadStream', 'openSync'], type: 'file-read', ruleId: 'SEN-AGENT-002', severity: 'high' },
   { names: ['writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'createWriteStream'], type: 'file-write', ruleId: 'SEN-AGENT-003', severity: 'high' },
-  { names: ['fetch', 'axios', 'http.request', 'https.request', 'WebSocket', 'sendBeacon', 'net.connect', 'net.createConnection', 'dgram.createSocket'], type: 'network', ruleId: 'SEN-AGENT-004', severity: 'high' },
+  { names: ['fetch', 'axios', 'http.request', 'https.request', 'WebSocket', 'sendBeacon', 'net.connect', 'net.createConnection', 'dgram.createSocket', 'dns.lookup', 'dns.resolve', 'dns.resolve4', 'dns.resolve6', 'dns.promises.lookup', 'dns.promises.resolve', 'dns.promises.resolve4', 'dns.promises.resolve6'], type: 'network', ruleId: 'SEN-AGENT-004', severity: 'high' },
 ]
 const SINK_NAMES = new Set(SINKS.flatMap((s) => s.names))
 const DECODERS = new Set(['atob', 'decodeURIComponent', 'unescape', 'String.fromCharCode'])
@@ -116,8 +116,28 @@ const RECOMMENDATIONS = {
   'SEN-TAINT-005': '确认复制的文件来源可信(仅构建产物/白名单路径),且不会把敏感文件写入可执行位置。',
 }
 
+const DNS_MODULES = new Set(['dns', 'node:dns', 'dns/promises', 'node:dns/promises'])
+const DNS_QUERY = new Set(['lookup', 'resolve', 'resolve4', 'resolve6'])
+
+/** `import { resolve } from 'node:dns'` stores `node:dns:resolve` on the local name. */
+function importedDnsSink(raw, imports) {
+  const mod = imports?.get(raw)
+  if (typeof mod !== 'string') return null
+  const match = /^(?:node:)?dns(\/promises)?:([A-Za-z]+)$/.exec(mod)
+  if (!match || !DNS_QUERY.has(match[2])) return null
+  return match[1] ? `dns.promises.${match[2]}` : `dns.${match[2]}`
+}
+
+/** A dns.* sink counts only when that name is imported from node:dns. Promise.resolve does not. */
+function dnsSinkConfirmed(raw, sinkName, imports) {
+  if (!sinkName.startsWith('dns.')) return true
+  if (importedDnsSink(raw, imports)) return true
+  const root = raw.split('.')[0]
+  return DNS_MODULES.has(imports?.get(root))
+}
+
 /** 归一化 callee:应用别名与 cp 变量。 */
-function resolveCallee(raw, aliases) {
+function resolveCallee(raw, aliases, imports) {
   if (SINK_NAMES.has(raw)) return raw
   if (aliases.has(raw) && SINK_NAMES.has(aliases.get(raw))) return aliases.get(raw)
   // cp.exec / child_process.exec 形态
@@ -126,6 +146,8 @@ function resolveCallee(raw, aliases) {
     const tail = raw.slice(dot + 1)
     if (SINK_NAMES.has(tail)) return tail
   }
+  const imported = importedDnsSink(raw, imports)
+  if (imported && SINK_NAMES.has(imported)) return imported
   return null
 }
 
@@ -741,10 +763,11 @@ function taintFunction(ctx, fn, depth = 0) {
   for (const call of calls) {
     const raw = calleeName(call.callee)
     if (!raw) continue
-    const sinkName = resolveCallee(raw, localAliases)
+    const sinkName = resolveCallee(raw, localAliases, ctx.imports)
     if (!sinkName) continue
     const sink = SINKS.find((s) => s.names.includes(sinkName))
     if (!sink) continue
+    if (!dnsSinkConfirmed(raw, sinkName, ctx.imports)) continue
 
     // P1-3:bare sink 必须绑定 import(§12)——未绑定的同名本地函数不产生 high-confidence。
     if (BINDING_REQUIRED_KINDS.has(sink.type) && !bindingConfirmsBuiltin(raw, { ...ctx, aliases: localAliases })) continue
@@ -887,7 +910,7 @@ function taintFunction(ctx, fn, depth = 0) {
   if (depth < 1 && fn.localFunctions) {
     for (const call of calls) {
       const raw = callTargetName(call.callee)
-      if (!raw || SINK_NAMES.has(resolveCallee(raw, localAliases) ?? '')) continue // sink 已处理
+      if (!raw || SINK_NAMES.has(resolveCallee(raw, localAliases, ctx.imports) ?? '')) continue // sink 已处理
       const localFn = fn.localFunctions.get(raw)
       if (!localFn) continue
       const paramTaints = new Map()

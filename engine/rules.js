@@ -689,7 +689,7 @@ export const RULES = Object.freeze([
     severity: 'critical',
     category: 'taint',
     message: '凭据(env)流向网络请求,存在外传风险',
-    description: 'process.env 中的凭据(API key/token/secret)直接或经变量传播进入网络请求。',
+    description: 'process.env 中的凭据(API key/token/secret)直接或经变量传播进入网络请求,包括 fetch/axios 和已导入的 dns.lookup/dns.resolve。Promise.resolve 不算网络出口。',
     recommendation: '确认请求目标完全可信;凭据绝不应流向非官方端点。',
   },
   {

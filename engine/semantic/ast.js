@@ -291,6 +291,19 @@ export function collectImports(ast) {
       const callee = calleeName(node.init.callee)
       if (callee === 'require') {
         const mod = staticString(node.init.arguments[0])
+        if (mod === 'dns' || mod === 'node:dns' || mod === 'dns/promises' || mod === 'node:dns/promises') {
+          if (node.id.type === 'Identifier') imports.set(node.id.name, mod)
+          else if (node.id.type === 'ObjectPattern') {
+            for (const prop of node.id.properties ?? []) {
+              if (prop.type === 'RestElement') continue
+              const key = prop.key?.name ?? staticString(prop.key)
+              const local = prop.value?.type === 'Identifier'
+                ? prop.value.name
+                : (prop.value?.type === 'AssignmentPattern' && prop.value.left?.type === 'Identifier' ? prop.value.left.name : null)
+              if (key && local) imports.set(local, `${mod}:${key}`)
+            }
+          }
+        }
         if (BINDABLE_MODULES.has(mod)) {
           if (node.id.type === 'Identifier') cpVars.add(node.id.name)
           else if (node.id.type === 'ObjectPattern') {
