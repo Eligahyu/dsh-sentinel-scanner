@@ -23,7 +23,7 @@ import {
   unwrapExpression,
   walk,
 } from './ast.js'
-import { namedBindingsFromObjectPattern, requireCallKind } from './static-specifier.js'
+import { buildConstStringLookup, namedBindingsFromObjectPattern, recoverStaticSpecifier, requireCallKind } from './static-specifier.js'
 import { applyAwaitImportBindings, bindingConfirmsBuiltin, fulfillmentNames, valueProducingReadTag } from './taint.js'
 
 const SINKS = [
@@ -247,6 +247,8 @@ function indexExports(ast) {
   const moduleBindings = new Set()
   const reexports = new Map()
   const exportStars = []
+  const cjsForwards = []
+  const constLookup = buildConstStringLookup(ast)
   const recordReexport = (exported, imported, specifier, start) => {
     if (!exported || !imported || !specifier) return
     const list = reexports.get(exported) ?? []
@@ -428,7 +430,15 @@ function indexExports(ast) {
     }
     const exported = assignmentExportName(expression.left)
     if (!exported) continue
+    if (exported === 'default' && requireCallKind(unwrapExpression(expression.right)?.callee) === 'require') {
+      const call = unwrapExpression(expression.right)
+      const specifier = recoverStaticSpecifier(call.arguments?.[0], constLookup)
+      if (specifier) cjsForwards.push({ specifier, start: call.arguments?.[0]?.start ?? expression.start })
+    }
     addAssignedValue(exported, expression.right)
+  }
+  if (cjsForwards.length > 0 && refs.size === 0 && reexports.size === 0 && exportStars.length === 0) {
+    for (const forward of cjsForwards) exportStars.push(forward)
   }
 
   return { functions, refs, values, methods, classMethods, moduleBindings, reexports, exportStars }

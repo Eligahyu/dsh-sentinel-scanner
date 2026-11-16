@@ -69,7 +69,7 @@
 - 不建模任意异步交错、调用顺序、`Promise.all` / `Promise.race`、事件 `.on('data')` 或跨导入方共享的异步状态。
 
 #### v0.5 静态 re-export 剩余限制
-- 只跟随已经进入模块图的静态 `export ... from`。计算路径、条件 re-export、`module.exports = require(...)` 整模块转发不猜测。
+- 只跟随已经进入模块图的静态说明符。计算路径和条件 re-export 不猜测。顶层且没有其他具名导出的 `module.exports = require(静态说明符)` 会整模块转发;同一文件里再有 `exports.name = ...` 时不把赋值顺序猜成覆盖。
 - 同名 `export *` 解析到多个具体函数时记 `cross-file-reexport-unresolved`,不选边。本地声明优先于 `export *`。追踪深度有界(4 跳),环只停止,不报完整。该跳过不是 failure。
 
 ### v1.0
