@@ -43,6 +43,7 @@
 - [x] 静态 CommonJS `require` / `require.resolve` 模块图、TS fallback 与解构导入跨文件污点
 - [x] 可静态还原的动态 `import()` / `require()` / `require.resolve()` 跨文件 reachability(字面量、拼接、纯字面量模板、无歧义 const;无法还原的目标保持 warning,不猜测边)
 - [x] 复杂回调/闭包/原型链的有界跨文件 reachability(已知 source 回调、迭代回调、导出 setter/getter 闭包、静态对象/类/原型方法;未知或计算形态只记 coverageSkip)
+- [x] 有界 Promise / `await` continuation:值产生型 read/decode/env 与 `Promise.resolve` 的 `.then` 兑现参数、直接返回该值的链式 `.then`、可折叠 `import()` 的 `await` / `.then` 绑定,以及导出函数可证明的 source 返回值回到调用方;`fs.readFile` 回调形态的返回值、`.catch` 与未知调用不当作数据
 - [x] 原生 TypeScript parser:`.ts/.tsx/.mts/.cts` 使用 oxc-parser AST,type-only import/export 不建运行时边,解析失败显式降级并报告
 - [ ] GitHub Action 拆独立仓库 + 徽章服务
 - [ ] DSH 官方 pre-install hook 对接(若官方提供)
@@ -55,10 +56,16 @@
 - TSX 按 JSX 语法解析;Vue/Svelte 单文件组件仍走非 JS 语义/正则路径。
 
 #### v0.5 回调/闭包/原型链 reachability 剩余限制
-- 回调桥接只覆盖已建模的 source 形态 API(如 `readFile`)和已带污点的数组迭代;未知高阶函数、第三方回调 API、Promise 链/异步交错不自动 passthrough。
+- 回调桥接只覆盖已建模的 source 形态 API(如 `readFile`)和已带污点的数组迭代;未知高阶函数与第三方回调 API 不自动 passthrough。
 - 闭包 reachability 只在同一导入方内关联“导出的 setter 写入模块级绑定 → 导出的 getter 读取该绑定”;不建模调用顺序、分支、异步状态或跨导入方共享。
 - 方法 reachability 只解析静态接收者与静态属性(导出对象字面量、类实例、`prototype` 赋值);`obj[computed]`、运行时原型改写、`Proxy`、`eval`/`Function` 生成的边不猜测。
 - 未知调用仍可能 sanitize 或归一化路径,因此跨文件传播不穿过未知调用;无法证明的回调/方法进入 `coverageSkips`,不伪造边,也不单独把扫描判为不完整。
+
+#### v0.5 Promise / async continuation 剩余限制
+- `.then` 只播种兑现回调的第一个参数;`.catch` / rejection handler 不是文件数据。回调形态的 `fs.readFile(path, cb)` 返回值不是数据,只有 `fs/promises` 或 `fs.promises.readFile` 的返回/兑现值才是。
+- 链式 `.then` 仅在上一个兑现回调直接返回已证明的污点时继承;中间未知调用(可能是 sanitizer)会断开。
+- 跨文件返回值只承认函数体内可证明的 source(read/decode/env),不把参数原样返回或未知包装当作 passthrough。碰到 source 但返回值无法证明、且调用方把结果送进 sink 时记 `cross-file-return-unresolved`,不伪造边,也不单独把扫描判为不完整。
+- 不建模任意异步交错、调用顺序、`Promise.all` / `Promise.race`、事件 `.on('data')` 或跨导入方共享的异步状态。
 
 ### v1.0
 - [ ] 稳定语义引擎与基准(目标:rule precision ≥ 0.90 / recall ≥ 0.85)

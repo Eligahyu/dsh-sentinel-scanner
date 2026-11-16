@@ -151,6 +151,9 @@ profile package.json direct dependencies
 - 有界回调桥接:已建模的 source 形态 API(如 `readFile(path, (err, data) => ...)`)只把其数据参数标记为 read 污点;数组/元素已带污点时,`forEach` / `map` 等迭代回调参数继承该污点;导入方回调只在被调用方实际以污点参数调用时继续分析
 - 有界闭包 reachability:同一导入方先调用导出的 setter(把污点写入模块级绑定),再调用读取该绑定的导出 getter 时形成 source → sink 链;不同导入方之间不共享闭包状态
 - 有限原型/方法 reachability:导出对象字面量方法、类实例方法(`new Runner().run(...)`)、`Class.prototype.method` 赋值在接收者与属性静态可知时解析;`obj[computed](...)` 或未知方法只记 `cross-file-method-unresolved`
+- 有界 Promise / `await` continuation:值产生型读取(`readFileSync`、`fs/promises` 的 `readFile`、`fs.promises.readFile`)、解码、env 凭据,以及 `Promise.resolve` 对这些值的包装,其 `.then` 只把兑现参数标成对应污点;上一个回调直接返回该值时,下一个 `.then` 继承。`await` 沿用同一值语义
+- 可静态折叠的 `import()` 绑定扩展到 `const ns = await import(...)`、`const run = (await import(...)).run` 与 `import(...).then((ns) => ...)` / `.then(({ run }) => ...)`;builtin `child_process` / `fs` / `fs/promises` 的 `await import` 与 `.then` 会确认 sink 绑定
+- 导出函数体内可证明的 source 返回值可以回到调用方的直接调用、`await` 或 `.then`;无法证明但函数触及 modeled source、且结果流入 sink 时记 `cross-file-return-unresolved`
 - 动态说明符折叠范围:字符串字面量、`+` 拼接、模板中每个插值也都是静态字符串,以及全文件唯一、未被赋值/参数遮蔽的 `const`
 - TypeScript/TSX/MTS/CTS 使用 oxc-parser 原生 AST(ESTree 兼容);JS 继续使用 Acorn。
   `import type`、`export type`、inline `type` specifier 与 type-only `import = require`
@@ -158,13 +161,15 @@ profile package.json direct dependencies
 - TypeScript `.js` specifier → `.ts/.tsx/.mts/.cts` 源文件回退;声明文件与开发入口降级为 warning
 - 无法折叠的动态目标记 `dynamic-module-specifier` 警告,并进入报告 `coverageSkips`;该警告不是 failure,不单独把 `scanComplete` 打成 false
 - 无法证明的跨文件回调/方法接收者记 `cross-file-callback-unresolved` / `cross-file-method-unresolved` 到 `coverageSkips`;同样不是 failure
+- 跨文件返回值无法证明但调用方把结果送进 sink 时记 `cross-file-return-unresolved`;该跳过不是 failure,不单独把 `scanComplete` 打成 false
 - TypeScript 解析失败或 oxc-parser 不可用时,节点标记 `parser: unparsed`,静态 recovery 仍保留可证明的
   import/export/require 边,并记录 `parser-unparsed` warning 与 `coverageSkips`;该降级不伪造边。
 
 不支持(已知限制):
 - 条件表达式、计算属性、函数返回值、数组下标、解码/`join` 等才能确定的动态 import/require;这些只保留 warning,不猜测边
 - 同一标识符存在重复 `const`、`let`/`var`、参数或赋值时不做常量折叠
-- 未知高阶函数、未被识别的回调 API、动态 `import()` 结果的异步 `.then` 链、任意回调组合,以及 `require.resolve` 返回的路径字符串;这些不进入攻击链,必要时记 `cross-file-callback-unresolved`
+- 未知高阶函数、未被识别的回调 API、任意回调组合,以及 `require.resolve` 返回的路径字符串;这些不进入攻击链,必要时记 `cross-file-callback-unresolved`
+- `.catch`、回调形态 `fs.readFile` 的返回值、经过未知调用的 `.then` 链、`Promise.all` / `Promise.race`、事件 `on('data')`,以及无法静态折叠的 `import()`;这些不猜测兑现值或模块绑定
 - 动态属性/计算成员(`obj[method](...)`)、运行时改写原型、`Proxy`、`eval` / `Function` 构造函数生成的边;这些只记 `cross-file-method-unresolved` 或保持 warning,绝不猜测方法
 - 跨文件闭包只做有界的模块级 setter/getter 关联,不做完整控制流、调用顺序、异步交错或跨导入方状态共享
 - 间接 `import`(`(0, import)(...)`)是语法错误,整文件按 parse failure 处理,不从失败解析里猜边

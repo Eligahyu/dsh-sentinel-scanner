@@ -356,7 +356,25 @@ export function requireCallKind(callee) {
   return null
 }
 
+function bindingsFromPromiseCallback(argument, lookup) {
+  const fn = unwrapExpression(argument)
+  if (!fn || (fn.type !== 'FunctionExpression' && fn.type !== 'ArrowFunctionExpression') || !fn.body) return []
+  const param = fn.params?.[0]
+  if (!param) return []
+  const target = param.type === 'AssignmentPattern' ? param.left : param
+  if (target?.type === 'Identifier') return [{ imported: '*', local: target.name }]
+  if (target?.type === 'ObjectPattern') return namedBindingsFromObjectPattern(target, lookup)
+  return []
+}
+
+/**
+ * Bindings created by a dynamic `import()`.
+ * Require-call sites keep the previous object-pattern behavior. Import
+ * expressions additionally accept a namespace binding, a member binding, and
+ * the fulfillment parameter of a direct `.then(...)` continuation.
+ */
 export function bindingsForImportCall(node, parents, lookup = () => null) {
+  const importExpression = node?.type === 'ImportExpression'
   let current = node
   let parent = parents.get(current)
   while (parent && (
@@ -366,6 +384,25 @@ export function bindingsForImportCall(node, parents, lookup = () => null) {
     current = parent
     parent = parents.get(current)
   }
-  if (parent?.type !== 'VariableDeclarator' || parent.init !== current || parent.id?.type !== 'ObjectPattern') return []
-  return namedBindingsFromObjectPattern(parent.id, lookup)
+  if (parent?.type === 'VariableDeclarator' && parent.init === current && parent.id?.type === 'ObjectPattern') {
+    return namedBindingsFromObjectPattern(parent.id, lookup)
+  }
+  if (!importExpression) return []
+  if (parent?.type === 'VariableDeclarator' && parent.init === current && parent.id?.type === 'Identifier') {
+    return [{ imported: '*', local: parent.id.name }]
+  }
+  if (parent?.type === 'MemberExpression' && parent.object === current) {
+    const imported = parent.computed ? recoverStaticSpecifier(parent.property, lookup) : parent.property?.name
+    if (typeof imported !== 'string') return []
+    if (imported === 'then') {
+      const call = parents.get(parent)
+      if (call?.type !== 'CallExpression' || call.callee !== parent) return []
+      return bindingsFromPromiseCallback(call.arguments?.[0], lookup)
+    }
+    const declarator = parents.get(parent)
+    if (declarator?.type === 'VariableDeclarator' && declarator.init === parent && declarator.id?.type === 'Identifier') {
+      return [{ imported, local: declarator.id.name }]
+    }
+  }
+  return []
 }

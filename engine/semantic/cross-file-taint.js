@@ -23,7 +23,7 @@ import {
   walk,
 } from './ast.js'
 import { namedBindingsFromObjectPattern, requireCallKind } from './static-specifier.js'
-import { bindingConfirmsBuiltin } from './taint.js'
+import { applyAwaitImportBindings, bindingConfirmsBuiltin, fulfillmentNames, valueProducingReadTag } from './taint.js'
 
 const SINKS = [
   { names: ['exec', 'execSync', 'spawn', 'spawnSync', 'execFile', 'execFileSync', 'fork'], type: 'shell', ruleId: 'SEN-AGENT-001', severity: 'critical', module: 'child_process' },
@@ -214,13 +214,16 @@ function functionEntry(node) {
   if (!fn) return null
   if (!['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(fn.type)) return null
   if (!fn.body) return null // TS overload signature
-  const body = fn.body.type === 'BlockStatement'
-    ? fn.body
-    : { type: 'BlockStatement', body: [{ type: 'ExpressionStatement', expression: fn.body, start: fn.body.start, end: fn.body.end }] }
+  const expressionBody = fn.body.type === 'BlockStatement' ? null : fn.body
+  const body = expressionBody
+    ? { type: 'BlockStatement', body: [{ type: 'ExpressionStatement', expression: fn.body, start: fn.body.start, end: fn.body.end }] }
+    : fn.body
   return {
     param: firstParamName(fn.params?.[0]),
     params: (fn.params ?? []).map((param) => firstParamName(param)).filter(Boolean),
+    paramNodes: fn.params ?? [],
     body,
+    expressionBody,
     start: fn.start,
     name: fn.id?.name ?? null,
   }
@@ -440,16 +443,95 @@ function isFunctionNode(node) {
 function functionEntryFromNode(node, name = null) {
   const fn = unwrapExpression(node)
   if (!isFunctionNode(fn) || !fn.body) return null
-  const body = fn.body.type === 'BlockStatement'
-    ? fn.body
-    : { type: 'BlockStatement', body: [{ type: 'ExpressionStatement', expression: fn.body, start: fn.body.start, end: fn.body.end }] }
+  const expressionBody = fn.body.type === 'BlockStatement' ? null : fn.body
+  const body = expressionBody
+    ? { type: 'BlockStatement', body: [{ type: 'ExpressionStatement', expression: fn.body, start: fn.body.start, end: fn.body.end }] }
+    : fn.body
   return {
     param: firstParamName(fn.params?.[0]),
     params: (fn.params ?? []).map((param) => firstParamName(param)).filter(Boolean),
+    paramNodes: fn.params ?? [],
     body,
+    expressionBody,
     start: fn.start,
     name: name ?? fn.id?.name ?? null,
   }
+}
+
+function isThenCall(call) {
+  let callee = unwrapExpression(call?.callee)
+  if (callee?.type === 'ChainExpression') callee = unwrapExpression(callee.expression)
+  if (callee?.type !== 'MemberExpression') return false
+  if (!callee.computed) return callee.property?.name === 'then'
+  return staticStringOf(callee.property) === 'then'
+}
+
+function walkOwn(node, visit) {
+  if (!node || typeof node.type !== 'string' || FUNCTION_NODE_TYPES.has(node.type)) return
+  visit(node)
+  for (const key of Object.keys(node)) {
+    if (key === 'type' || key === 'start' || key === 'end' || key === 'loc' || key === 'range') continue
+    const child = node[key]
+    const children = Array.isArray(child) ? child : [child]
+    for (const item of children) {
+      if (!item || typeof item.type !== 'string' || FUNCTION_NODE_TYPES.has(item.type)) continue
+      walkOwn(item, visit)
+    }
+  }
+}
+
+function taintOptions(collected, extra = null) {
+  return { collected, promiseValues: extra?.promiseValues ?? null, callReturns: extra?.callReturns ?? null }
+}
+
+/**
+ * Proven source return of one function. Parameter passthrough and unknown
+ * calls do not count. `touches` is true when a modeled source exists but the
+ * returned value cannot be proven.
+ */
+function ownReturnTaint(entry, seed, collected, { allowArgs = false } = {}) {
+  const taints = new Map(seed)
+  const declarators = []
+  let touches = false
+  const note = (node) => {
+    if (node.type === 'CallExpression' && sourceCallTag(node)) touches = true
+    if (isSecretEnvRead(node)) touches = true
+    if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier' && node.init) declarators.push(node)
+    if (node.type === 'AssignmentExpression' && node.left?.type === 'Identifier' && node.right) {
+      declarators.push({ id: node.left, init: node.right })
+    }
+  }
+  if (entry?.body) walkOwn(entry.body, note)
+  let changed = true
+  let rounds = 0
+  while (changed && rounds < 6) {
+    changed = false
+    rounds += 1
+    for (const declarator of declarators) {
+      if (taints.has(declarator.id.name)) continue
+      const taint = expressionTaint(declarator.init, taints, null, taintOptions(collected))
+      if (!taint || (!allowArgs && taint.tag === 'args')) continue
+      taints.set(declarator.id.name, taint)
+      changed = true
+    }
+  }
+  const returns = []
+  if (entry?.expressionBody) returns.push(entry.expressionBody)
+  else if (entry?.body) {
+    walkOwn(entry.body, (node) => {
+      if (node.type === 'ReturnStatement') returns.push(node.argument ?? null)
+    })
+  }
+  let proven = null
+  let conflict = false
+  for (const expr of returns) {
+    if (!expr) continue
+    const taint = expressionTaint(expr, taints, null, taintOptions(collected))
+    if (!taint || (!allowArgs && taint.tag === 'args')) continue
+    if (!proven) proven = taint.crossReturn ? taint : { tag: taint.tag, source: taint.source }
+    else if (proven.tag !== taint.tag) conflict = true
+  }
+  return { taint: conflict ? null : proven, touches }
 }
 
 function isSecretEnvRead(node) {
@@ -480,25 +562,40 @@ function sourceCallTag(node) {
  * Only the already-modeled source-shaped calls (readFile/decode/env) can create
  * a new taint tag.
  */
-function expressionTaint(node, taints, toolArgName = 'args') {
+function expressionTaint(node, taints, toolArgName = 'args', options = null) {
   const target = unwrapExpression(node)
   if (!target) return null
-  if (target.type === 'ChainExpression') return expressionTaint(target.expression, taints, toolArgName)
+  const again = (child) => expressionTaint(child, taints, toolArgName, options)
+  if (target.type === 'ChainExpression') return again(target.expression)
   if (target.type === 'Identifier') return taints.get(target.name) ?? null
   if (target.type === 'MemberExpression') {
     if (isSecretEnvRead(target)) return { tag: 'env', source: calleeName(target) ?? 'process.env' }
     const objectName = target.object?.type === 'Identifier' ? target.object.name : null
-    if (objectName && objectName === toolArgName) {
+    if (toolArgName && objectName && objectName === toolArgName) {
       return { tag: 'args', source: calleeName(target) ?? toolArgName }
     }
     if (target.object?.type === 'Identifier' && taints.has(target.object.name)) return taints.get(target.object.name)
-    return expressionTaint(target.object, taints, toolArgName)
+    return again(target.object)
   }
-  if (target.type === 'CallExpression') return sourceCallTag(target)
+  if (target.type === 'CallExpression') {
+    if (options?.promiseValues?.has(target)) return options.promiseValues.get(target)
+    if (options?.callReturns?.has(target)) {
+      const info = options.callReturns.get(target)
+      if (info?.taint) return { ...info.taint, crossReturn: info }
+      if (info?.unresolved) return { tag: 'unresolved-return', source: info.label ?? 'return', crossReturn: info }
+    }
+    const raw = calleeName(target.callee)
+    if (raw === 'Promise.resolve' && target.arguments?.[0]) return again(target.arguments[0])
+    const read = valueProducingReadTag(target, options?.collected)
+    if (read) return read
+    const tagged = sourceCallTag(target)
+    if (tagged?.tag === 'decode') return tagged
+    return null
+  }
   if (target.type === 'NewExpression') return null
   if (target.type === 'ArrayExpression') {
     for (const element of target.elements ?? []) {
-      const taint = expressionTaint(element, taints, toolArgName)
+      const taint = again(element)
       if (taint) return taint
     }
     return null
@@ -506,10 +603,10 @@ function expressionTaint(node, taints, toolArgName = 'args') {
   if (target.type === 'ObjectExpression') {
     for (const prop of target.properties ?? []) {
       if (prop?.type === 'SpreadElement') {
-        const taint = expressionTaint(prop.argument, taints, toolArgName)
+        const taint = again(prop.argument)
         if (taint) return taint
       } else if (prop && prop.type === 'Property') {
-        const taint = expressionTaint(prop.value, taints, toolArgName)
+        const taint = again(prop.value)
         if (taint) return taint
       }
     }
@@ -517,30 +614,30 @@ function expressionTaint(node, taints, toolArgName = 'args') {
   }
   if (target.type === 'TemplateLiteral') {
     for (const expression of target.expressions ?? []) {
-      const taint = expressionTaint(expression, taints, toolArgName)
+      const taint = again(expression)
       if (taint) return taint
     }
     return null
   }
   if (target.type === 'BinaryExpression' || target.type === 'LogicalExpression') {
-    return expressionTaint(target.left, taints, toolArgName) ?? expressionTaint(target.right, taints, toolArgName)
+    return again(target.left) ?? again(target.right)
   }
   if (target.type === 'ConditionalExpression') {
-    return expressionTaint(target.consequent, taints, toolArgName) ?? expressionTaint(target.alternate, taints, toolArgName)
+    return again(target.consequent) ?? again(target.alternate)
   }
   if (target.type === 'SequenceExpression') {
     for (let i = (target.expressions ?? []).length - 1; i >= 0; i -= 1) {
-      const taint = expressionTaint(target.expressions[i], taints, toolArgName)
+      const taint = again(target.expressions[i])
       if (taint) return taint
     }
     return null
   }
-  if (target.type === 'AssignmentExpression') return expressionTaint(target.right, taints, toolArgName)
+  if (target.type === 'AssignmentExpression') return again(target.right)
   if (target.type === 'AwaitExpression' || target.type === 'YieldExpression'
     || target.type === 'UnaryExpression' || target.type === 'UpdateExpression') {
-    return expressionTaint(target.argument, taints, toolArgName)
+    return again(target.argument)
   }
-  if (target.type === 'SpreadElement') return expressionTaint(target.argument, taints, toolArgName)
+  if (target.type === 'SpreadElement') return again(target.argument)
   return null
 }
 
@@ -578,8 +675,9 @@ function callTargetParts(callee) {
   return null
 }
 
-function collectTaintedLocals(ast) {
+function collectTaintedLocals(ast, collected = null) {
   const taints = new Map()
+  const options = taintOptions(collected)
   let changed = true
   let rounds = 0
   while (changed && rounds < 6) {
@@ -588,7 +686,7 @@ function collectTaintedLocals(ast) {
     walk(ast, (node) => {
       if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier' && node.init) {
         if (taints.has(node.id.name)) return
-        const taint = expressionTaint(node.init, taints)
+        const taint = expressionTaint(node.init, taints, 'args', options)
         if (taint) {
           taints.set(node.id.name, taint)
           changed = true
@@ -596,7 +694,7 @@ function collectTaintedLocals(ast) {
       }
       if (node.type === 'AssignmentExpression' && node.left?.type === 'Identifier') {
         if (taints.has(node.left.name)) return
-        const taint = expressionTaint(node.right, taints)
+        const taint = expressionTaint(node.right, taints, 'args', options)
         if (taint) {
           taints.set(node.left.name, taint)
           changed = true
@@ -727,6 +825,11 @@ function analyzeFunctionFlow(entry, seedTaints, ctx, options = {}) {
   const localFunctions = collectLocalFunctions(entry.body)
   const callbackLookup = new Map(options.callbackScope ?? [])
   entry.params.forEach((param, index) => callbackLookup.set(param, { paramIndex: index }))
+  const promiseValues = new Map()
+  const flowTaint = (node, map = taints) => expressionTaint(node, map, ctx.toolArgName ?? 'args', taintOptions(ctx.collected, {
+    promiseValues,
+    callReturns: options.callReturns,
+  }))
 
   let changed = true
   let rounds = 0
@@ -736,13 +839,13 @@ function analyzeFunctionFlow(entry, seedTaints, ctx, options = {}) {
     for (const declarator of declarators) {
       if (declarator.id?.type === 'Identifier' && declarator.init) {
         if (taints.has(declarator.id.name)) continue
-        const taint = expressionTaint(declarator.init, taints, ctx.toolArgName ?? 'args')
+        const taint = flowTaint(declarator.init)
         if (taint) {
           taints.set(declarator.id.name, taint)
           changed = true
         }
       } else if (declarator.id?.type === 'ObjectPattern' && declarator.init) {
-        const taint = expressionTaint(declarator.init, taints, ctx.toolArgName ?? 'args')
+        const taint = flowTaint(declarator.init)
         if (!taint) continue
         for (const prop of declarator.id.properties ?? []) {
           const name = prop.value?.name
@@ -755,7 +858,7 @@ function analyzeFunctionFlow(entry, seedTaints, ctx, options = {}) {
     }
     for (const assignment of assignments) {
       if (assignment.left?.type !== 'Identifier') continue
-      const taint = expressionTaint(assignment.right, taints, ctx.toolArgName ?? 'args')
+      const taint = flowTaint(assignment.right)
       if (!taint) continue
       const name = assignment.left.name
       if (ctx.moduleBindings?.has(name) && !localNames.has(name)) {
@@ -777,6 +880,38 @@ function analyzeFunctionFlow(entry, seedTaints, ctx, options = {}) {
     return null
   }
 
+  // Direct `.then` on a value-producing read/decode/env/args expression.
+  // The fulfillment parameter is seeded; unknown receivers are not.
+  if (depth < 3) {
+    for (const call of calls.filter(isThenCall).reverse()) {
+      const callee = unwrapExpression(call.callee)
+      const receiver = callee?.type === 'MemberExpression' ? callee.object : null
+      const receiverTaint = flowTaint(receiver)
+      if (!receiverTaint || receiverTaint.tag === 'unresolved-return') continue
+      const fulfillment = call.arguments?.[0]
+      const value = unwrapExpression(fulfillment)
+      const bound = value?.type === 'Identifier' ? callbackLookup.get(value.name) : null
+      if (bound) {
+        callbacks.push({ paramIndex: bound.paramIndex, argIndex: 0, taint: receiverTaint, label: 'then(...)' })
+        continue
+      }
+      const cbEntry = callbackEntryFor(fulfillment)
+      const seededNames = fulfillmentNames(cbEntry?.paramNodes?.[0])
+      if (!cbEntry || seededNames.length === 0) continue
+      const seed = new Map(seededNames.map((name) => [name, receiverTaint]))
+      const sub = analyzeFunctionFlow(cbEntry, seed, ctx, {
+        depth: depth + 1,
+        callbackScope: callbackLookup,
+        callReturns: options.callReturns,
+      })
+      mergeFlow({ hits, callbacks, closureWrites, coverage }, sub, 'then(...)')
+      const returned = ownReturnTaint(cbEntry, seed, ctx.collected, { allowArgs: true })
+      if (returned.taint) {
+        promiseValues.set(call, returned.taint.crossReturn ? returned.taint : { ...returned.taint, crossReturn: receiverTaint.crossReturn })
+      }
+    }
+  }
+
   for (const call of calls) {
     const raw = calleeName(call.callee)
     const tail = raw ? raw.slice(raw.lastIndexOf('.') + 1) : null
@@ -785,7 +920,7 @@ function analyzeFunctionFlow(entry, seedTaints, ctx, options = {}) {
     const callbackBinding = raw ? callbackLookup.get(raw) : null
     if (callbackBinding) {
       for (let index = 0; index < (call.arguments ?? []).length; index += 1) {
-        const taint = expressionTaint(call.arguments[index], taints, ctx.toolArgName ?? 'args')
+        const taint = flowTaint(call.arguments[index])
         if (taint) {
           callbacks.push({ paramIndex: callbackBinding.paramIndex, argIndex: index, taint, label: `${raw}(...)` })
         }
@@ -819,7 +954,7 @@ function analyzeFunctionFlow(entry, seedTaints, ctx, options = {}) {
     if (method) {
       const callee = unwrapExpression(call.callee)
       if (callee?.type === 'MemberExpression') {
-        const inherited = expressionTaint(callee.object, taints, ctx.toolArgName ?? 'args')
+        const inherited = flowTaint(callee.object)
         if (inherited) {
           const callbackArg = call.arguments?.[0]
           const value = unwrapExpression(callbackArg)
@@ -852,7 +987,7 @@ function analyzeFunctionFlow(entry, seedTaints, ctx, options = {}) {
         local.params.forEach((param, index) => {
           const arg = call.arguments?.[index]
           if (!arg) return
-          const taint = expressionTaint(arg, taints, ctx.toolArgName ?? 'args')
+          const taint = flowTaint(arg)
           if (taint) paramTaints.set(param, taint)
         })
         if (paramTaints.size > 0) {
@@ -873,7 +1008,7 @@ function analyzeFunctionFlow(entry, seedTaints, ctx, options = {}) {
     if (!sink) continue
     if (sink.module && !bindingConfirmsBuiltin(sinkRaw, ctx.collected)) continue
     const taintedArg = (call.arguments ?? [])
-      .map((arg) => expressionTaint(arg, taints, ctx.toolArgName ?? 'args'))
+      .map((arg) => flowTaint(arg))
       .find(Boolean)
     if (!taintedArg) continue
     hits.push({ sink: { ...sink, callee: sinkName, start: call.start }, taint: taintedArg, call })
@@ -912,6 +1047,107 @@ function chainId(chain) {
  * @param {string} root scan root
  * @param {{nodes: object[], edges: object[], unresolved: object[], failures: object[], complete: boolean}} graph
  */
+function analyzeCallerReturnScope(entry, ctx, callReturns, seed = new Map(), depth = 0) {
+  const hits = []
+  const skips = []
+  const taints = new Map(seed)
+  const declarators = []
+  const calls = []
+  const body = entry?.body ?? entry
+  walkOwn(body, (node) => {
+    if (node.type === 'VariableDeclarator') declarators.push(node)
+    if (node.type === 'AssignmentExpression' && node.left?.type === 'Identifier' && node.right) {
+      declarators.push({ id: node.left, init: node.right })
+    }
+    if (node.type === 'CallExpression') calls.push(node)
+  })
+  const optionsFor = (promiseValues) => taintOptions(ctx.collected, { promiseValues, callReturns })
+  let changed = true
+  let rounds = 0
+  while (changed && rounds < 6) {
+    changed = false
+    rounds += 1
+    for (const declarator of declarators) {
+      if (declarator.id?.type === 'Identifier' && declarator.init && !taints.has(declarator.id.name)) {
+        const taint = expressionTaint(declarator.init, taints, 'args', optionsFor(null))
+        if (taint) {
+          taints.set(declarator.id.name, taint)
+          changed = true
+        }
+      } else if (declarator.id?.type === 'ObjectPattern' && declarator.init) {
+        const taint = expressionTaint(declarator.init, taints, 'args', optionsFor(null))
+        if (!taint) continue
+        for (const name of fulfillmentNames(declarator.id)) {
+          if (!taints.has(name)) {
+            taints.set(name, taint)
+            changed = true
+          }
+        }
+      }
+    }
+  }
+  const promiseValues = new Map()
+  if (depth < 3) {
+    for (const call of calls.filter(isThenCall).reverse()) {
+      const callee = unwrapExpression(call.callee)
+      if (callee?.type !== 'MemberExpression') continue
+      const receiverTaint = expressionTaint(callee.object, taints, 'args', optionsFor(promiseValues))
+      if (!receiverTaint) continue
+      const cbEntry = functionEntryFromNode(call.arguments?.[0])
+      const names = fulfillmentNames(cbEntry?.paramNodes?.[0])
+      if (!cbEntry || names.length === 0) continue
+      const sub = analyzeCallerReturnScope(
+        cbEntry,
+        ctx,
+        callReturns,
+        new Map(names.map((name) => [name, receiverTaint])),
+        depth + 1,
+      )
+      hits.push(...sub.hits)
+      skips.push(...sub.skips)
+      if (sub.returnTaint) promiseValues.set(call, sub.returnTaint)
+    }
+  }
+  for (const call of calls) {
+    if (isThenCall(call)) continue
+    const sinkRaw = calleeName(call.callee) ?? callTargetName(call.callee)
+    if (!sinkRaw) continue
+    const sinkName = resolveCrossFileSink(sinkRaw, ctx.collected)
+    if (!sinkName) continue
+    const sink = SINKS.find((item) => item.names.includes(sinkName))
+    if (!sink) continue
+    if (sink.module && !bindingConfirmsBuiltin(sinkRaw, ctx.collected)) continue
+    const argTaints = (call.arguments ?? [])
+      .map((arg) => expressionTaint(arg, taints, 'args', optionsFor(promiseValues)))
+      .filter(Boolean)
+    const resolved = argTaints.find((taint) => taint.crossReturn && taint.tag !== 'unresolved-return')
+    const unresolved = argTaints.find((taint) => taint.tag === 'unresolved-return')
+    if (resolved) {
+      hits.push({
+        sink: { ...sink, callee: sinkName, start: call.start },
+        taint: resolved,
+        call,
+        info: resolved.crossReturn,
+      })
+    } else if (unresolved?.crossReturn) {
+      skips.push({ info: unresolved.crossReturn, call })
+    }
+  }
+  let returnTaint = null
+  const returns = []
+  if (entry?.expressionBody) returns.push(entry.expressionBody)
+  else {
+    walkOwn(body, (node) => {
+      if (node.type === 'ReturnStatement' && node.argument) returns.push(node.argument)
+    })
+  }
+  for (const expr of returns) {
+    const taint = expressionTaint(expr, taints, 'args', optionsFor(promiseValues))
+    if (taint?.crossReturn || taint?.tag === 'unresolved-return') returnTaint = taint
+  }
+  return { hits, skips, returnTaint }
+}
+
 export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
   const findings = []
   const attackChains = []
@@ -928,13 +1164,15 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
       const content = readFileSync(join(root, node.path), 'utf8')
       const ast = parseSource(content, node.path).ast
       const index = ast ? indexExports(ast) : null
+      const collected = ast ? collectImports(ast) : { imports: new Map(), aliases: new Map(), cpVars: new Set() }
+      if (ast) applyAwaitImportBindings(ast, collected)
       sourceByPath.set(node.path, {
         path: node.path,
         content,
         ast,
         index,
-        collected: ast ? collectImports(ast) : { imports: new Map(), aliases: new Map(), cpVars: new Set() },
-        taints: ast ? collectTaintedLocals(ast) : new Map(),
+        collected,
+        taints: ast ? collectTaintedLocals(ast, collected) : new Map(),
         moduleBindings: new Set(index?.moduleBindings ?? []),
       })
     } catch (error) {
@@ -1168,6 +1406,74 @@ export function analyzeCrossFileTaint(root, graph, { maxDepth = 4 } = {}) {
       }
     }
     if (!changed) break
+  }
+
+  const callReturns = new Map()
+  const returnProfiles = new Map()
+  for (const edge of graph?.edges ?? []) {
+    const from = sourceByPath.get(edge.from)
+    const to = sourceByPath.get(edge.to)
+    if (!from?.ast || !to?.index) continue
+    const bindings = bindingsForEdge(from.content, edge, from.ast)
+    for (const binding of bindings) {
+      for (const invocation of collectInvocationsForBinding(from.ast, binding, from.taints)) {
+        if (!Array.isArray(invocation.targetPath) || invocation.targetPath.length === 0) continue
+        const resolved = resolveExportEntry(to.index, invocation.targetPath, { instance: invocation.instance })
+        if (!resolved) continue
+        const profileKey = `${edge.to}\0${invocation.targetPath.join('.')}\0${invocation.instance ? '1' : '0'}`
+        let profile = returnProfiles.get(profileKey)
+        if (!profile) {
+          profile = ownReturnTaint(resolved, new Map(), to.collected)
+          returnProfiles.set(profileKey, profile)
+        }
+        if (!profile.taint && !profile.touches) continue
+        callReturns.set(invocation.call, {
+          taint: profile.taint,
+          unresolved: !profile.taint && profile.touches,
+          edge,
+          binding,
+          entry: resolved,
+          label: invocation.targetPath.join('.'),
+        })
+      }
+    }
+  }
+  if (callReturns.size > 0) {
+    const files = new Set([...callReturns.values()].map((info) => info.edge.from))
+    for (const filePath of files) {
+      const file = sourceByPath.get(filePath)
+      if (!file?.ast) continue
+      const scopes = [{ body: file.ast, expressionBody: null, params: [], paramNodes: [] }]
+      walk(file.ast, (node) => {
+        if (!FUNCTION_NODE_TYPES.has(node.type) || !node.body) return
+        const scope = functionEntryFromNode(node)
+        if (scope) scopes.push(scope)
+      })
+      for (const scope of scopes) {
+        const sub = analyzeCallerReturnScope(scope, { collected: file.collected }, callReturns)
+        for (const hit of sub.hits) {
+          if (!hit.info?.edge) continue
+          addHit({
+            fromPath: hit.info.edge.from,
+            toPath: hit.info.edge.to,
+            source: hit.taint.source,
+            sinkHit: hit,
+            binding: hit.info.binding,
+            entry: hit.info.entry,
+            trace: ['return'],
+            sinkFile: file,
+          })
+        }
+        for (const skip of sub.skips) {
+          addSkip({
+            reason: 'cross-file-return-unresolved',
+            path: file.path,
+            member: skip.info?.label ?? skip.info?.binding?.local ?? 'return',
+            start: skip.call?.start,
+          })
+        }
+      }
+    }
   }
 
   return {
