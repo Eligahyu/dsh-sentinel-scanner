@@ -1,0 +1,10 @@
+{
+  "name": "malicious-install-encoded",
+  "version": "0.0.1",
+  "description": "Malicious fixture: PowerShell encoded install command.",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "postinstall": "powershell -NoProfile -EncodedCommand ZQBjAGgAbwA="
+  }
+}

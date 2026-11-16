@@ -94,6 +94,12 @@ export const RULES = Object.freeze([
         re: /(?:require|import)\s*\(\s*["'`](?:https?:|data:)/i,
         note: '从 URL 动态加载模块',
       },
+      {
+        // Shell scripts and quoted command strings. A leading comment marker
+        // is not a quote, so `# curl … | bash` stays a comment.
+        re: /(?:^|\n|["'`])[ \t]*(?:curl|wget)\b[^\n]{0,240}\|\s*(?:sudo\s+)?(?:ba)?sh\b/i,
+        note: 'shell 管道下载即执行',
+      },
     ],
   },
   {
@@ -152,12 +158,16 @@ export const RULES = Object.freeze([
     severity: 'high',
     category: 'execution',
     message: '对解码内容执行(eval(atob(...)) 等)',
-    description: '先 base64/URI 解码再执行,是绕过静态检测的经典混淆手段。',
+    description: '先 base64/URI 解码再执行,是绕过静态检测的经典混淆手段。shell 的 base64 -d | sh 与 eval "$(base64 …)" 同样算。',
     recommendation: '视为恶意特征:正常插件不需要对解码后的字符串执行代码。',
     filePattern: CODE,
     contentPatterns: [
       {
         re: /(?:eval|Function|exec|runInNewContext)\s*\(\s*(?:atob|Buffer\.from|base64decode|decodeURIComponent|unescape|fromCharCode)\s*\(/i,
+      },
+      {
+        re: /(?:^|\n|["'`])[ \t]*[^\n]{0,120}\bbase64\b[^\n]{0,80}(?:-d|--decode)\b[^\n]{0,40}\|\s*(?:ba)?sh\b|(?:^|\n|["'`])[ \t]*eval\b[^\n]{0,200}\bbase64\b/i,
+        note: 'shell 解码后执行',
       },
     ],
   },
@@ -373,12 +383,19 @@ export const RULES = Object.freeze([
     severity: 'critical',
     category: 'install',
     message: '安装脚本下载并执行远程内容',
-    description: '安装脚本中包含 curl/wget/网络地址/base64/chmod 等,典型形状是 curl … | bash。',
+    description: '安装脚本中包含 curl/wget/base64/chmod、管道到 shell,或非 echo/printf 的网络地址。典型形状是 curl … | bash。仅在 echo/printf 里出现的文档链接不算。',
     recommendation: '拒绝安装。安装即执行远程代码的插件不可信。',
     filePattern: /package\.json$/i,
     contentPatterns: [
       {
-        re: /"(?:preinstall|install|postinstall|prepare|prepublish)"\s*:\s*"[^"]{0,400}?(?:curl|wget|https?:|base64|chmod\s+\+x|eval)[^"]{0,200}"/i,
+        re: /"(?:preinstall|install|postinstall|prepare|prepublish)"\s*:\s*"[^"]{0,400}?(?:curl|wget|base64|chmod\s+\+x|\beval\b|EncodedCommand|Invoke-Expression|DownloadString|DownloadFile|certutil|bitsadmin|Invoke-WebRequest|\biwr\b|\bIEX\b|\|\s*(?:ba)?sh\b)[^"]{0,200}"/i,
+        note: '下载、解码或管道到 shell',
+      },
+      {
+        // A documentation URL printed by echo/printf is not a downloader.
+        // Any other URL in a lifecycle script stays critical.
+        re: /"(?:preinstall|install|postinstall|prepare|prepublish)"\s*:\s*"(?![^"\\]{0,500}\b(?:echo|printf)\b[^"\\]{0,500}")[^"]{0,400}?https?:/i,
+        note: '生命周期脚本中的非提示性 URL',
       },
     ],
   },
