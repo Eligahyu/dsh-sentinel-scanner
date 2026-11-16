@@ -13,7 +13,7 @@
 | `SEN-CRED-003` | 🟠 high(20 分) | credentials | **hardcoded-secret** | 代码中出现形似真实 API key / token 的字符串(sk-…、AKIA…、ghp_…、JWT 等)。 |
 | `SEN-CRED-004` | 🟡 medium(8 分) | credentials | **dotenv-loading** | 插件读取 .env 或环境文件。本机开发场景常见,但需确认 .env 内容不会离开本机。 |
 | `SEN-CRED-005` | 🟡 medium(8 分) | credentials | **credential-file-write** | 代码向 .ssh/.aws/.npmrc 等敏感路径写入内容(注入密钥或篡改配置)。 |
-| `SEN-EXFIL-001` | 🔴 critical(50 分) | exfiltration | **suspicious-endpoint** | 代码向已知的"接收任意数据"类服务发起请求:webhook.site、requestbin、pastebin、Discord webhook、Telegram bot、ngrok/serveo 隧道、oast/interactsh 等。 |
+| `SEN-EXFIL-001` | 🔴 critical(50 分) | exfiltration | **suspicious-endpoint** | 代码向已知的"接收任意数据"类服务发起请求:webhook.site、requestbin、pastebin、Discord webhook（/api/webhooks）、Telegram bot、ngrok/serveo 隧道、oast/interactsh 等。普通 Discord API（/api/v10）和仅出现 discord 字样不算。 |
 | `SEN-EXFIL-002` | 🟠 high(20 分) | exfiltration | **network-with-secrets** | 网络请求的参数/头/体中拼接了 process.env 或密钥变量,存在把凭据外传的风险。 |
 | `SEN-EXFIL-003` | 🟡 medium(8 分) | exfiltration | **encoded-env-in-network** | 请求前对 env/密钥做 base64 或编码处理,通常用于规避 URL 字符限制或检测。 |
 | `SEN-OBF-001` | 🟠 high(20 分) | obfuscation | **encoded-payload** | 源码中出现超过 200 字符的 base64、连续 40+ 个 \x 十六进制转义或 80+ 字符的纯字母数字长串。注:\uXXXX unicode 转义不算——那是转译器/压缩器对非 ASCII 文本(i18n 文案等)的常规处理,在中文生态里普遍存在。 |
