@@ -543,8 +543,12 @@ See the [DSH pre-install integration design](docs/integration-dsh-preinstall.md)
 ## Reports and integrations
 
 - **JSON:** canonical schema v2 for tools, storage, and custom policies.
-- **SARIF 2.1.0:** GitHub Code Scanning with relative locations and stable
-  fingerprints.
+- **SARIF 2.1.0:** GitHub Code Scanning with repository-relative locations and
+  stable fingerprints in `properties.dshFingerprint` (not `partialFingerprints`).
+  Lines and columns are 1-based. A single-file target is reported against its
+  directory, so the artifact URI is the file name. `invocations[0].executionSuccessful`
+  is false when the static scan is incomplete, and incomplete or truncated
+  results add `toolExecutionNotifications`.
 - **HTML:** portable, single-file human-readable report.
 - **CycloneDX / SPDX:** SBOM export backed by normalized dependency data.
 - **Baseline:** compare findings by fingerprint to focus on newly introduced risk.
