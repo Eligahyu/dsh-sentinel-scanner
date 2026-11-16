@@ -44,7 +44,7 @@
 | `SEN-AGENT-002` | 🟠 high(20 分) | agent | **model-controlled-file-read** | 模型可控参数进入文件读取调用,若无 workspace containment 则模型可读任意文件。 |
 | `SEN-AGENT-003` | 🟠 high(20 分) | agent | **model-controlled-file-write** | 模型可控参数进入文件写入调用,可写 HOME / 系统目录 / DSH profile / 其他插件目录。 |
 | `SEN-AGENT-004` | 🟠 high(20 分) | agent | **model-controlled-network-target** | 模型可控参数成为网络请求 URL,即 SSRF / 任意出网能力面。 |
-| `SEN-TAINT-001` | 🔴 critical(50 分) | taint | **secret-to-network** | process.env 中的凭据(API key/token/secret)直接或经变量传播进入网络请求。 |
+| `SEN-TAINT-001` | 🔴 critical(50 分) | taint | **secret-to-network** | process.env 中的凭据(API key/token/secret)直接或经变量传播进入网络请求,包括 fetch/axios 和已导入的 dns.lookup/dns.resolve。Promise.resolve 不算网络出口。 |
 | `SEN-TAINT-002` | 🟠 high(20 分) | taint | **workspace-to-network** | readFile 等读取的结果(可能是工作区源码/配置)进入网络请求体。 |
 | `SEN-TAINT-003` | 🔴 critical(50 分) | taint | **decode-to-exec-flow** | base64/hex/URI 解码(Buffer.from/atob/fromCharCode 等)的结果进入 eval/Function/exec。别名(const run = eval、Function.prototype.constructor、const decode = atob)和 new vm.Script(decoded) 同样算。 |
 | `SEN-AGENT-005` | 🟡 medium(8 分) | agent | **tool-prompt-poisoning** | defineTool 描述或指令文本含 "ignore previous instructions" / "do not tell the user" 等短语。注意:防御性说明也可能出现同类文字,需结合上下文。 |
